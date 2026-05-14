@@ -92,7 +92,7 @@ class DummyReceiptLog(ReceiptLogPort):
     def record(self, receipt: object) -> None:
         self._records[str(len(self._records))] = receipt
 
-    def start_pending_receipt(self, **kwargs) -> None:
+    def start_pending_receipt(self, *, started_call) -> None:
         return None
 
     def complete_pending_receipt(self, receipt, settle_usage):

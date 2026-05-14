@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from hashlib import sha256
 from uuid import UUID
 
 from harnyx_commons.json_types import JsonValue
@@ -114,8 +116,84 @@ class ToolCall:
         return self.outcome == ToolCallOutcome.OK
 
 
+@dataclass(frozen=True, slots=True)
+class StartedToolCall:
+    """A hosted tool invocation that has started and can become a final receipt."""
+
+    receipt_id: str
+    session_id: UUID
+    session_active_attempt: int
+    uid: int
+    tool: ToolName
+    issued_at: datetime
+    request_payload: JsonValue | None
+    result_policy: ToolResultPolicy
+    execution: ToolExecutionFacts
+
+    def __post_init__(self) -> None:
+        if not self.receipt_id.strip():
+            raise ValueError("receipt_id must not be empty")
+        if self.session_active_attempt < 0:
+            raise ValueError("session_active_attempt must be non-negative")
+        if self.uid <= 0:
+            raise ValueError("uid must be positive")
+        if self.tool not in TOOL_NAMES:
+            raise ValueError(f"unsupported tool {self.tool!r}")
+
+    def materialize(
+        self,
+        *,
+        outcome: ToolCallOutcome,
+        response_payload: JsonValue | None = None,
+        results: tuple[ToolResult, ...] = (),
+        result_policy: ToolResultPolicy | None = None,
+        cost_usd: float | None = None,
+        extra: Mapping[str, str] | None = None,
+        execution: ToolExecutionFacts | None = None,
+    ) -> ToolCall:
+        """Build the final receipt for this started invocation."""
+        merged_extra = {
+            "issued_at": self.issued_at.isoformat(),
+            "session_active_attempt": str(self.session_active_attempt),
+        }
+        if cost_usd is not None:
+            merged_extra["cost_usd"] = f"{cost_usd:.6f}"
+        if extra is not None:
+            merged_extra.update(extra)
+
+        return ToolCall(
+            receipt_id=self.receipt_id,
+            session_id=self.session_id,
+            uid=self.uid,
+            tool=self.tool,
+            issued_at=self.issued_at,
+            outcome=outcome,
+            details=ToolCallDetails(
+                request_hash=_hash_json_payload(self.request_payload),
+                request_payload=self.request_payload,
+                response_hash=(
+                    None if response_payload is None else _hash_json_payload(response_payload)
+                ),
+                response_payload=response_payload,
+                results=results,
+                result_policy=(
+                    self.result_policy if result_policy is None else result_policy
+                ),
+                cost_usd=cost_usd,
+                extra=merged_extra,
+                execution=execution or self.execution,
+            ),
+        )
+
+
+def _hash_json_payload(payload: JsonValue | None) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(serialized).hexdigest()
+
+
 __all__ = [
     "IN_FLIGHT_LLM_UNKNOWN_EVIDENCE",
+    "StartedToolCall",
     "ToolCallDetails",
     "ToolExecutionFacts",
     "SearchToolResult",

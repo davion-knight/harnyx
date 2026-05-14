@@ -16,14 +16,14 @@ from harnyx_commons.application.ports.token_registry import TokenRegistryPort
 from harnyx_commons.domain.session import Session, SessionStatus
 from harnyx_commons.domain.tool_call import (
     SearchToolResult,
+    StartedToolCall,
     ToolCall,
-    ToolCallDetails,
     ToolCallOutcome,
     ToolExecutionFacts,
     ToolResult,
     ToolResultPolicy,
 )
-from harnyx_commons.errors import BudgetExceededError
+from harnyx_commons.errors import BudgetExceededError, ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
 from harnyx_commons.llm.pricing import price_llm, price_search
 from harnyx_commons.llm.schema import LlmResponse
@@ -234,27 +234,25 @@ class ToolExecutor:
         self._validate_token(session.session_id, request.token)
         receipt_id = str(uuid4())
         issued_at = self._clock()
-        self._receipts.start_pending_receipt(
+        started_call = StartedToolCall(
             receipt_id=receipt_id,
             session_id=session.session_id,
             session_active_attempt=session.active_attempt,
             uid=session.uid,
             tool=request.tool,
             issued_at=issued_at,
-            details=self._build_pending_details(
-                request,
-                request_payload=request_payload,
-                issued_at=issued_at,
-                started_at=started_at,
-                session_active_attempt=session.active_attempt,
-            ),
+            request_payload=request_payload,
+            result_policy=_resolve_result_policy(request.tool),
+            execution=ToolExecutionFacts(started_at=started_at),
+        )
+        self._receipts.start_pending_receipt(
+            started_call=started_call,
         )
         try:
             result = await self._execute_pending_receipt_async(
                 session,
                 request,
-                receipt_id=receipt_id,
-                issued_at=issued_at,
+                started_call=started_call,
                 started_at=started_at,
                 debug_call_id=debug_call_id,
                 request_payload=request_payload,
@@ -272,13 +270,35 @@ class ToolExecutor:
         session: Session,
         request: ToolInvocationRequest,
         *,
-        receipt_id: str,
-        issued_at: datetime,
+        started_call: StartedToolCall,
         started_at: datetime,
         debug_call_id: str,
         request_payload: JsonValue | None,
     ) -> _ExecutionResult:
-        invocation_output = await self._invoke_tool_output_async(request)
+        try:
+            invocation_output = await self._invoke_tool_output_async(request)
+        except (ToolProviderError, ToolInvocationTimeoutError) as exc:
+            finished_at = self._clock()
+            failed_receipt = started_call.materialize(
+                outcome=_tool_failure_outcome(exc),
+                response_payload=None,
+                results=(),
+                cost_usd=None,
+                extra={
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+                execution=ToolExecutionFacts(
+                    elapsed_ms=_elapsed_ms_between(started_at, finished_at),
+                    started_at=started_at,
+                    finished_at=finished_at,
+                ),
+            )
+            self._receipts.complete_pending_receipt(
+                failed_receipt,
+                settle_usage=lambda: (session, False),
+            )
+            raise
         finished_at = self._clock()
         results, result_policy = self._build_results(request, invocation_output.public_payload)
         llm_tokens, usage_details, call_cost = self._extract_usage(
@@ -286,22 +306,17 @@ class ToolExecutor:
             invocation_output.public_payload,
             results,
         )
-        receipt = self._build_receipt(
-            request,
-            session,
-            invocation_output.public_payload,
-            results,
-            result_policy,
-            receipt_id=receipt_id,
-            issued_at=issued_at,
-            request_payload=request_payload,
+        receipt = started_call.materialize(
+            outcome=ToolCallOutcome.OK,
+            response_payload=invocation_output.public_payload,
+            results=results,
+            result_policy=result_policy,
             cost_usd=call_cost,
             execution=_merge_execution_facts(
                 invocation_output.execution,
                 started_at=started_at,
                 finished_at=finished_at,
             ),
-            session_active_attempt=session.active_attempt,
         )
         completion = self._receipts.complete_pending_receipt(
             receipt,
@@ -441,68 +456,6 @@ class ToolExecutor:
         if not self._tokens.verify(session_id, presented):
             raise PermissionError("invalid session token presented for tool execution")
 
-    def _build_receipt(
-        self,
-        request: ToolInvocationRequest,
-        session: Session,
-        response_payload: object,
-        results: tuple[ToolResult, ...],
-        result_policy: ToolResultPolicy,
-        *,
-        receipt_id: str,
-        issued_at: datetime,
-        request_payload: JsonValue | None,
-        cost_usd: float | None = None,
-        execution: ToolExecutionFacts | None = None,
-        session_active_attempt: int,
-    ) -> ToolCall:
-        normalized_response: JsonValue | None = _normalize_payload(response_payload)
-        extra: dict[str, str] = {
-            "issued_at": issued_at.isoformat(),
-            "session_active_attempt": str(session_active_attempt),
-        }
-        if cost_usd is not None:
-            extra["cost_usd"] = f"{cost_usd:.6f}"
-        return ToolCall(
-            receipt_id=receipt_id,
-            session_id=session.session_id,
-            uid=session.uid,
-            tool=request.tool,
-            issued_at=issued_at,
-            outcome=ToolCallOutcome.OK,
-            details=ToolCallDetails(
-                request_hash=_hash_payload(request_payload),
-                request_payload=request_payload,
-                response_hash=_hash_payload(response_payload),
-                response_payload=normalized_response,
-                results=results,
-                result_policy=result_policy,
-                cost_usd=cost_usd,
-                extra=extra,
-                execution=execution,
-            ),
-        )
-
-    def _build_pending_details(
-        self,
-        request: ToolInvocationRequest,
-        *,
-        request_payload: JsonValue | None,
-        issued_at: datetime,
-        started_at: datetime,
-        session_active_attempt: int,
-    ) -> ToolCallDetails:
-        return ToolCallDetails(
-            request_hash=_hash_payload(request_payload),
-            request_payload=request_payload,
-            result_policy=_resolve_result_policy(request.tool),
-            extra={
-                "issued_at": issued_at.isoformat(),
-                "session_active_attempt": str(session_active_attempt),
-            },
-            execution=ToolExecutionFacts(started_at=started_at),
-        )
-
 
 def _normalize_invocation_output(value: object) -> ToolInvocationOutput:
     if isinstance(value, ToolInvocationOutput):
@@ -528,6 +481,18 @@ def _merge_execution_facts(
     )
 
 
+def _elapsed_ms_between(started_at: datetime, finished_at: datetime) -> float:
+    return (finished_at - started_at).total_seconds() * 1000.0
+
+
+def _tool_failure_outcome(
+    exc: ToolProviderError | ToolInvocationTimeoutError,
+) -> ToolCallOutcome:
+    if isinstance(exc, ToolInvocationTimeoutError):
+        return ToolCallOutcome.TIMEOUT
+    return ToolCallOutcome.PROVIDER_ERROR
+
+
 def _normalize_payload(value: object) -> JsonValue | None:
     if value is None:
         return None
@@ -538,15 +503,6 @@ def _normalize_payload(value: object) -> JsonValue | None:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_normalize_payload(item) for item in value]
     return str(value)
-
-
-def _hash_payload(payload: object) -> str:
-    import json
-    from hashlib import sha256
-
-    normalized = _normalize_payload(payload)
-    serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return sha256(serialized).hexdigest()
 
 
 def _build_budget_snapshot(session: Session) -> ToolBudgetSnapshot:

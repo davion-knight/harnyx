@@ -128,6 +128,8 @@ class UsageSummarizer:
         for receipt in receipts:
             if not is_search_tool(receipt.tool):
                 continue
+            if not receipt.is_successful():
+                continue
             total_cost += self._search_cost(receipt.tool, receipt)
             call_count += 1
 

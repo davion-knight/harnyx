@@ -24,10 +24,12 @@ from harnyx_commons.domain.session import LlmUsageTotals, Session, SessionStatus
 from harnyx_commons.domain.tool_call import (
     IN_FLIGHT_LLM_UNKNOWN_EVIDENCE,
     SearchToolResult,
+    StartedToolCall,
     ToolCall,
     ToolCallDetails,
     ToolCallOutcome,
     ToolExecutionFacts,
+    ToolResultPolicy,
 )
 from harnyx_commons.domain.tool_usage import SearchToolUsageSummary, ToolUsageSummary
 from harnyx_commons.errors import SessionBudgetExhaustedError
@@ -316,6 +318,54 @@ def test_usage_summarizer_falls_back_to_referenceable_result_count_when_search_c
     assert total_tool_usage.search_tool.call_count == 1
     assert total_tool_usage.search_tool.cost == pytest.approx(0.0002)
     assert total_tool_usage.search_tool_cost == pytest.approx(0.0002)
+
+
+def test_usage_summarizer_ignores_failed_search_receipts() -> None:
+    session = Session(
+        session_id=uuid4(),
+        uid=7,
+        task_id=uuid4(),
+        issued_at=datetime(2025, 10, 17, 12, tzinfo=UTC),
+        expires_at=datetime(2025, 10, 17, 13, tzinfo=UTC),
+        budget_usd=1.0,
+        usage=SessionUsage(),
+    )
+    successful = ToolCall(
+        receipt_id="successful-search",
+        session_id=session.session_id,
+        uid=session.uid,
+        tool="search_web",
+        issued_at=datetime(2025, 10, 17, 12, 1, tzinfo=UTC),
+        outcome=ToolCallOutcome.OK,
+        details=ToolCallDetails(
+            request_hash="successful-search-req",
+            response_hash="successful-search-res",
+            cost_usd=0.02,
+            response_payload={"data": [{"link": "https://example.com"}]},
+        ),
+    )
+    failed = ToolCall(
+        receipt_id="failed-search",
+        session_id=session.session_id,
+        uid=session.uid,
+        tool="search_web",
+        issued_at=datetime(2025, 10, 17, 12, 2, tzinfo=UTC),
+        outcome=ToolCallOutcome.PROVIDER_ERROR,
+        details=ToolCallDetails(
+            request_hash="failed-search-req",
+            request_payload={"args": [], "kwargs": {"query": "Task B"}},
+            response_hash=None,
+            response_payload=None,
+            cost_usd=None,
+            extra={"error_type": "ToolProviderError", "error_message": "tool provider failed"},
+        ),
+    )
+
+    _, total_tool_usage = UsageSummarizer().summarize(session, (successful, failed))
+
+    assert total_tool_usage.search_tool.call_count == 1
+    assert total_tool_usage.search_tool.cost == pytest.approx(0.02)
+    assert total_tool_usage.search_tool_cost == pytest.approx(0.02)
 
 
 def test_usage_summarizer_preserves_reasoning_tokens_in_llm_summary() -> None:
@@ -1148,19 +1198,18 @@ async def test_evaluation_runner_records_unknown_inflight_timeout_tool_call_at_e
     issued = runner._issue_session(batch_id=uuid4(), uid=artifact.uid, task=task)
     attempt = runner._begin_session_attempt(issued.session.session_id)
     receipt_log.start_pending_receipt(
-        receipt_id="pending-llm",
-        session_id=attempt.session.session_id,
-        session_active_attempt=attempt.session.active_attempt,
-        uid=artifact.uid,
-        tool="llm_chat",
-        issued_at=datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
-        details=ToolCallDetails(
-            request_hash="request-hash",
+        started_call=StartedToolCall(
+            receipt_id="pending-llm",
+            session_id=attempt.session.session_id,
+            session_active_attempt=attempt.session.active_attempt,
+            uid=artifact.uid,
+            tool="llm_chat",
+            issued_at=datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
             request_payload={
                 "args": [],
                 "kwargs": {"model": "google/gemma-4-31B-turbo-TEE"},
             },
-            extra={"session_active_attempt": str(attempt.session.active_attempt)},
+            result_policy=ToolResultPolicy.LOG_ONLY,
             execution=ToolExecutionFacts(started_at=datetime(2025, 10, 17, 12, 0, tzinfo=UTC)),
         ),
     )

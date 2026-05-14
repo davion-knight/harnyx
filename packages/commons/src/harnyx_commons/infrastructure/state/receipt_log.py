@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, replace
 from datetime import datetime
 from threading import Condition, Lock
 from uuid import UUID
@@ -13,23 +12,12 @@ from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
 from harnyx_commons.domain.session import Session
 from harnyx_commons.domain.tool_call import (
     IN_FLIGHT_LLM_UNKNOWN_EVIDENCE,
+    StartedToolCall,
     ToolCall,
-    ToolCallDetails,
     ToolCallOutcome,
     ToolExecutionFacts,
 )
 from harnyx_commons.tools.types import ToolName
-
-
-@dataclass(frozen=True, slots=True)
-class _PendingReceipt:
-    receipt_id: str
-    session_id: UUID
-    session_active_attempt: int
-    uid: int
-    tool: ToolName
-    issued_at: datetime
-    details: ToolCallDetails
 
 
 class InMemoryReceiptLog(ReceiptLogPort):
@@ -38,7 +26,7 @@ class InMemoryReceiptLog(ReceiptLogPort):
     def __init__(self) -> None:
         self._receipts: dict[str, ToolCall] = {}
         self._session_index: defaultdict[UUID, set[str]] = defaultdict(set)
-        self._pending: dict[str, _PendingReceipt] = {}
+        self._pending: dict[str, StartedToolCall] = {}
         self._pending_by_session: defaultdict[UUID, set[str]] = defaultdict(set)
         self._closed_windows: set[tuple[UUID, int, ToolName]] = set()
         self._lock = Lock()
@@ -52,33 +40,23 @@ class InMemoryReceiptLog(ReceiptLogPort):
     def start_pending_receipt(
         self,
         *,
-        receipt_id: str,
-        session_id: UUID,
-        session_active_attempt: int,
-        uid: int,
-        tool: ToolName,
-        issued_at: datetime,
-        details: ToolCallDetails,
+        started_call: StartedToolCall,
     ) -> None:
         with self._condition:
-            window = (session_id, session_active_attempt, tool)
+            window = (
+                started_call.session_id,
+                started_call.session_active_attempt,
+                started_call.tool,
+            )
             if window in self._closed_windows:
                 raise RuntimeError(
                     "cannot start pending receipt after timeout review window closed"
                 )
+            receipt_id = started_call.receipt_id
             if receipt_id in self._receipts or receipt_id in self._pending:
                 raise RuntimeError(f"receipt {receipt_id} already exists")
-            pending = _PendingReceipt(
-                receipt_id=receipt_id,
-                session_id=session_id,
-                session_active_attempt=session_active_attempt,
-                uid=uid,
-                tool=tool,
-                issued_at=issued_at,
-                details=details,
-            )
-            self._pending[receipt_id] = pending
-            self._pending_by_session[session_id].add(receipt_id)
+            self._pending[receipt_id] = started_call
+            self._pending_by_session[started_call.session_id].add(receipt_id)
             self._condition.notify_all()
 
     def complete_pending_receipt(
@@ -131,18 +109,34 @@ class InMemoryReceiptLog(ReceiptLogPort):
                 tool=tool,
             )
             materialized_at = clock()
-            receipts = tuple(
-                self._materialize_unknown_receipt_locked(
-                    self._pending[receipt_id],
-                    materialized_at=materialized_at,
+            receipts: list[ToolCall] = []
+            for receipt_id in pending_ids:
+                started_call = self._pending[receipt_id]
+                started_at = started_call.execution.started_at
+                elapsed_ms = None
+                if started_at is not None:
+                    elapsed_ms = (materialized_at - started_at).total_seconds() * 1000.0
+                receipts.append(
+                    started_call.materialize(
+                        outcome=ToolCallOutcome.TIMEOUT,
+                        response_payload=None,
+                        results=(),
+                        cost_usd=None,
+                        extra={
+                            "timeout_attribution_evidence": IN_FLIGHT_LLM_UNKNOWN_EVIDENCE
+                        },
+                        execution=ToolExecutionFacts(
+                            elapsed_ms=elapsed_ms,
+                            started_at=started_at,
+                            finished_at=materialized_at,
+                        ),
+                    ),
                 )
-                for receipt_id in pending_ids
-            )
             for receipt in receipts:
                 self._record_locked(receipt)
                 self._remove_pending_locked(receipt.receipt_id)
             self._condition.notify_all()
-            return receipts
+            return tuple(receipts)
 
     def lookup(self, receipt_id: str) -> ToolCall | None:
         with self._lock:
@@ -201,49 +195,6 @@ class InMemoryReceiptLog(ReceiptLogPort):
             if self._pending[receipt_id].session_active_attempt == session_active_attempt
             and self._pending[receipt_id].tool == tool
         )
-
-    def _materialize_unknown_receipt_locked(
-        self,
-        pending: _PendingReceipt,
-        *,
-        materialized_at: datetime,
-    ) -> ToolCall:
-        extra = dict(pending.details.extra or {})
-        extra["timeout_attribution_evidence"] = IN_FLIGHT_LLM_UNKNOWN_EVIDENCE
-        extra["session_active_attempt"] = str(pending.session_active_attempt)
-        execution = _materialized_execution(pending.details.execution, materialized_at)
-        return ToolCall(
-            receipt_id=pending.receipt_id,
-            session_id=pending.session_id,
-            uid=pending.uid,
-            tool=pending.tool,
-            issued_at=pending.issued_at,
-            outcome=ToolCallOutcome.TIMEOUT,
-            details=replace(
-                pending.details,
-                response_hash=None,
-                response_payload=None,
-                results=(),
-                cost_usd=None,
-                extra=extra,
-                execution=execution,
-            ),
-        )
-
-
-def _materialized_execution(
-    execution: ToolExecutionFacts | None,
-    materialized_at: datetime,
-) -> ToolExecutionFacts:
-    started_at = None if execution is None else execution.started_at
-    elapsed_ms = None
-    if started_at is not None:
-        elapsed_ms = (materialized_at - started_at).total_seconds() * 1000.0
-    return ToolExecutionFacts(
-        elapsed_ms=elapsed_ms,
-        started_at=started_at,
-        finished_at=materialized_at,
-    )
 
 
 __all__ = ["InMemoryReceiptLog"]

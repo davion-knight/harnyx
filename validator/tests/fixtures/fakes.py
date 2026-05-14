@@ -7,7 +7,7 @@ from uuid import UUID
 from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
 from harnyx_commons.application.ports.session_registry import SessionRegistryPort
 from harnyx_commons.domain.session import Session
-from harnyx_commons.domain.tool_call import ToolCall, ToolCallDetails
+from harnyx_commons.domain.tool_call import StartedToolCall, ToolCall
 from harnyx_commons.infrastructure.state.receipt_log import InMemoryReceiptLog
 from harnyx_commons.tools.types import ToolName
 from harnyx_validator.application.ports.agent_registry import AgentRegistryPort
@@ -72,22 +72,10 @@ class FakeReceiptLog(ReceiptLogPort):
     def start_pending_receipt(
         self,
         *,
-        receipt_id: str,
-        session_id: UUID,
-        session_active_attempt: int,
-        uid: int,
-        tool: ToolName,
-        issued_at: datetime,
-        details: ToolCallDetails,
+        started_call: StartedToolCall,
     ) -> None:
         self._delegate.start_pending_receipt(
-            receipt_id=receipt_id,
-            session_id=session_id,
-            session_active_attempt=session_active_attempt,
-            uid=uid,
-            tool=tool,
-            issued_at=issued_at,
-            details=details,
+            started_call=started_call,
         )
 
     def complete_pending_receipt(

@@ -8,7 +8,7 @@ from typing import Protocol
 from uuid import UUID
 
 from harnyx_commons.domain.session import Session
-from harnyx_commons.domain.tool_call import ToolCall, ToolCallDetails
+from harnyx_commons.domain.tool_call import StartedToolCall, ToolCall
 from harnyx_commons.tools.types import ToolName
 
 
@@ -21,13 +21,7 @@ class ReceiptLogPort(Protocol):
     def start_pending_receipt(
         self,
         *,
-        receipt_id: str,
-        session_id: UUID,
-        session_active_attempt: int,
-        uid: int,
-        tool: ToolName,
-        issued_at: datetime,
-        details: ToolCallDetails,
+        started_call: StartedToolCall,
     ) -> None:
         """Reserve a receipt id for a started tool call."""
 

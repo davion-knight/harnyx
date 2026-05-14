@@ -12,9 +12,11 @@ import harnyx_commons.tools.executor as tool_executor_module
 from harnyx_commons.domain.session import Session, SessionStatus, SessionUsage
 from harnyx_commons.domain.tool_call import (
     IN_FLIGHT_LLM_UNKNOWN_EVIDENCE,
+    ToolCall,
     ToolCallOutcome,
     ToolExecutionFacts,
 )
+from harnyx_commons.errors import ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
 from harnyx_commons.llm.pricing import price_llm
 from harnyx_commons.llm.schema import LlmChoice, LlmChoiceMessage, LlmMessageContentPart, LlmResponse, LlmUsage
@@ -46,6 +48,21 @@ class RecordingToolInvoker(ToolInvoker):
     ) -> dict[str, object]:
         self.calls.append((tool_name, args, kwargs))
         return {"data": [], "search_queries": kwargs.get("search_queries", [])}
+
+
+class RaisingReceiptLog(FakeReceiptLog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempted_receipts: list[ToolCall] = []
+
+    def complete_pending_receipt(
+        self,
+        receipt: ToolCall,
+        settle_usage: Callable[[], tuple[Session, bool]],
+    ) -> tuple[Session, bool] | None:
+        _ = settle_usage
+        self.attempted_receipts.append(receipt)
+        raise RuntimeError("receipt log write failed")
 
 
 class BlockingLlmInvoker(ToolInvoker):
@@ -81,6 +98,27 @@ class BlockingLlmInvoker(ToolInvoker):
             ),
         )
         return response.to_payload()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+class BlockingProviderErrorInvoker(ToolInvoker):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def invoke(
+        self,
+        tool_name: str,
+        *,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> dict[str, object]:
+        assert tool_name == "llm_chat"
+        self.started.set()
+        await self._release.wait()
+        raise ToolProviderError("tool provider failed")
 
     def release(self) -> None:
         self._release.set()
@@ -240,6 +278,48 @@ async def test_execute_tool_does_not_settle_late_completion_after_unknown_materi
     )
     receipts = tuple(receipt_log.for_session(session.session_id))
     assert receipts == unknown_receipts
+    stored_session = session_registry.get(session.session_id)
+    assert stored_session is not None
+    assert stored_session.usage.total_cost_usd == pytest.approx(0.0)
+    assert stored_session.usage.llm_usage_totals == {}
+
+
+async def test_execute_tool_does_not_record_late_provider_failure_after_unknown_materialization() -> None:
+    session = make_session(budget_usd=1.0)
+    token = generate_token()
+    invoker = BlockingProviderErrorInvoker()
+    executor, receipt_log, session_registry = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=invoker,
+    )
+    request = ToolInvocationRequest(
+        session_id=session.session_id,
+        token=token,
+        tool="llm_chat",
+        args=(),
+        kwargs={
+            "model": "zai-org/GLM-5-TEE",
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+    )
+
+    task = asyncio.create_task(executor.execute(request))
+    await invoker.started.wait()
+    unknown_receipts = receipt_log.wait_and_materialize_unknown_receipts(
+        session.session_id,
+        session_active_attempt=session.active_attempt,
+        tool="llm_chat",
+        timeout_seconds=0.0,
+        clock=lambda: datetime(2025, 10, 17, 12, 10, tzinfo=UTC),
+    )
+    invoker.release()
+
+    with pytest.raises(ToolProviderError, match="tool provider failed"):
+        await task
+
+    assert len(unknown_receipts) == 1
+    assert tuple(receipt_log.for_session(session.session_id)) == unknown_receipts
     stored_session = session_registry.get(session.session_id)
     assert stored_session is not None
     assert stored_session.usage.total_cost_usd == pytest.approx(0.0)
@@ -607,6 +687,123 @@ async def test_execute_tool_debug_log_preserves_raw_payload_and_error_text(
     assert "query-secret" in normal_failure.error
     assert "&error=invalid_grant" in normal_failure.error
     assert normal_failure.exc_info is None
+
+
+async def test_execute_tool_records_failed_receipt_before_reraising_provider_error() -> None:
+    session = make_session()
+    token = generate_token()
+
+    class FailingInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+        ) -> dict[str, object]:
+            assert tool_name == "search_web"
+            raise ToolProviderError("tool provider failed")
+
+    executor, receipt_log, session_registry = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=FailingInvoker(),
+    )
+
+    with pytest.raises(ToolProviderError, match="tool provider failed"):
+        await executor.execute(make_request(session, token=token))
+
+    receipts = tuple(receipt_log.for_session(session.session_id))
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert receipt.tool == "search_web"
+    assert receipt.outcome is ToolCallOutcome.PROVIDER_ERROR
+    assert receipt.details.request_payload == {
+        "args": [],
+        "kwargs": {"search_queries": ["harnyx", "subnet"]},
+    }
+    assert receipt.details.response_hash is None
+    assert receipt.details.response_payload is None
+    assert receipt.details.results == ()
+    assert receipt.details.cost_usd is None
+    assert receipt.details.extra is not None
+    assert receipt.details.extra["error_type"] == "ToolProviderError"
+    assert receipt.details.extra["error_message"] == "tool provider failed"
+    assert receipt.details.execution is not None
+    assert receipt.details.execution.started_at is not None
+    assert receipt.details.execution.finished_at is not None
+    assert receipt.details.execution.elapsed_ms == pytest.approx(0.0)
+    stored = session_registry.get(session.session_id)
+    assert stored is not None
+    assert stored.usage.total_cost_usd == pytest.approx(0.0)
+
+
+async def test_execute_tool_records_failed_timeout_receipt_as_timeout() -> None:
+    session = make_session()
+    token = generate_token()
+
+    class TimeoutInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+        ) -> dict[str, object]:
+            raise ToolInvocationTimeoutError("tool timed out")
+
+    executor, receipt_log, _ = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=TimeoutInvoker(),
+    )
+
+    with pytest.raises(ToolInvocationTimeoutError, match="tool timed out"):
+        await executor.execute(make_request(session, token=token))
+
+    receipts = tuple(receipt_log.for_session(session.session_id))
+    assert len(receipts) == 1
+    assert receipts[0].outcome is ToolCallOutcome.TIMEOUT
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["error_type"] == "ToolInvocationTimeoutError"
+
+
+async def test_execute_tool_does_not_record_receipt_for_invalid_session_token() -> None:
+    session = make_session()
+    valid_token = generate_token()
+    invalid_token = generate_token()
+    executor, _, receipt_log, _, _ = build_executor(session, token=valid_token)
+
+    with pytest.raises(PermissionError):
+        await executor.execute(make_request(session, token=invalid_token))
+
+    assert tuple(receipt_log.for_session(session.session_id)) == ()
+
+
+async def test_execute_tool_does_not_record_failed_receipt_for_invalid_invoker_output() -> None:
+    session = make_session()
+    token = generate_token()
+
+    class InvalidOutputInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+        ) -> object:
+            return object()
+
+    executor, receipt_log, _ = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=InvalidOutputInvoker(),
+    )
+
+    with pytest.raises(ValueError, match="tool invoker must return"):
+        await executor.execute(make_request(session, token=token))
+
+    assert tuple(receipt_log.for_session(session.session_id)) == ()
 
 
 async def test_execute_tool_skips_failure_debug_payload_when_debug_disabled(
@@ -1334,7 +1531,76 @@ async def test_execute_tool_records_receipt_for_search_call_that_exhausts_budget
     assert total_tool_usage.search_tool_cost == pytest.approx(0.0001)
 
 
-async def test_execute_tool_rejects_settlement_after_terminal_session_transition() -> None:
+async def test_execute_tool_budget_exhaustion_records_one_successful_receipt_only() -> None:
+    session = make_session(budget_usd=0.00005, hard_limit_usd=0.00005)
+    token = generate_token()
+
+    class SearchWebInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+        ) -> dict[str, object]:
+            return {"data": [{"link": "https://a.example", "snippet": "A"}]}
+
+    executor, receipt_log, _ = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=SearchWebInvoker(),
+    )
+
+    with pytest.raises(BudgetExceededError):
+        await executor.execute(make_request(session, token=token))
+
+    receipts = tuple(receipt_log.for_session(session.session_id))
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert receipt.outcome is ToolCallOutcome.OK
+    assert receipt.details.response_payload == {
+        "data": [{"link": "https://a.example", "snippet": "A"}]
+    }
+    assert receipt.details.extra is not None
+    assert "error_type" not in receipt.details.extra
+
+
+async def test_execute_tool_does_not_record_failed_receipt_for_receipt_persistence_failure() -> None:
+    session = make_session()
+    token = generate_token()
+
+    class SearchWebInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+        ) -> dict[str, object]:
+            return {"data": []}
+
+    session_registry = FakeSessionRegistry()
+    session_registry.create(session)
+    receipt_log = RaisingReceiptLog()
+    token_registry = InMemoryTokenRegistry()
+    token_registry.register(session.session_id, token)
+    executor = ToolExecutor(
+        session_registry=session_registry,
+        receipt_log=receipt_log,
+        usage_tracker=UsageTracker(),
+        tool_invoker=SearchWebInvoker(),
+        token_registry=token_registry,
+        clock=lambda: datetime(2025, 10, 17, 12, 5, tzinfo=UTC),
+    )
+
+    with pytest.raises(RuntimeError, match="receipt log write failed"):
+        await executor.execute(make_request(session, token=token))
+
+    assert len(receipt_log.attempted_receipts) == 1
+    assert receipt_log.attempted_receipts[0].outcome is ToolCallOutcome.OK
+
+
+async def test_execute_tool_does_not_record_failed_receipt_for_usage_settlement_failure() -> None:
     session = make_session()
     token = generate_token()
 
@@ -1372,3 +1638,5 @@ async def test_execute_tool_rejects_settlement_after_terminal_session_transition
 
     with pytest.raises(RuntimeError, match="became error during tool accounting"):
         await executor.execute(make_request(session, token=token))
+
+    assert tuple(receipt_log.for_session(session.session_id)) == ()
