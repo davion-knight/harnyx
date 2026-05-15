@@ -341,6 +341,23 @@ async def test_openai_compatible_provider_normalizes_nested_reasoning_usage() ->
     assert response.usage.total_tokens == 9
 
 
+async def test_openai_compatible_provider_translates_streamed_reasoning_details() -> None:
+    provider = OpenAiCompatibleLlmProvider(
+        endpoint=_endpoint(auth={"type": "none"}),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: _streaming_reasoning_details_text_response())),
+    )
+
+    try:
+        response = await provider.invoke(_request())
+    finally:
+        await provider.aclose()
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "first thoughtsummary thought"
+    assert response.metadata is not None
+    assert response.metadata["raw_response"]["choices"][0]["reasoning"] == "first thoughtsummary thought"
+
+
 def _endpoint(
     *,
     auth: dict[str, object],
@@ -405,6 +422,24 @@ def _streaming_reasoning_response() -> httpx.Response:
 def _streaming_reasoning_details_response() -> httpx.Response:
     payload = "\n\n".join(
         (
+            'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":3,"completion_tokens":6,'
+            '"completion_tokens_details":{"reasoning_tokens":4},"total_tokens":9}}',
+            "data: [DONE]",
+            "",
+        )
+    )
+    return httpx.Response(200, content=payload.encode("utf-8"))
+
+
+def _streaming_reasoning_details_text_response() -> httpx.Response:
+    payload = "\n\n".join(
+        (
+            'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"reasoning_details":['
+            '{"type":"reasoning.text","text":"first thought"},'
+            '{"type":"reasoning.summary","summary":"summary thought"},'
+            '{"type":"reasoning.encrypted","data":"opaque"}]}}]}',
             'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
             'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
             '"usage":{"prompt_tokens":3,"completion_tokens":6,'

@@ -13,7 +13,7 @@ from harnyx_commons.config.llm import OpenAiCompatibleEndpointConfig, OpenRouter
 from harnyx_commons.llm.provider import LlmProviderPort
 from harnyx_commons.llm.provider_types import OPENROUTER_PROVIDER
 from harnyx_commons.llm.providers.openai_compatible import OpenAiCompatibleLlmProvider
-from harnyx_commons.llm.schema import AbstractLlmRequest, LlmResponse
+from harnyx_commons.llm.schema import AbstractLlmRequest, LlmResponse, LlmThinkingConfig
 
 OPENROUTER_ENDPOINT_ID = "openrouter"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -82,6 +82,7 @@ class OpenRouterLlmProvider(LlmProviderPort):
 
     def _openrouter_request(self, request: AbstractLlmRequest, *, model: str) -> AbstractLlmRequest:
         extra = _merge_extra(request.extra, self._model_provider_options.get(model))
+        extra = _merge_reasoning_extra(extra, request.thinking)
         return replace(request, provider=OPENROUTER_PROVIDER, extra=extra or None)
 
 
@@ -123,6 +124,36 @@ def _merge_extra(
     merged_provider.update(dict(provider_options))
     merged["provider"] = merged_provider
     return merged
+
+
+def _merge_reasoning_extra(
+    request_extra: Mapping[str, Any] | None,
+    thinking: LlmThinkingConfig | None,
+) -> dict[str, Any]:
+    merged: dict[str, Any] = dict(request_extra or {})
+    request_reasoning = merged.get("reasoning")
+    if request_reasoning is not None and not isinstance(request_reasoning, Mapping):
+        raise ValueError("OpenRouter request extra.reasoning must be an object")
+    reasoning = _reasoning_payload(thinking)
+    if reasoning is None:
+        return merged
+    merged_reasoning = dict(request_reasoning or {})
+    merged_reasoning.update(reasoning)
+    merged["reasoning"] = merged_reasoning
+    return merged
+
+
+def _reasoning_payload(thinking: LlmThinkingConfig | None) -> dict[str, Any] | None:
+    if thinking is None:
+        return None
+    if not thinking.enabled:
+        return {"effort": "none"}
+    payload: dict[str, Any] = {"enabled": True}
+    if thinking.effort is not None:
+        payload["effort"] = thinking.effort
+    if thinking.budget is not None:
+        payload["max_tokens"] = thinking.budget
+    return payload
 
 
 __all__ = [

@@ -22,6 +22,7 @@ from harnyx_commons.llm.schema import (
     LlmMessageContentPart,
     LlmRequest,
     LlmResponse,
+    LlmThinkingConfig,
     LlmUsage,
 )
 
@@ -226,6 +227,117 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     assert response.metadata["raw_response"]["usage"]["cost"] == pytest.approx(0.0042)
 
 
+@pytest.mark.parametrize("model", ("openai/gpt-oss-20b", "openai/gpt-oss-120b"))
+@pytest.mark.parametrize(
+    ("thinking", "expected_reasoning"),
+    (
+        (LlmThinkingConfig(enabled=True), {"enabled": True}),
+        (LlmThinkingConfig(enabled=True, effort="high"), {"enabled": True, "effort": "high"}),
+        (LlmThinkingConfig(enabled=True, budget=2048), {"enabled": True, "max_tokens": 2048}),
+        (LlmThinkingConfig(enabled=False), {"effort": "none"}),
+    ),
+)
+async def test_openrouter_provider_serializes_thinking_as_reasoning(
+    model: str,
+    thinking: LlmThinkingConfig,
+    expected_reasoning: dict[str, object],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        body = "\n\n".join(
+            (
+                'data: {"id":"resp-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+                'data: {"id":"resp-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+                "data: [DONE]",
+                "",
+            )
+        )
+        return httpx.Response(200, text=body, request=request, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(
+        base_url=OPENROUTER_BASE_URL,
+        headers={"Authorization": "Bearer test-openrouter-key"},
+        transport=httpx.MockTransport(handler),
+    )
+    endpoint = OpenAiCompatibleEndpointConfig.model_validate(
+        {
+            "id": OPENROUTER_ENDPOINT_ID,
+            "base_url": OPENROUTER_BASE_URL,
+            "auth": {"type": "none"},
+        }
+    )
+    openai_provider = OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client)
+    provider = OpenRouterLlmProvider(
+        openrouter_api_key=SecretStr("test-openrouter-key"),
+        model_provider_options={
+            model: OpenRouterModelProviderOptions(
+                order=("Cerebras",),
+                require_parameters=True,
+            )
+        },
+        openrouter_chat_provider_factory=lambda _: (openai_provider, client),
+    )
+
+    await provider.invoke(_request(model=model, thinking=thinking))
+    await provider.aclose()
+
+    assert captured["json"]["reasoning"] == expected_reasoning
+    assert captured["json"]["provider"] == {"order": ["Cerebras"], "require_parameters": True}
+
+
+@pytest.mark.parametrize("model", ("openai/gpt-oss-20b", "openai/gpt-oss-120b"))
+@pytest.mark.parametrize("thinking", (None, LlmThinkingConfig(enabled=True)))
+async def test_openrouter_provider_rejects_non_object_request_reasoning_extra(
+    model: str,
+    thinking: LlmThinkingConfig | None,
+) -> None:
+    provider = OpenRouterLlmProvider(
+        openrouter_api_key=SecretStr("test-openrouter-key"),
+        model_provider_options={},
+        openrouter_chat_provider_factory=lambda api_key: _fake_factory(api_key, []),
+    )
+
+    with pytest.raises(ValueError, match="OpenRouter request extra.reasoning must be an object"):
+        await provider.invoke(
+            _request(
+                model=model,
+                extra={"reasoning": "invalid"},
+                thinking=thinking,
+            )
+        )
+
+
+@pytest.mark.parametrize("model", ("openai/gpt-oss-20b", "openai/gpt-oss-120b"))
+async def test_openrouter_provider_merges_request_reasoning_extra_with_typed_thinking(model: str) -> None:
+    fake_provider = _FakeOpenAiProvider()
+    fake_client = _FakeClient()
+    provider = OpenRouterLlmProvider(
+        openrouter_api_key=SecretStr("test-openrouter-key"),
+        model_provider_options={},
+        openrouter_chat_provider_factory=lambda api_key: _fake_provider_factory(
+            api_key,
+            [],
+            fake_provider,
+            fake_client,
+        ),
+    )
+
+    await provider.invoke(
+        _request(
+            model=model,
+            extra={"reasoning": {"exclude": True, "effort": "low"}},
+            thinking=LlmThinkingConfig(enabled=True, effort="high"),
+        )
+    )
+
+    assert fake_provider.requests[0].extra == {
+        "reasoning": {"exclude": True, "effort": "high", "enabled": True}
+    }
+
+
 def _fake_factory(
     api_key: str,
     factory_calls: list[str],
@@ -248,6 +360,7 @@ def _request(
     *,
     model: str,
     extra: dict[str, Any] | None = None,
+    thinking: LlmThinkingConfig | None = None,
 ) -> LlmRequest:
     return LlmRequest(
         provider="openrouter",
@@ -261,4 +374,5 @@ def _request(
         temperature=0.0,
         max_output_tokens=32,
         extra=extra,
+        thinking=thinking,
     )

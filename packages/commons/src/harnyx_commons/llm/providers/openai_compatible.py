@@ -31,6 +31,7 @@ from harnyx_commons.llm.providers.openai_stream import (
     OpenAiStreamState,
     OpenAiToolCall,
     iter_openai_sse_events,
+    normalize_openai_reasoning_fragments,
 )
 from harnyx_commons.llm.schema import (
     AbstractLlmRequest,
@@ -121,7 +122,11 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
                 invalid_data_message="OpenAI-compatible chat completions returned non-JSON SSE data",
                 invalid_event_message="OpenAI-compatible chat completions SSE event must be a JSON object",
             ):
-                if state.merge_event(event, reasoning_keys=("reasoning", "reasoning_content")):
+                if state.merge_event(
+                    event,
+                    reasoning_keys=("reasoning", "reasoning_content", "reasoning_details"),
+                    normalize_reasoning_fragment=normalize_openai_reasoning_fragments,
+                ):
                     if ttft_ms is None:
                         ttft_ms = round((time.perf_counter() - started_at) * 1000, 2)
         return _OpenAiCompatibleChatResponse.from_stream_state(state), ttft_ms

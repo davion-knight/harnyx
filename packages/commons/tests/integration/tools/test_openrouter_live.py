@@ -7,7 +7,7 @@ from harnyx_commons.config.bedrock import BedrockSettings
 from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.config.vertex import VertexSettings
 from harnyx_commons.llm.provider_factory import build_cached_llm_provider_registry
-from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest
+from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest, LlmThinkingConfig
 from harnyx_commons.tools.invocation_clients import build_tool_llm_provider
 
 pytestmark = [pytest.mark.integration, pytest.mark.expensive, pytest.mark.anyio("asyncio")]
@@ -49,6 +49,7 @@ async def test_chutes_tool_route_invokes_openrouter_gpt_oss_live(model: str, pro
         ),
         temperature=0.0,
         max_output_tokens=256,
+        thinking=LlmThinkingConfig(enabled=True, effort="low"),
         timeout_seconds=180.0,
     )
 
@@ -64,3 +65,4 @@ async def test_chutes_tool_route_invokes_openrouter_gpt_oss_live(model: str, pro
     raw_usage = response.metadata["raw_response"]["usage"]
     assert isinstance(raw_usage["cost"], (int, float))
     assert raw_usage["cost"] >= 0.0
+    assert response.usage.reasoning_tokens is None or response.usage.reasoning_tokens >= 0

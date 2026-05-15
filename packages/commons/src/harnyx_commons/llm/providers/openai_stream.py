@@ -39,6 +39,14 @@ class _OpenAiMessageDelta(BaseModel):
     tool_calls: list[_OpenAiToolCallDelta] | None = None
 
 
+class _OpenAiReasoningDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    type: str
+    text: str | None = None
+    summary: str | None = None
+
+
 class _OpenAiChoiceDelta(BaseModel):
     model_config = ConfigDict(extra="allow", strict=True)
 
@@ -96,6 +104,7 @@ class _OpenAiStreamEnvelope(BaseModel):
 
 
 _TEXT_OR_PARTS_ADAPTER = TypeAdapter(str | list[_OpenAiTextFragment] | None)
+_REASONING_DETAILS_ADAPTER = TypeAdapter(list[_OpenAiReasoningDetail])
 FragmentNormalizer = Callable[[object], tuple[str, ...]]
 
 
@@ -397,6 +406,26 @@ def normalize_openai_text_fragments(
     return ()
 
 
+def normalize_openai_reasoning_fragments(value: object) -> tuple[str, ...]:
+    try:
+        details = _REASONING_DETAILS_ADAPTER.validate_python(value)
+    except ValidationError:
+        return normalize_openai_text_fragments(value)
+
+    fragments: list[str] = []
+    for detail in details:
+        match detail.type:
+            case "reasoning.text":
+                if detail.text:
+                    fragments.append(detail.text)
+            case "reasoning.summary":
+                if detail.summary:
+                    fragments.append(detail.summary)
+            case _:
+                continue
+    return tuple(fragments) or normalize_openai_text_fragments(value)
+
+
 __all__ = [
     "OpenAiChoiceState",
     "OpenAiStreamError",
@@ -404,5 +433,6 @@ __all__ = [
     "OpenAiToolCall",
     "OpenAiToolCallState",
     "iter_openai_sse_events",
+    "normalize_openai_reasoning_fragments",
     "normalize_openai_text_fragments",
 ]
