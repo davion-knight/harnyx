@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from pydantic import BaseModel
@@ -284,6 +286,33 @@ def test_parse_payload_preserves_reasoning_usage_without_double_counting_complet
     assert response.usage.completion_tokens == 1
     assert response.usage.reasoning_tokens == 2
     assert response.usage.total_tokens == 7
+
+
+@pytest.mark.anyio("asyncio")
+async def test_chutes_provider_persists_stream_ttft_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        payload = {
+            "id": "resp-ttft",
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop", "index": 0}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        return httpx.Response(200, text=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n")
+
+    provider = ChutesLlmProvider(
+        base_url="https://example.com",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+    )
+
+    try:
+        response = await provider.invoke(_basic_chutes_request())
+    finally:
+        await provider.aclose()
+
+    assert response.metadata is not None
+    assert isinstance(response.metadata["ttft_ms"], float)
+    assert response.metadata["ttft_ms"] >= 0.0
 
 
 def test_resolve_chutes_embedding_base_url_returns_expected_live_base_url() -> None:

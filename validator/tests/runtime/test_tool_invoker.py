@@ -184,6 +184,18 @@ class StubOpenRouterProvider(StubChutesProvider):
         )
 
 
+class StubTtftProvider(StubChutesProvider):
+    async def invoke(self, request: LlmRequest) -> LlmResponse:
+        response = await super().invoke(request)
+        return LlmResponse(
+            id=response.id,
+            choices=response.choices,
+            usage=response.usage,
+            metadata={"ttft_ms": 123.0, "provider": "chutes"},
+            finish_reason=response.finish_reason,
+        )
+
+
 class SlowLlmProvider(StubChutesProvider):
     async def invoke(self, request: LlmRequest) -> LlmResponse:
         await asyncio.sleep(1.0)
@@ -663,6 +675,30 @@ async def test_runtime_invoker_does_not_expose_internal_provider_metadata_for_ll
     assert "harnyx_model" not in invocation_output.public_payload
     assert stub_provider.calls[0].provider == "vertex"
     assert stub_provider.calls[0].model == ALLOWED_TOOL_MODELS[0]
+
+
+async def test_runtime_invoker_returns_llm_chat_ttft_execution_fact() -> None:
+    stub_provider = StubTtftProvider()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        llm_provider=stub_provider,
+        llm_provider_name="chutes",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    invocation_output = await _invoke(
+        invoker,
+        "llm_chat",
+        kwargs={
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": ALLOWED_TOOL_MODELS[0],
+        },
+    )
+
+    assert isinstance(invocation_output, ToolInvocationOutput)
+    assert invocation_output.execution is not None
+    assert invocation_output.execution.ttft_ms == 123.0
+    assert "metadata" not in invocation_output.public_payload
 
 
 async def test_runtime_invoker_forwards_llm_chat_thinking_config() -> None:

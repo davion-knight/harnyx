@@ -2456,6 +2456,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  |  | `elapsed_ms` | opt | `number` (nullable) |
 |  |  | `finished_at` | opt | `string` (format: date-time; nullable) |
 |  |  | `started_at` | opt | `string` (format: date-time; nullable) |
+|  |  | `ttft_ms` | opt | `number` (nullable) |
 |  | `extra` |  | opt | `object` (nullable) |
 |  | `reference_cost_usd` |  | opt | `number` (nullable) |
 |  | `request_hash` |  | req | `string` |
@@ -2546,6 +2547,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  |  | `elapsed_ms` | opt | `number` (nullable) |
 |  |  | `finished_at` | opt | `string` (format: date-time; nullable) |
 |  |  | `started_at` | opt | `string` (format: date-time; nullable) |
+|  |  | `ttft_ms` | opt | `number` (nullable) |
 |  | `extra` |  | opt | `object` (nullable) |
 |  | `reference_cost_usd` |  | opt | `number` (nullable) |
 |  | `request_hash` |  | req | `string` |
@@ -2635,6 +2637,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `elapsed_ms` |  | opt | `number` (nullable) |
 |  | `finished_at` |  | opt | `string` (format: date-time; nullable) |
 |  | `started_at` |  | opt | `string` (format: date-time; nullable) |
+|  | `ttft_ms` |  | opt | `number` (nullable) |
 | `extra` |  |  | opt | `object` (nullable) |
 | `reference_cost_usd` |  |  | opt | `number` (nullable) |
 | `request_hash` |  |  | req | `string` |
@@ -2791,6 +2794,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `elapsed_ms` |  | opt | `number` (nullable) |
 |  | `finished_at` |  | opt | `string` (format: date-time; nullable) |
 |  | `started_at` |  | opt | `string` (format: date-time; nullable) |
+|  | `ttft_ms` |  | opt | `number` (nullable) |
 | `extra` |  |  | opt | `object` (nullable) |
 | `reference_cost_usd` |  |  | opt | `number` (nullable) |
 | `request_hash` |  |  | req | `string` |
@@ -3111,6 +3115,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 | `elapsed_ms` |  |  | opt | `number` (nullable) |
 | `finished_at` |  |  | opt | `string` (format: date-time; nullable) |
 | `started_at` |  |  | opt | `string` (format: date-time; nullable) |
+| `ttft_ms` |  |  | opt | `number` (nullable) |
 
 <details>
 <summary>JSON schema</summary>
@@ -3152,6 +3157,17 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
         }
       ],
       "title": "Started At"
+    },
+    "ttft_ms": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Ttft Ms"
     }
   },
   "title": "ToolExecutionFacts",

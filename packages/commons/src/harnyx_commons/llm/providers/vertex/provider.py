@@ -234,6 +234,8 @@ class VertexLlmProvider(BaseLlmProvider):
         metadata, usage = accumulated.metadata(usage)
         combined_metadata = dict(metadata or {})
         combined_metadata.setdefault("raw_response", accumulated.raw_response_payload(latest_response))
+        if ttft_ms is not None:
+            combined_metadata.setdefault("ttft_ms", ttft_ms)
         self._log_stream_ttft(branch="gemini", model=request.model, response_id=response_id, ttft_ms=ttft_ms)
 
         return LlmResponse(
@@ -297,6 +299,8 @@ class VertexLlmProvider(BaseLlmProvider):
         llm_response = response_body.to_llm_response(model=request.model)
         metadata = dict(llm_response.metadata or {})
         metadata.setdefault("raw_response", response_body.raw_payload())
+        if ttft_ms is not None:
+            metadata.setdefault("ttft_ms", ttft_ms)
         self._log_stream_ttft(
             branch="vertex_maas_openai",
             model=request.model,
@@ -389,6 +393,8 @@ class VertexLlmProvider(BaseLlmProvider):
 
         metadata = dict(llm_response.metadata or {})
         metadata.setdefault("raw_response", _raw_response_payload(response))
+        if ttft_ms is not None:
+            metadata.setdefault("ttft_ms", ttft_ms)
         self._log_stream_ttft(branch="claude", model=request.model, response_id=llm_response.id, ttft_ms=ttft_ms)
 
         usage_with_calls = llm_response.usage

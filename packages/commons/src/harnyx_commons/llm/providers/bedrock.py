@@ -92,7 +92,17 @@ class BedrockLlmProvider(BaseLlmProvider):
 
         response_id = accumulator.response_id()
         self._log_stream_ttft(model=request.model, response_id=response_id, ttft_ms=ttft_ms)
-        return accumulator.to_llm_response()
+        llm_response = accumulator.to_llm_response()
+        metadata = dict(llm_response.metadata or {})
+        if ttft_ms is not None:
+            metadata.setdefault("ttft_ms", ttft_ms)
+        return LlmResponse(
+            id=llm_response.id,
+            choices=llm_response.choices,
+            usage=llm_response.usage,
+            metadata=metadata,
+            finish_reason=llm_response.finish_reason,
+        )
 
     async def aclose(self) -> None:
         return None

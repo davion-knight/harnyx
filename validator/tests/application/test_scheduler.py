@@ -29,7 +29,7 @@ from harnyx_commons.domain.tool_usage import ToolUsageSummary
 from harnyx_commons.infrastructure.state.session_registry import InMemorySessionRegistry
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
 from harnyx_commons.llm.tool_models import parse_tool_model
-from harnyx_commons.miner_task_failure_policy import ValidatorModelLlmBaseline
+from harnyx_commons.miner_task_failure_policy import ValidatorLlmSpeedBaseline, ValidatorModelLlmBaseline
 from harnyx_commons.sandbox.manager import SandboxDeployment, SandboxManager
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskRunSubmission,
@@ -183,8 +183,23 @@ def _sandbox_invocation_error(
     )
 
 
-def _llm_baseline(tps: float, *, model: str = "google/gemma-4-31B-turbo-TEE") -> ValidatorModelLlmBaseline:
-    return ValidatorModelLlmBaseline(slowest_tps_by_model={parse_tool_model(model): tps})
+def _llm_baseline(
+    tps: float | None = None,
+    *,
+    model: str = "google/gemma-4-31B-turbo-TEE",
+    ingestion_tps: float | None = None,
+    generation_tps: float | None = None,
+    legacy_total_tps: float | None = None,
+) -> ValidatorModelLlmBaseline:
+    return ValidatorModelLlmBaseline(
+        slowest_speed_by_model={
+            parse_tool_model(model): ValidatorLlmSpeedBaseline(
+                ingestion_tps=ingestion_tps,
+                generation_tps=generation_tps,
+                legacy_total_tps=legacy_total_tps if legacy_total_tps is not None else tps,
+            )
+        }
+    )
 
 
 def _llm_receipt(
@@ -719,7 +734,7 @@ async def test_scheduler_shares_live_completed_artifact_baseline_with_concurrent
                     timeout_observations_by_pair={},
                     validator_model_llm_baseline=_llm_baseline(40.0),
                 )
-            while not completed_artifact_baseline().slowest_tps_by_model:
+            while not completed_artifact_baseline().slowest_speed_by_model:
                 await asyncio.sleep(0)
             seen_completed_baselines.append(completed_artifact_baseline())
             return ArtifactEvaluationOutcome(

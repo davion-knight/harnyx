@@ -38,7 +38,7 @@ from harnyx_commons.llm.pricing import price_llm
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.llm.schema import LlmUsage
 from harnyx_commons.llm.tool_models import parse_tool_model
-from harnyx_commons.miner_task_failure_policy import ValidatorModelLlmBaseline
+from harnyx_commons.miner_task_failure_policy import ValidatorLlmSpeedBaseline, ValidatorModelLlmBaseline
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskRunRequest,
     MinerTaskRunSubmission,
@@ -174,8 +174,23 @@ def _unknown_inflight_timeout_receipt(*, session_id, uid: int, receipt_id: str) 
     )
 
 
-def _llm_baseline(tps: float, *, model: str = "google/gemma-4-31B-turbo-TEE") -> ValidatorModelLlmBaseline:
-    return ValidatorModelLlmBaseline(slowest_tps_by_model={parse_tool_model(model): tps})
+def _llm_baseline(
+    tps: float | None = None,
+    *,
+    model: str = "google/gemma-4-31B-turbo-TEE",
+    ingestion_tps: float | None = None,
+    generation_tps: float | None = None,
+    legacy_total_tps: float | None = None,
+) -> ValidatorModelLlmBaseline:
+    return ValidatorModelLlmBaseline(
+        slowest_speed_by_model={
+            parse_tool_model(model): ValidatorLlmSpeedBaseline(
+                ingestion_tps=ingestion_tps,
+                generation_tps=generation_tps,
+                legacy_total_tps=legacy_total_tps if legacy_total_tps is not None else tps,
+            )
+        }
+    )
 
 
 def _search_usage(receipt_log: FakeReceiptLog, session_id) -> ToolUsageSummary:

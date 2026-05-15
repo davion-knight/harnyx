@@ -719,6 +719,7 @@ def test_progress_endpoint_includes_specifics_and_task_fields() -> None:
     assert execution_log[0]["details"]["cost_usd"] == pytest.approx(0.001)
     assert execution_log[0]["details"]["execution"] == {
         "elapsed_ms": pytest.approx(2000.0),
+        "ttft_ms": None,
         "started_at": "2026-03-08T00:00:01Z",
         "finished_at": "2026-03-08T00:00:03Z",
     }

@@ -48,39 +48,73 @@ class SuccessfulLlmSample:
     model: ToolModelName
     elapsed_ms: float
     total_tokens: int
-    llm_tps: float
+    ttft_ms: float | None = None
+    generation_elapsed_ms: float | None = None
+    prompt_tokens: int | None = None
+    output_tokens: int | None = None
+    ingestion_tps: float | None = None
+    generation_tps: float | None = None
+    legacy_total_tps: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatorLlmSpeedBaseline:
+    ingestion_tps: float | None = None
+    generation_tps: float | None = None
+    legacy_total_tps: float | None = None
+
+    @classmethod
+    def from_sample(cls, sample: SuccessfulLlmSample) -> ValidatorLlmSpeedBaseline:
+        return cls(
+            ingestion_tps=sample.ingestion_tps,
+            generation_tps=sample.generation_tps,
+            legacy_total_tps=sample.legacy_total_tps,
+        )
+
+    def merge(self, other: ValidatorLlmSpeedBaseline) -> ValidatorLlmSpeedBaseline:
+        return ValidatorLlmSpeedBaseline(
+            ingestion_tps=_slowest_optional_tps(self.ingestion_tps, other.ingestion_tps),
+            generation_tps=_slowest_optional_tps(self.generation_tps, other.generation_tps),
+            legacy_total_tps=_slowest_optional_tps(self.legacy_total_tps, other.legacy_total_tps),
+        )
+
+    def threshold(self) -> ValidatorLlmSpeedBaseline:
+        return ValidatorLlmSpeedBaseline(
+            ingestion_tps=_threshold_optional_tps(self.ingestion_tps),
+            generation_tps=_threshold_optional_tps(self.generation_tps),
+            legacy_total_tps=_threshold_optional_tps(self.legacy_total_tps),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ValidatorModelLlmBaseline:
-    slowest_tps_by_model: Mapping[ToolModelName, float]
+    slowest_speed_by_model: Mapping[ToolModelName, ValidatorLlmSpeedBaseline]
 
     @classmethod
     def empty(cls) -> ValidatorModelLlmBaseline:
-        return cls(slowest_tps_by_model={})
+        return cls(slowest_speed_by_model={})
 
     @classmethod
     def from_samples(cls, samples: Sequence[SuccessfulLlmSample]) -> ValidatorModelLlmBaseline:
-        slowest_by_model: dict[ToolModelName, float] = {}
+        slowest_by_model: dict[ToolModelName, ValidatorLlmSpeedBaseline] = {}
         for sample in samples:
+            sample_baseline = ValidatorLlmSpeedBaseline.from_sample(sample)
             current = slowest_by_model.get(sample.model)
-            if current is None or sample.llm_tps < current:
-                slowest_by_model[sample.model] = sample.llm_tps
-        return cls(slowest_tps_by_model=slowest_by_model)
+            slowest_by_model[sample.model] = sample_baseline if current is None else current.merge(sample_baseline)
+        return cls(slowest_speed_by_model=slowest_by_model)
 
-    def threshold_for(self, model: ToolModelName) -> float | None:
-        baseline_tps = self.slowest_tps_by_model.get(model)
-        if baseline_tps is None:
+    def threshold_for(self, model: ToolModelName) -> ValidatorLlmSpeedBaseline | None:
+        baseline = self.slowest_speed_by_model.get(model)
+        if baseline is None:
             return None
-        return baseline_tps / TIMEOUT_TPS_SLOWDOWN_FACTOR
+        return baseline.threshold()
 
     def merge(self, other: ValidatorModelLlmBaseline) -> ValidatorModelLlmBaseline:
-        merged = dict(self.slowest_tps_by_model)
-        for model, tps in other.slowest_tps_by_model.items():
+        merged = dict(self.slowest_speed_by_model)
+        for model, speed in other.slowest_speed_by_model.items():
             current = merged.get(model)
-            if current is None or tps < current:
-                merged[model] = tps
-        return ValidatorModelLlmBaseline(slowest_tps_by_model=merged)
+            merged[model] = speed if current is None else current.merge(speed)
+        return ValidatorModelLlmBaseline(slowest_speed_by_model=merged)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +124,14 @@ class TimeoutObservationEvidence:
     session_elapsed_ms: float
     execution_log: tuple[ToolCall, ...] = ()
     unknown_inflight_llm_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ReceiptLlmUsage:
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
 
 class DeliveryRunInput(Protocol):
@@ -221,18 +263,107 @@ def successful_llm_samples(receipts: Sequence[ToolCall]) -> tuple[SuccessfulLlmS
         execution = receipt.details.execution
         if execution is None or execution.elapsed_ms is None or execution.elapsed_ms <= 0:
             continue
-        total_tokens = _receipt_total_tokens(receipt)
-        if total_tokens is None or total_tokens <= 0:
+        usage = _receipt_llm_usage(receipt)
+        if usage is None:
             continue
-        samples.append(
-            SuccessfulLlmSample(
-                model=model,
-                elapsed_ms=execution.elapsed_ms,
-                total_tokens=total_tokens,
-                llm_tps=total_tokens / (execution.elapsed_ms / 1000.0),
-            )
+        sample = _successful_llm_sample(
+            model=model,
+            elapsed_ms=execution.elapsed_ms,
+            ttft_ms=execution.ttft_ms,
+            usage=usage,
         )
+        if sample is None:
+            continue
+        samples.append(sample)
     return tuple(samples)
+
+
+def _successful_llm_sample(
+    *,
+    model: ToolModelName,
+    elapsed_ms: float,
+    ttft_ms: float | None,
+    usage: _ReceiptLlmUsage,
+) -> SuccessfulLlmSample | None:
+    elapsed_seconds = elapsed_ms / 1000.0
+    prompt_tokens = _positive_int(usage.prompt_tokens)
+    output_tokens = _positive_token_sum(usage.completion_tokens, usage.reasoning_tokens)
+    total_tokens = _positive_int(usage.total_tokens)
+    legacy_total_tps = None if total_tokens is None else total_tokens / elapsed_seconds
+    split_sample = _split_llm_speed_sample(
+        model=model,
+        elapsed_ms=elapsed_ms,
+        ttft_ms=ttft_ms,
+        prompt_tokens=prompt_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        legacy_total_tps=legacy_total_tps,
+    )
+    if split_sample is not None:
+        return split_sample
+    if total_tokens is None or legacy_total_tps is None:
+        return None
+    return SuccessfulLlmSample(
+        model=model,
+        elapsed_ms=elapsed_ms,
+        total_tokens=total_tokens,
+        legacy_total_tps=legacy_total_tps,
+    )
+
+
+def _split_llm_speed_sample(
+    *,
+    model: ToolModelName,
+    elapsed_ms: float,
+    ttft_ms: float | None,
+    prompt_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    legacy_total_tps: float | None,
+) -> SuccessfulLlmSample | None:
+    if ttft_ms is None or ttft_ms <= 0 or ttft_ms >= elapsed_ms:
+        return None
+    if prompt_tokens is None or output_tokens is None:
+        return None
+    generation_elapsed_ms = elapsed_ms - ttft_ms
+    sample_total_tokens = total_tokens or prompt_tokens + output_tokens
+    return SuccessfulLlmSample(
+        model=model,
+        elapsed_ms=elapsed_ms,
+        total_tokens=sample_total_tokens,
+        ttft_ms=ttft_ms,
+        generation_elapsed_ms=generation_elapsed_ms,
+        prompt_tokens=prompt_tokens,
+        output_tokens=output_tokens,
+        ingestion_tps=prompt_tokens / (ttft_ms / 1000.0),
+        generation_tps=output_tokens / (generation_elapsed_ms / 1000.0),
+        legacy_total_tps=legacy_total_tps,
+    )
+
+
+def _positive_token_sum(*values: int | None) -> int | None:
+    total = sum(value for value in values if isinstance(value, int) and not isinstance(value, bool) and value > 0)
+    return total if total > 0 else None
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+def _slowest_optional_tps(left: float | None, right: float | None) -> float | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return min(left, right)
+
+
+def _threshold_optional_tps(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return value / TIMEOUT_TPS_SLOWDOWN_FACTOR
 
 
 def classify_timeout_attribution(
@@ -245,7 +376,7 @@ def classify_timeout_attribution(
         sample
         for timeout_observation in (*prior_timeout_observations, observation)
         for sample in timeout_observation.successful_llm_samples
-        if validator_model_llm_baseline.threshold_for(sample.model) is not None
+        if _sample_has_comparable_speed(sample, validator_model_llm_baseline)
     )
     exhausted = len(prior_timeout_observations) + 1 >= TIMEOUT_REVIEW_MAX_OBSERVATIONS
     if any(_is_slow_llm_sample(sample, validator_model_llm_baseline) for sample in comparable_samples):
@@ -273,33 +404,89 @@ def _is_slow_llm_sample(
     sample: SuccessfulLlmSample,
     baseline: ValidatorModelLlmBaseline,
 ) -> bool:
-    threshold_tps = baseline.threshold_for(sample.model)
-    if threshold_tps is None:
+    threshold = baseline.threshold_for(sample.model)
+    if threshold is None:
         return False
-    return sample.llm_tps < threshold_tps
+    if _has_split_speed_comparison(sample, threshold):
+        return (
+            sample.ingestion_tps is not None
+            and sample.generation_tps is not None
+            and threshold.ingestion_tps is not None
+            and threshold.generation_tps is not None
+            and (
+                sample.ingestion_tps < threshold.ingestion_tps
+                or sample.generation_tps < threshold.generation_tps
+            )
+        )
+    if sample.legacy_total_tps is None or threshold.legacy_total_tps is None:
+        return False
+    return sample.legacy_total_tps < threshold.legacy_total_tps
 
 
 def _is_fast_llm_sample(
     sample: SuccessfulLlmSample,
     baseline: ValidatorModelLlmBaseline,
 ) -> bool:
-    threshold_tps = baseline.threshold_for(sample.model)
-    if threshold_tps is None:
+    threshold = baseline.threshold_for(sample.model)
+    if threshold is None:
         return False
-    return sample.llm_tps >= threshold_tps
+    if _has_split_speed_comparison(sample, threshold):
+        return (
+            sample.ingestion_tps is not None
+            and sample.generation_tps is not None
+            and threshold.ingestion_tps is not None
+            and threshold.generation_tps is not None
+            and sample.ingestion_tps >= threshold.ingestion_tps
+            and sample.generation_tps >= threshold.generation_tps
+        )
+    if sample.legacy_total_tps is None or threshold.legacy_total_tps is None:
+        return False
+    return sample.legacy_total_tps >= threshold.legacy_total_tps
 
 
-def _receipt_total_tokens(receipt: ToolCall) -> int | None:
+def _sample_has_comparable_speed(
+    sample: SuccessfulLlmSample,
+    baseline: ValidatorModelLlmBaseline,
+) -> bool:
+    threshold = baseline.threshold_for(sample.model)
+    if threshold is None:
+        return False
+    if _has_split_speed_comparison(sample, threshold):
+        return True
+    return sample.legacy_total_tps is not None and threshold.legacy_total_tps is not None
+
+
+def _has_split_speed_comparison(
+    sample: SuccessfulLlmSample,
+    threshold: ValidatorLlmSpeedBaseline,
+) -> bool:
+    return (
+        sample.ingestion_tps is not None
+        and sample.generation_tps is not None
+        and threshold.ingestion_tps is not None
+        and threshold.generation_tps is not None
+    )
+
+
+def _receipt_llm_usage(receipt: ToolCall) -> _ReceiptLlmUsage | None:
     response_payload = receipt.details.response_payload
     if not isinstance(response_payload, dict):
         return None
     usage = response_payload.get("usage")
     if not isinstance(usage, dict):
         return None
-    total_tokens = usage.get("total_tokens")
-    if not isinstance(total_tokens, int):
+    return _ReceiptLlmUsage(
+        prompt_tokens=_optional_int(usage.get("prompt_tokens")),
+        completion_tokens=_optional_int(usage.get("completion_tokens")),
+        total_tokens=_optional_int(usage.get("total_tokens")),
+        reasoning_tokens=_optional_int(usage.get("reasoning_tokens")),
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return total_tokens
+    return value
 
 
 def _receipt_llm_model(receipt: ToolCall) -> ToolModelName | None:
@@ -363,6 +550,7 @@ __all__ = [
     "SuccessfulLlmSample",
     "TimeoutAttributionKind",
     "TimeoutObservationEvidence",
+    "ValidatorLlmSpeedBaseline",
     "ValidatorModelLlmBaseline",
     "ValidatorDeliveryExclusion",
     "classify_timeout_attribution",

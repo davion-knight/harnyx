@@ -217,7 +217,7 @@ class BaseLlmProvider(ABC, LlmProviderPort):
                 elapsed = round((time.perf_counter() - start) * 1000, 2)
                 usage = response.usage or LlmUsage()
                 web_search_calls = int(usage.web_search_calls or 0)
-                response_metadata = dict(response.metadata or {})
+                response_metadata = _instrumentation_response_metadata(response)
                 reasoning_metadata = _build_reasoning_metadata(
                     provider_label=self._provider_label,
                     request=request,
@@ -665,12 +665,18 @@ def _error_raw_payload_metadata(
     response = exc.response
     if response is None:
         return None
-    response_metadata = dict(response.metadata or {})
+    response_metadata = _instrumentation_response_metadata(response)
     return _build_raw_payload_metadata(
         request=request,
         response=response,
         response_metadata=response_metadata,
     )
+
+
+def _instrumentation_response_metadata(response: LlmResponse) -> dict[str, object]:
+    metadata = dict(response.metadata or {})
+    metadata.pop("ttft_ms", None)
+    return metadata
 
 
 def _provider_response_payload(

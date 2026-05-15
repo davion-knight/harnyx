@@ -426,7 +426,8 @@ async def test_vertex_provider_invokes_generative_model(
     raw_response = response.metadata["raw_response"]
     assert isinstance(raw_response, dict)
     assert raw_response["text"] == "ok"
-    assert "ttft_ms" not in response.metadata
+    assert isinstance(response.metadata["ttft_ms"], float)
+    assert response.metadata["ttft_ms"] >= 0.0
 
     records = [record for record in caplog.records if record.message == "llm.vertex.stream.ttft"]
     assert records
@@ -1129,7 +1130,8 @@ async def test_vertex_maas_gpt_oss_routes_to_chat_completions(
     assert response.choices[0].message.reasoning == "I need to multiply 7 by 8."
     assert response.usage.reasoning_tokens == 5
     assert response.metadata is not None
-    assert "ttft_ms" not in response.metadata
+    assert isinstance(response.metadata["ttft_ms"], float)
+    assert response.metadata["ttft_ms"] >= 0.0
 
     records = [record for record in caplog.records if record.message == "llm.vertex.stream.ttft"]
     assert records
@@ -2070,7 +2072,8 @@ async def test_vertex_claude_stream_default_reconstructs_final_response(
     assert response.raw_text == "ok"
     assert response.metadata is not None
     assert response.metadata["raw_response"] == {"id": "claude-stream-response", "mode": "json"}
-    assert "ttft_ms" not in response.metadata
+    assert isinstance(response.metadata["ttft_ms"], float)
+    assert response.metadata["ttft_ms"] >= 0.0
 
     records = [record for record in caplog.records if record.message == "llm.vertex.stream.ttft"]
     assert records

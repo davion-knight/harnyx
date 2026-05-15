@@ -354,7 +354,7 @@ class RuntimeToolInvoker(ToolInvoker):
             raise ToolProviderError("tool provider failed") from exc
         return ToolInvocationOutput(
             public_payload=_public_llm_response_payload(llm_response),
-            execution=ToolExecutionFacts(elapsed_ms=elapsed_ms),
+            execution=ToolExecutionFacts(elapsed_ms=elapsed_ms, ttft_ms=_response_ttft_ms(llm_response)),
             actual_cost_usd=_openrouter_actual_cost_usd(llm_response),
             actual_cost_provider=_openrouter_actual_cost_provider(llm_response),
         )
@@ -483,6 +483,16 @@ def _public_llm_response_payload(response: LlmResponse) -> JsonObject:
     if response.finish_reason is not None:
         payload["finish_reason"] = response.finish_reason
     return payload
+
+
+def _response_ttft_ms(response: LlmResponse) -> float | None:
+    raw_ttft_ms = (response.metadata or {}).get("ttft_ms")
+    if isinstance(raw_ttft_ms, bool) or not isinstance(raw_ttft_ms, (int, float)):
+        return None
+    ttft_ms = float(raw_ttft_ms)
+    if ttft_ms <= 0:
+        return None
+    return ttft_ms
 
 
 def _public_llm_choice_payload(choice: LlmChoice) -> JsonObject:

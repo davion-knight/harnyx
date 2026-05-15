@@ -168,7 +168,7 @@ async def test_invoke_success_updates_generation_payload(monkeypatch: pytest.Mon
             "feed_run_id": "feed-run-123",
         }
     )
-    response = _response(metadata={"source": "stub", "raw_response": {"response_id": "provider-raw"}})
+    response = _response(metadata={"source": "stub", "raw_response": {"response_id": "provider-raw"}, "ttft_ms": 12.3})
     provider = _StubProvider(response=response)
     scope = _Scope(generation=object())
     start_calls: list[dict[str, object]] = []

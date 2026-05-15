@@ -66,6 +66,7 @@ class ToolExecutionFacts:
     """Execution facts captured at the private tool runtime boundary."""
 
     elapsed_ms: float | None = None
+    ttft_ms: float | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
 

@@ -489,6 +489,7 @@ def _merge_execution_facts(
 ) -> ToolExecutionFacts:
     return ToolExecutionFacts(
         elapsed_ms=None if execution is None else execution.elapsed_ms,
+        ttft_ms=None if execution is None else execution.ttft_ms,
         started_at=started_at,
         finished_at=finished_at,
     )

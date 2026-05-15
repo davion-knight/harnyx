@@ -99,6 +99,8 @@ class ChutesLlmProvider(BaseLlmProvider):
         llm_response = body.to_llm_response()
         metadata = dict(llm_response.metadata or {})
         metadata.setdefault("raw_response", body.model_dump(mode="python", exclude_none=True))
+        if ttft_ms is not None:
+            metadata.setdefault("ttft_ms", ttft_ms)
         self._log_stream_ttft(
             model=payload.model,
             response_id=body.id or "",

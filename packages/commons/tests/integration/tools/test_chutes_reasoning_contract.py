@@ -89,7 +89,8 @@ async def test_chutes_reasoning_payload_is_preserved_through_invoke() -> None:
         "thought_text_parts": ["step one", "step two"],
         "has_thought_signature": True,
     }
-    assert "ttft_ms" not in response.metadata
+    assert isinstance(response.metadata["ttft_ms"], float)
+    assert response.metadata["ttft_ms"] >= 0.0
 
 
 async def test_chutes_reasoning_object_is_preserved_across_multiple_stream_events() -> None:

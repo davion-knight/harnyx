@@ -171,6 +171,8 @@ async def test_openai_compatible_provider_normalizes_streamed_chat_response() ->
     assert response.metadata is not None
     assert response.metadata["raw_response"]["id"] == "chatcmpl-1"
     assert response.metadata["raw_response"]["usage"]["cost"] == pytest.approx(0.00123)
+    assert isinstance(response.metadata["ttft_ms"], float)
+    assert response.metadata["ttft_ms"] >= 0.0
 
 
 async def test_openai_compatible_thinking_omitted_is_noop() -> None:
