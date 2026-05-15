@@ -573,6 +573,44 @@ async def test_vertex_provider_gemini_stream_aggregates_text_and_metadata(
     assert raw_response["candidates"][0]["finish_reason"] == "STOP"
 
 
+async def test_vertex_provider_merges_request_http_headers_with_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    captured: dict[str, Any] = {}
+    _patch_google_client(monkeypatch, captured)
+    provider = VertexLlmProvider(
+        project="demo-project",
+        location="global",
+        timeout=30.0,
+    )
+    headers = {
+        "X-Vertex-AI-LLM-Request-Type": "shared",
+        "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
+    }
+    request = LlmRequest(
+        provider="vertex",
+        model="gemini-2.5-pro",
+        messages=(
+            LlmMessage(
+                role="user",
+                content=(LlmMessageContentPart.input_text("hello"),),
+            ),
+        ),
+        temperature=None,
+        max_output_tokens=64,
+        output_mode="text",
+        timeout_seconds=12.5,
+        extra={"http_headers": headers},
+    )
+
+    await provider.invoke(request)
+
+    config = captured["model_stream_call"]["config"]
+    assert config.http_options.timeout == 12500
+    assert config.http_options.headers == headers
+
+
 async def test_vertex_provider_gemini_stream_preserves_reasoning_chunk_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

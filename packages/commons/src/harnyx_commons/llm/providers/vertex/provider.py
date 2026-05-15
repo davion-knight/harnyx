@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import google.auth
@@ -61,6 +61,7 @@ from .gemini_stream_codec import GeminiAccumulatedResponse
 # richer tool attribution in observability.
 _API_VERSION = "v1beta1"
 _CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+_REQUEST_HTTP_HEADERS_EXTRA_KEY = "http_headers"
 VERTEX_MAAS_DEFAULT_LOCATION = "global"
 _VERTEX_MAAS_OPENAI_CHAT_MODELS = frozenset(
     {
@@ -169,13 +170,9 @@ class VertexLlmProvider(BaseLlmProvider):
 
         config_kwargs: dict[str, Any] = {}
 
-        timeout = request.timeout_seconds
-        if timeout is not None:
-            http_timeout = math.ceil(timeout * 1000) if timeout > 0 else None
-            config_kwargs["http_options"] = types.HttpOptions(
-                api_version=_API_VERSION,
-                timeout=int(http_timeout) if http_timeout is not None else None,
-            )
+        http_options = _request_http_options(request)
+        if http_options is not None:
+            config_kwargs["http_options"] = http_options
 
         if not request.grounded:
             if request.output_mode in {"json_object", "structured"}:
@@ -487,6 +484,34 @@ def _should_use_vertex_maas_openai_chat(request: AbstractLlmRequest) -> bool:
 def _vertex_maas_location_for(*, model: str) -> str:
     normalized_model = model.strip().lower()
     return _VERTEX_MAAS_MODEL_LOCATIONS.get(normalized_model, VERTEX_MAAS_DEFAULT_LOCATION)
+
+
+def _request_http_options(request: AbstractLlmRequest) -> types.HttpOptions | None:
+    headers = _request_http_headers(request)
+    timeout = request.timeout_seconds
+    if headers is None and timeout is None:
+        return None
+    http_timeout = math.ceil(timeout * 1000) if timeout is not None and timeout > 0 else None
+    return types.HttpOptions(
+        api_version=_API_VERSION,
+        timeout=int(http_timeout) if http_timeout is not None else None,
+        headers=headers,
+    )
+
+
+def _request_http_headers(request: AbstractLlmRequest) -> dict[str, str] | None:
+    extra = request.extra or {}
+    raw_headers = extra.get(_REQUEST_HTTP_HEADERS_EXTRA_KEY)
+    if raw_headers is None:
+        return None
+    if not isinstance(raw_headers, Mapping):
+        raise ValueError(f"request extra {_REQUEST_HTTP_HEADERS_EXTRA_KEY!r} must be a mapping")
+    headers: dict[str, str] = {}
+    for key, value in raw_headers.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError(f"request extra {_REQUEST_HTTP_HEADERS_EXTRA_KEY!r} must contain string headers")
+        headers[key] = value
+    return headers
 
 
 def _vertex_maas_chat_completions_url(*, project: str, location: str) -> str:
