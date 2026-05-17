@@ -975,7 +975,7 @@ async def test_execute_tool_rejects_expired_session() -> None:
     "model",
     [
         "zai-org/GLM-5-TEE",
-        "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "Qwen/Qwen3.6-27B-TEE",
     ],
 )
 async def test_execute_tool_records_llm_tokens_for_llm_chat(model: str) -> None:
@@ -1289,7 +1289,7 @@ async def test_execute_tool_counts_reasoning_only_usage_in_missing_total_fallbac
 
 async def test_execute_tool_ignores_stale_response_model_metadata_for_llm_chat() -> None:
     request_model = "zai-org/GLM-5-TEE"
-    stale_payload_model = "Qwen/Qwen3-Next-80B-A3B-Instruct"
+    stale_payload_model = "provider-returned-stale-model"
     session = make_session(budget_usd=1.0)
     token = generate_token()
     usage = LlmUsage(

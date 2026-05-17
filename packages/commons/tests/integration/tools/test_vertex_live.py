@@ -22,50 +22,6 @@ from harnyx_commons.llm.schema import (
 pytestmark = [pytest.mark.integration, pytest.mark.anyio("asyncio")]
 
 
-async def test_vertex_qwen_maas_alias_completion_live() -> None:
-    vertex = VertexSettings()
-    project = vertex.gcp_project_id
-    location = vertex.gcp_location
-    credentials_b64 = vertex.gcp_sa_credential_b64_value
-
-    assert project, "GCP_PROJECT_ID must be configured"
-    assert location, "GCP_LOCATION must be configured"
-    assert credentials_b64, "Vertex credentials must be configured"
-
-    provider = LlmProviderAdapter(
-        provider_name="vertex",
-        delegate=VertexLlmProvider(
-            project=project,
-            location=location,
-            timeout=float(vertex.vertex_timeout_seconds or PLATFORM.timeout_seconds),
-            credentials_path=None,
-            service_account_b64=credentials_b64 or "",
-        ),
-    )
-    try:
-        request = LlmRequest(
-            provider="vertex",
-            model="Qwen/Qwen3-Next-80B-A3B-Instruct",
-            messages=(
-                LlmMessage(
-                    role="user",
-                    content=(
-                        LlmMessageContentPart.input_text(
-                            "Respond with a short sentence describing the Harnyx validator runtime."
-                        ),
-                    ),
-                ),
-            ),
-            temperature=0.2,
-            max_output_tokens=256,
-        )
-
-        response = await provider.invoke(request)
-        assert response.raw_text, "Vertex response should include text output"
-    finally:
-        await provider.aclose()
-
-
 async def test_vertex_openai_maas_completion_live() -> None:
     vertex = VertexSettings()
     project = vertex.gcp_project_id

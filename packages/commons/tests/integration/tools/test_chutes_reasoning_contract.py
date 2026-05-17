@@ -15,7 +15,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.anyio("asyncio")]
 def _request() -> LlmRequest:
     return LlmRequest(
         provider="chutes",
-        model="openai/gpt-oss-20b-TEE",
+        model="google/gemma-4-31B-turbo-TEE",
         messages=(
             LlmMessage(
                 role="user",
@@ -209,7 +209,7 @@ async def test_chutes_stream_default_emits_provider_local_ttft_log(
     assert records
     data = records[0].__dict__["data"]
     assert data["provider"] == "chutes"
-    assert data["model"] == "openai/gpt-oss-20b-TEE"
+    assert data["model"] == "google/gemma-4-31B-turbo-TEE"
     assert isinstance(data["ttft_ms"], float)
     assert data["ttft_ms"] >= 0.0
 

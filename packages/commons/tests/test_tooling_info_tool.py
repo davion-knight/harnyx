@@ -67,16 +67,8 @@ async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
     assert model_prices["zai-org/GLM-5-TEE"]["reasoning_per_million"] == pytest.approx(
         MODEL_PRICING["zai-org/GLM-5-TEE"].billable_reasoning_per_million
     )
-    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" in payload["allowed_tool_models"]
-    assert model_prices["Qwen/Qwen3-Next-80B-A3B-Instruct"]["input_per_million"] == pytest.approx(
-        MODEL_PRICING["Qwen/Qwen3-Next-80B-A3B-Instruct"].input_per_million
-    )
-    assert model_prices["Qwen/Qwen3-Next-80B-A3B-Instruct"]["output_per_million"] == pytest.approx(
-        MODEL_PRICING["Qwen/Qwen3-Next-80B-A3B-Instruct"].output_per_million
-    )
-    assert model_prices["Qwen/Qwen3-Next-80B-A3B-Instruct"]["reasoning_per_million"] == pytest.approx(
-        MODEL_PRICING["Qwen/Qwen3-Next-80B-A3B-Instruct"].billable_reasoning_per_million
-    )
+    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" not in payload["allowed_tool_models"]
+    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" not in model_prices
     assert "Qwen/Qwen3.6-27B-TEE" in payload["allowed_tool_models"]
     assert model_prices["Qwen/Qwen3.6-27B-TEE"]["input_per_million"] == pytest.approx(0.50)
     assert model_prices["Qwen/Qwen3.6-27B-TEE"]["output_per_million"] == pytest.approx(2.00)
@@ -117,7 +109,6 @@ def test_zero_reasoning_price_falls_back_to_output_price() -> None:
         reasoning_tokens=1_000_000,
     )
 
-    assert price_llm(parse_tool_model("Qwen/Qwen3-Next-80B-A3B-Instruct"), usage) == pytest.approx(1.70)
     assert price_llm(parse_tool_model("deepseek-ai/DeepSeek-V3.1-TEE"), usage) == pytest.approx(2.27)
     assert price_llm(parse_tool_model("deepseek-ai/DeepSeek-V3.2-TEE"), usage) == pytest.approx(1.12)
     assert price_llm(parse_tool_model("zai-org/GLM-5-TEE"), usage) == pytest.approx(6.05)
@@ -138,8 +129,15 @@ def test_parallel_search_actual_pricing_uses_base_price_for_up_to_ten_results(
     assert price_parallel_search(requested_results=requested_results) == pytest.approx(expected_cost)
 
 
-@pytest.mark.parametrize("model", ("openai/gpt-oss-20b-TEE", "openai/gpt-oss-120b-TEE"))
-def test_retired_openai_gpt_oss_tool_models_are_rejected(model: str) -> None:
+@pytest.mark.parametrize(
+    "model",
+    (
+        "openai/gpt-oss-20b-TEE",
+        "openai/gpt-oss-120b-TEE",
+        "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    ),
+)
+def test_retired_tool_models_are_rejected(model: str) -> None:
     with pytest.raises(ValueError, match="not allowed for validator tools"):
         parse_tool_model(model)
 

@@ -20,7 +20,6 @@ VERTEX_ALIASED_TOOL_MODELS = {
     "openai/gpt-oss-20b": "publishers/openai/models/gpt-oss-20b-maas",
     "openai/gpt-oss-120b": "publishers/openai/models/gpt-oss-120b-maas",
     "zai-org/GLM-5-TEE": "zai-org/glm-5-maas",
-    "Qwen/Qwen3-Next-80B-A3B-Instruct": "publishers/qwen/models/qwen3-next-80b-a3b-instruct-maas",
 }
 GEMMA_CHUTES_MODEL = "google/gemma-4-31B-turbo-TEE"
 GEMMA_CLOUD_RUN_ROUTE_TARGET = "custom-openai-compatible:gemma4-cloud-run-turbo"

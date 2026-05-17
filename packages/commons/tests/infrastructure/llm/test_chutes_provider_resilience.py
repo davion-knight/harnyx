@@ -240,7 +240,7 @@ def test_chutes_glm_thinking_disabled_uses_enable_thinking_template_kwarg() -> N
 def test_chutes_unsupported_thinking_capability_serializes_nothing() -> None:
     payload = _ChutesChatRequest.from_request(
         _basic_chutes_request(
-            model="Qwen/Qwen3-Next-80B-A3B-Instruct",
+            model="google/gemma-4-31B-turbo-TEE",
             thinking=LlmThinkingConfig(enabled=True, effort="high"),
         )
     ).model_dump(mode="python", exclude_none=True)

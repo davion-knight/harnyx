@@ -18,7 +18,6 @@ ToolModelName = Literal[
     "deepseek-ai/DeepSeek-V3.1-TEE",
     "deepseek-ai/DeepSeek-V3.2-TEE",
     "zai-org/GLM-5-TEE",
-    "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "Qwen/Qwen3.6-27B-TEE",
     "google/gemma-4-31B-turbo-TEE",
 ]
@@ -35,7 +34,6 @@ ALLOWED_TOOL_MODELS: tuple[ToolModelName, ...] = (
     "deepseek-ai/DeepSeek-V3.1-TEE",
     "deepseek-ai/DeepSeek-V3.2-TEE",
     "zai-org/GLM-5-TEE",
-    "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "Qwen/Qwen3.6-27B-TEE",
     "google/gemma-4-31B-turbo-TEE",
 )
