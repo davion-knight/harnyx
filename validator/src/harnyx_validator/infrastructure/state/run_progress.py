@@ -7,21 +7,34 @@ from dataclasses import dataclass, field
 from typing import TypeAlias, TypedDict
 from uuid import UUID
 
-from harnyx_commons.domain.miner_task import MinerTask
 from harnyx_validator.application.dto.evaluation import MinerTaskBatchSpec, MinerTaskRunSubmission
 from harnyx_validator.application.ports.progress import ProviderFailureEvidence
 
 ProviderEvidenceSnapshot: TypeAlias = ProviderFailureEvidence
 
 
-class RunProgressSnapshot(TypedDict):
+class RunProgressSummary(TypedDict):
     batch_id: UUID
     total: int
     completed: int
     remaining: int
-    tasks: tuple[MinerTask, ...]
-    miner_task_runs: tuple[MinerTaskRunSubmission, ...]
+    latest_sequence: int
     provider_evidence: tuple[ProviderEvidenceSnapshot, ...]
+
+
+class SequencedRun(TypedDict):
+    sequence: int
+    submission: MinerTaskRunSubmission
+
+
+class RunProgressPage(TypedDict):
+    batch_id: UUID
+    after_sequence: int
+    limit: int
+    latest_sequence: int
+    next_after_sequence: int
+    has_more: bool
+    items: tuple[SequencedRun, ...]
 
 
 @dataclass(slots=True)
@@ -40,13 +53,13 @@ class _ProviderEvidenceCounter:
 class InMemoryRunProgress:
     batches_by_id: dict[UUID, MinerTaskBatchSpec] = field(default_factory=dict)
     expected_by_batch: dict[UUID, int] = field(default_factory=dict)
-    tasks_by_batch: dict[UUID, tuple[MinerTask, ...]] = field(default_factory=dict)
-    task_positions_by_batch: dict[UUID, dict[UUID, int]] = field(default_factory=dict)
-    artifact_positions_by_batch: dict[UUID, dict[UUID, int]] = field(default_factory=dict)
     results_by_batch: dict[
         UUID,
         dict[tuple[UUID, UUID], MinerTaskRunSubmission],
     ] = field(default_factory=dict)
+    sequence_by_pair_by_batch: dict[UUID, dict[tuple[UUID, UUID], int]] = field(default_factory=dict)
+    pair_by_sequence_by_batch: dict[UUID, dict[int, tuple[UUID, UUID]]] = field(default_factory=dict)
+    next_sequence_by_batch: dict[UUID, int] = field(default_factory=dict)
     session_context_by_id: dict[UUID, _SessionRunContext] = field(default_factory=dict)
     provider_counters_by_batch: dict[
         UUID,
@@ -63,17 +76,17 @@ class InMemoryRunProgress:
 
         self.batches_by_id[batch.batch_id] = batch
         self.expected_by_batch[batch.batch_id] = len(batch.tasks) * len(batch.artifacts)
-        self.tasks_by_batch[batch.batch_id] = batch.tasks
-        self.task_positions_by_batch[batch.batch_id] = {
-            task.task_id: index for index, task in enumerate(batch.tasks)
-        }
-        self.artifact_positions_by_batch[batch.batch_id] = {
-            artifact.artifact_id: index for index, artifact in enumerate(batch.artifacts)
-        }
+        self.sequence_by_pair_by_batch.setdefault(batch.batch_id, {})
+        self.pair_by_sequence_by_batch.setdefault(batch.batch_id, {})
+        self.next_sequence_by_batch.setdefault(batch.batch_id, 1)
 
     def record(self, result: MinerTaskRunSubmission) -> None:
         bucket = self.results_by_batch.setdefault(result.batch_id, {})
-        self._record_submission(bucket, result)
+        self._record_submission(
+            batch_id=result.batch_id,
+            bucket=bucket,
+            result=result,
+        )
 
     def restore_completed_runs(
         self,
@@ -83,11 +96,25 @@ class InMemoryRunProgress:
     ) -> None:
         self.register(batch)
         staged_results = dict(self.results_by_batch.get(batch.batch_id, {}))
+        staged_sequence_by_pair = dict(self.sequence_by_pair_by_batch.get(batch.batch_id, {}))
+        staged_pair_by_sequence = dict(self.pair_by_sequence_by_batch.get(batch.batch_id, {}))
+        next_sequence = int(self.next_sequence_by_batch.get(batch.batch_id, 1))
         for submission in submissions:
             if submission.batch_id != batch.batch_id:
                 raise RuntimeError("restored submission batch_id mismatch")
-            self._record_submission(staged_results, submission)
+            next_sequence = self._record_submission(
+                batch_id=batch.batch_id,
+                bucket=staged_results,
+                result=submission,
+                sequence_by_pair=staged_sequence_by_pair,
+                pair_by_sequence=staged_pair_by_sequence,
+                next_sequence=next_sequence,
+                commit_next_sequence=False,
+            )
         self.results_by_batch[batch.batch_id] = staged_results
+        self.sequence_by_pair_by_batch[batch.batch_id] = staged_sequence_by_pair
+        self.pair_by_sequence_by_batch[batch.batch_id] = staged_pair_by_sequence
+        self.next_sequence_by_batch[batch.batch_id] = next_sequence
         self.provider_counters_by_batch[batch.batch_id] = self._merged_provider_counters(
             batch.batch_id,
             provider_evidence,
@@ -199,41 +226,57 @@ class InMemoryRunProgress:
             snapshots.append(snapshot)
         return tuple(snapshots)
 
-    def snapshot(self, batch_id: UUID) -> RunProgressSnapshot:
-        results = tuple(
-            sorted(
-                self.results_by_batch.get(batch_id, {}).values(),
-                key=lambda result: self._result_sort_key(batch_id, result),
-            )
-        )
+    def summary(self, batch_id: UUID) -> RunProgressSummary:
         total = int(self.expected_by_batch.get(batch_id, 0))
-        completed = len(results)
+        completed = len(self.results_by_batch.get(batch_id, {}))
         remaining = max(0, total - completed)
         return {
             "batch_id": batch_id,
             "total": total,
             "completed": completed,
             "remaining": remaining,
-            "tasks": self.tasks_by_batch.get(batch_id, ()),
-            "miner_task_runs": results,
+            "latest_sequence": self._latest_sequence(batch_id),
             "provider_evidence": self.provider_evidence(batch_id),
         }
 
-    def _result_sort_key(
+    def completed_run_page(
         self,
         batch_id: UUID,
-        result: MinerTaskRunSubmission,
-    ) -> tuple[int, int, str, str]:
-        artifact_positions = self.artifact_positions_by_batch.get(batch_id, {})
-        task_positions = self.task_positions_by_batch.get(batch_id, {})
-        fallback_artifact = len(artifact_positions)
-        fallback_task = len(task_positions)
-        return (
-            artifact_positions.get(result.run.artifact_id, fallback_artifact),
-            task_positions.get(result.run.task_id, fallback_task),
-            str(result.run.artifact_id),
-            str(result.run.task_id),
-        )
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> RunProgressPage:
+        if after_sequence < 0:
+            raise RuntimeError("after_sequence must be non-negative")
+        if limit < 1:
+            raise RuntimeError("limit must be positive")
+
+        results = self.results_by_batch.get(batch_id, {})
+        pair_by_sequence = self.pair_by_sequence_by_batch.get(batch_id, {})
+        latest_sequence = self._latest_sequence(batch_id)
+        items: list[SequencedRun] = []
+        window_end = min(latest_sequence, after_sequence + limit)
+        for sequence in range(after_sequence + 1, window_end + 1):
+            pair = pair_by_sequence.get(sequence)
+            if pair is None:
+                raise RuntimeError("progress sequence points at missing pair")
+            submission = results.get(pair)
+            if submission is None:
+                raise RuntimeError("progress sequence points at missing result")
+            items.append({"sequence": sequence, "submission": submission})
+        next_after_sequence = items[-1]["sequence"] if items else after_sequence
+        return {
+            "batch_id": batch_id,
+            "after_sequence": after_sequence,
+            "limit": limit,
+            "latest_sequence": latest_sequence,
+            "next_after_sequence": next_after_sequence,
+            "has_more": next_after_sequence < latest_sequence,
+            "items": tuple(items),
+        }
+
+    def _latest_sequence(self, batch_id: UUID) -> int:
+        return max(0, int(self.next_sequence_by_batch.get(batch_id, 1)) - 1)
 
     def _provider_evidence_snapshot(
         self,
@@ -256,20 +299,54 @@ class InMemoryRunProgress:
             snapshot["failure_reason"] = counter.failure_reason
         return snapshot
 
-    @staticmethod
     def _record_submission(
+        self,
+        *,
+        batch_id: UUID,
         bucket: dict[tuple[UUID, UUID], MinerTaskRunSubmission],
         result: MinerTaskRunSubmission,
-    ) -> None:
-        pair = (result.run.artifact_id, result.run.task_id)
+        sequence_by_pair: dict[tuple[UUID, UUID], int] | None = None,
+        pair_by_sequence: dict[int, tuple[UUID, UUID]] | None = None,
+        next_sequence: int | None = None,
+        commit_next_sequence: bool = True,
+    ) -> int:
+        if sequence_by_pair is None:
+            sequence_by_pair = self.sequence_by_pair_by_batch.setdefault(batch_id, {})
+        if pair_by_sequence is None:
+            pair_by_sequence = self.pair_by_sequence_by_batch.setdefault(batch_id, {})
+        if next_sequence is None:
+            next_sequence = int(self.next_sequence_by_batch.get(batch_id, 1))
+
+        pair = _submission_pair(result)
         existing = bucket.get(pair)
         if existing is not None:
             if existing != result:
                 raise RuntimeError(
                     "batch already recorded a different result for artifact/task pair"
                 )
-            return
+            if pair not in sequence_by_pair:
+                sequence_by_pair[pair] = next_sequence
+                pair_by_sequence[next_sequence] = pair
+                next_sequence += 1
+            if commit_next_sequence:
+                self.next_sequence_by_batch[batch_id] = max(
+                    int(self.next_sequence_by_batch.get(batch_id, 1)),
+                    next_sequence,
+                )
+            return next_sequence
+
+        assigned_sequence = next_sequence
         bucket[pair] = result
+        sequence_by_pair[pair] = assigned_sequence
+        pair_by_sequence[assigned_sequence] = pair
+        next_sequence = assigned_sequence + 1
+        if commit_next_sequence:
+            self.next_sequence_by_batch[batch_id] = next_sequence
+        return next_sequence
+
+
+def _submission_pair(result: MinerTaskRunSubmission) -> tuple[UUID, UUID]:
+    return (result.run.artifact_id, result.run.task_id)
 
 
 def _provider_model_key(*, provider: str, model: str) -> tuple[str, str]:
@@ -282,4 +359,10 @@ def _provider_model_key(*, provider: str, model: str) -> tuple[str, str]:
     return normalized_provider, normalized_model
 
 
-__all__ = ["InMemoryRunProgress", "ProviderEvidenceSnapshot", "RunProgressSnapshot"]
+__all__ = [
+    "InMemoryRunProgress",
+    "ProviderEvidenceSnapshot",
+    "RunProgressPage",
+    "RunProgressSummary",
+    "SequencedRun",
+]

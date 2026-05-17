@@ -23,7 +23,7 @@ These diagrams are intentionally **linear** (no `alt` / `par` / `loop`) to keep 
 | Domain | Flow | Goal | Actors | Auth / Context |
 |--------|------|------|--------|------|
 | Subnet runtime | Miner script upload | upload script artifact | Miner ↔ Platform | `Authorization: Bittensor ...` |
-| Subnet runtime | Miner-task batch | forward batch + run sandbox + poll progress | Platform ↔ Validator ↔ Sandbox | `Authorization: Bittensor ...` + `x-platform-token` + `x-session-id` + `x-host-container-url` |
+| Subnet runtime | Miner-task batch | forward batch + run sandbox + poll status and drain run pages | Platform ↔ Validator ↔ Sandbox | `Authorization: Bittensor ...` + `x-platform-token` + `x-session-id` + `x-host-container-url` |
 | Subnet runtime | Tool execution | agent invokes host tools | Sandbox agent ↔ Tool host | `x-platform-token` + `x-session-id` |
 | Subnet ops | Validator registration and weights | register API base URL; read weights | Validator ↔ Platform | `Authorization: Bittensor ...` |
 
@@ -62,10 +62,10 @@ sequenceDiagram
 
 | Overview | |
 |---|---|
-| **What’s happening** | Platform distributes a batch of `tasks` + `artifacts`; validator fetches artifacts; validator runs `query`; platform polls progress + status. |
+| **What’s happening** | Platform distributes a batch of `tasks` + `artifacts`; validator fetches artifacts; validator runs `query`; platform polls status and drains run pages. |
 | **Actors** | Platform ↔ Validator API ↔ Sandbox |
 | **Auth** | Platform↔Validator is Bittensor-signed; Validator↔Sandbox uses `x-platform-token` + `x-session-id` + `x-host-container-url`. |
-| **Happy path** | forward batch → fetch artifacts → run `query` → poll progress/status |
+| **Happy path** | forward batch → fetch artifacts → run `query` → poll status → drain run pages |
 
 #### 1) Platform forwards a batch to validators
 
@@ -124,8 +124,10 @@ sequenceDiagram
   participant V as Validator API
 
   Note over P,V: Authorization: Bittensor ss58="...",sig="..."
-  P->>V: GET /validator/miner-task-batches/{batch_id}/progress
-  V-->>P: 200 { total, completed, remaining, miner_task_runs:[...] }
+  P->>V: GET /validator/miner-task-batches/{batch_id}/status
+  V-->>P: 200 { status, total, completed, remaining, latest_sequence }
+  P->>V: GET /validator/miner-task-batches/{batch_id}/runs?after_sequence=N&limit=M
+  V-->>P: 200 { items:[{ sequence, submission }], next_after_sequence, has_more }
 
   P->>V: GET /validator/status
   V-->>P: 200 { status, running, ... }
@@ -140,7 +142,8 @@ sequenceDiagram
   - [GET /v1/miner-task-batches/{batch_id}/artifacts/{artifact_id}](generated/platform.md#endpoint-get-v1-miner-task-batches-batch_id-artifacts-artifact_id)
 - Validator:
   - [POST /validator/miner-task-batches/batch](generated/validator.md#endpoint-post-validator-miner-task-batches-batch)
-  - [GET /validator/miner-task-batches/{batch_id}/progress](generated/validator.md#endpoint-get-validator-miner-task-batches-batch_id-progress)
+  - [GET /validator/miner-task-batches/{batch_id}/status](generated/validator.md#endpoint-get-validator-miner-task-batches-batch_id-status)
+  - [GET /validator/miner-task-batches/{batch_id}/runs](generated/validator.md#endpoint-get-validator-miner-task-batches-batch_id-runs)
   - [GET /validator/status](generated/validator.md#endpoint-get-validator-status)
   - [POST /v1/tools/execute](generated/validator.md#endpoint-post-v1-tools-execute)
 - Sandbox:

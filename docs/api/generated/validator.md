@@ -5,7 +5,8 @@ Generated from FastAPI OpenAPI.
 ## Domains
 - [miner-task-batches](#miner-task-batches)
   - [POST /validator/miner-task-batches/batch](#endpoint-post-validator-miner-task-batches-batch)
-  - [GET /validator/miner-task-batches/{batch_id}/progress](#endpoint-get-validator-miner-task-batches-batch_id-progress)
+  - [GET /validator/miner-task-batches/{batch_id}/runs](#endpoint-get-validator-miner-task-batches-batch_id-runs)
+  - [GET /validator/miner-task-batches/{batch_id}/status](#endpoint-get-validator-miner-task-batches-batch_id-status)
 - [status](#status)
   - [GET /validator/status](#endpoint-get-validator-status)
 - [tools](#tools)
@@ -42,7 +43,7 @@ Body: [MinerTaskBatchRequestModel](#model-minertaskbatchrequestmodel)
 |  | `model` |  | req | `string` |
 |  | `provider` |  | req | `string` |
 |  | `total_calls` |  | req | `integer` |
-| `restore_runs` |  |  | opt | array[[RestoreMinerTaskRunSubmissionModel](#model-restoreminertaskrunsubmissionmodel)] |
+| `restore_runs` |  |  | opt | array[[RestoreMinerTaskRunSubmissionModel-Input](#model-restoreminertaskrunsubmissionmodel-input)] |
 |  | `batch_id` |  | req | `string` |
 |  | `execution_log` |  | opt | array[[ToolCall-Input](#model-toolcall-input)] (default: []) |
 |  |  | `details` | req | [ToolCallDetails-Input](#model-toolcalldetails-input) |
@@ -52,7 +53,7 @@ Body: [MinerTaskBatchRequestModel](#model-minertaskbatchrequestmodel)
 |  |  | `session_id` | req | `string` (format: uuid) |
 |  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
-|  | `run` |  | req | [RestoreMinerTaskRunModel](#model-restoreminertaskrunmodel) |
+|  | `run` |  | req | [RestoreMinerTaskRunModel-Input](#model-restoreminertaskrunmodel-input) |
 |  |  | `artifact_id` | req | `string` |
 |  |  | `completed_at` | opt | `string` (nullable) |
 |  |  | `response` | opt | [Response](#model-response) (nullable) |
@@ -111,12 +112,74 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 
 ### {batch_id}
 
-#### progress
+#### runs
 
-<a id="endpoint-get-validator-miner-task-batches-batch_id-progress"></a>
-##### GET /validator/miner-task-batches/{batch_id}/progress
+<a id="endpoint-get-validator-miner-task-batches-batch_id-runs"></a>
+##### GET /validator/miner-task-batches/{batch_id}/runs
 
-Return progress and results for a miner task batch.
+Return one bounded page of completed miner task runs for a batch.
+
+**Auth**: Bittensor-signed (`Authorization: Bittensor ss58="...",sig="..."`)
+
+**Parameters**
+| Param | In | Req | Notes |
+| --- | --- | --- | --- |
+| `batch_id` | path | req | `string` (format: uuid) |
+| `after_sequence` | query | opt | `integer` (default: 0) — Cursor; must be >= 0. |
+| `limit` | query | opt | `integer` (default: 100) — Page size; must be 1..500. |
+
+**Responses**
+`200` Successful Response
+Content-Type: `application/json`
+Body: [BatchProgressRunsPageResponse](#model-batchprogressrunspageresponse)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `after_sequence` |  |  | req | `integer` |
+| `batch_id` |  |  | req | `string` |
+| `failure_detail` |  |  | opt | [FailureDetailResponse](#model-failuredetailresponse) (nullable) |
+|  | `artifact_id` |  | opt | `string` (nullable) |
+|  | `error_code` |  | req | `string` |
+|  | `error_message` |  | req | `string` |
+|  | `exception_type` |  | opt | `string` (nullable) |
+|  | `occurred_at` |  | req | `string` |
+|  | `task_id` |  | opt | `string` (nullable) |
+|  | `traceback` |  | opt | `string` (nullable) |
+|  | `uid` |  | opt | `integer` (nullable) |
+| `has_more` |  |  | req | `boolean` |
+| `items` |  |  | req | array[[SequencedCompletedRunSubmissionModel](#model-sequencedcompletedrunsubmissionmodel)] |
+|  | `sequence` |  | req | `integer` |
+|  | `submission` |  | req | [RestoreMinerTaskRunSubmissionModel-Output](#model-restoreminertaskrunsubmissionmodel-output) |
+|  |  | `batch_id` | req | `string` |
+|  |  | `execution_log` | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
+|  |  | `run` | req | [RestoreMinerTaskRunModel-Output](#model-restoreminertaskrunmodel-output) |
+|  |  | `score` | req | `number` |
+|  |  | `session` | req | [SessionModel](#model-sessionmodel) |
+|  |  | `specifics` | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
+|  |  | `usage` | req | [UsageModel](#model-usagemodel) |
+|  |  | `validator` | req | [ValidatorModel](#model-validatormodel) |
+| `latest_sequence` |  |  | req | `integer` |
+| `limit` |  |  | req | `integer` |
+| `next_after_sequence` |  |  | req | `integer` |
+
+`422` Validation Error
+Content-Type: `application/json`
+Body: [HTTPValidationError](#model-httpvalidationerror)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `detail` |  |  | opt | array[[ValidationError](#model-validationerror)] |
+|  | `loc` |  | req | array[anyOf: `string` OR `integer`] |
+|  | `msg` |  | req | `string` |
+|  | `type` |  | req | `string` |
+
+
+#### status
+
+<a id="endpoint-get-validator-miner-task-batches-batch_id-status"></a>
+##### GET /validator/miner-task-batches/{batch_id}/status
+
+Return lightweight progress status for a miner task batch.
 
 **Auth**: Bittensor-signed (`Authorization: Bittensor ss58="...",sig="..."`)
 
@@ -128,7 +191,7 @@ Return progress and results for a miner task batch.
 **Responses**
 `200` Successful Response
 Content-Type: `application/json`
-Body: [ProgressResponse](#model-progressresponse)
+Body: [BatchProgressStatusResponse](#model-batchprogressstatusresponse)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
@@ -144,44 +207,7 @@ Body: [ProgressResponse](#model-progressresponse)
 |  | `task_id` |  | opt | `string` (nullable) |
 |  | `traceback` |  | opt | `string` (nullable) |
 |  | `uid` |  | opt | `integer` (nullable) |
-| `miner_task_runs` |  |  | req | array[[MinerTaskRunSubmissionModel](#model-minertaskrunsubmissionmodel)] |
-|  | `batch_id` |  | req | `string` |
-|  | `execution_log` |  | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
-|  |  | `details` | req | [ToolCallDetails-Output](#model-toolcalldetails-output) |
-|  |  | `issued_at` | req | `string` (format: date-time) |
-|  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
-|  |  | `receipt_id` | req | `string` |
-|  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
-|  |  | `uid` | req | `integer` |
-|  | `run` |  | req | [MinerTaskRunModel](#model-minertaskrunmodel) |
-|  |  | `artifact_id` | req | `string` |
-|  |  | `completed_at` | opt | `string` (nullable) |
-|  |  | `query` | req | [Query](#model-query) |
-|  |  | `reference_answer` | req | [ReferenceAnswer](#model-referenceanswer) |
-|  |  | `response` | opt | [Response](#model-response) (nullable) |
-|  |  | `task_id` | req | `string` |
-|  |  | `uid` | req | `integer` |
-|  | `score` |  | req | `number` |
-|  | `session` |  | req | [SessionModel](#model-sessionmodel) |
-|  |  | `expires_at` | req | `string` |
-|  |  | `issued_at` | req | `string` |
-|  |  | `session_id` | req | `string` |
-|  |  | `status` | req | `string` |
-|  |  | `uid` | req | `integer` |
-|  | `specifics` |  | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
-|  |  | `elapsed_ms` | opt | `number` (nullable) |
-|  |  | `error` | opt | [EvaluationError](#model-evaluationerror) (nullable) |
-|  |  | `score_breakdown` | opt | [ScoreBreakdown](#model-scorebreakdown) (nullable) |
-|  |  | `total_tool_usage` | opt | [ToolUsageSummary-Output](#model-toolusagesummary-output) |
-|  | `usage` |  | req | [UsageModel](#model-usagemodel) |
-|  |  | `by_provider` | opt | `object` |
-|  |  | `call_count` | req | `integer` |
-|  |  | `total_completion_tokens` | req | `integer` |
-|  |  | `total_prompt_tokens` | req | `integer` |
-|  |  | `total_tokens` | req | `integer` |
-|  | `validator` |  | req | [ValidatorModel](#model-validatormodel) |
-|  |  | `uid` | req | `integer` |
+| `latest_sequence` |  |  | req | `integer` |
 | `provider_model_evidence` |  |  | opt | array[[ProviderEvidenceModel](#model-providerevidencemodel)] |
 |  | `failed_calls` |  | req | `integer` |
 |  | `failure_reason` |  | opt | `string` (nullable) |
@@ -417,6 +443,223 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     "caller"
   ],
   "title": "BatchAcceptResponse",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-batchprogressrunspageresponse"></a>
+### Model: BatchProgressRunsPageResponse
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `after_sequence` |  |  | req | `integer` |
+| `batch_id` |  |  | req | `string` |
+| `failure_detail` |  |  | opt | [FailureDetailResponse](#model-failuredetailresponse) (nullable) |
+|  | `artifact_id` |  | opt | `string` (nullable) |
+|  | `error_code` |  | req | `string` |
+|  | `error_message` |  | req | `string` |
+|  | `exception_type` |  | opt | `string` (nullable) |
+|  | `occurred_at` |  | req | `string` |
+|  | `task_id` |  | opt | `string` (nullable) |
+|  | `traceback` |  | opt | `string` (nullable) |
+|  | `uid` |  | opt | `integer` (nullable) |
+| `has_more` |  |  | req | `boolean` |
+| `items` |  |  | req | array[[SequencedCompletedRunSubmissionModel](#model-sequencedcompletedrunsubmissionmodel)] |
+|  | `sequence` |  | req | `integer` |
+|  | `submission` |  | req | [RestoreMinerTaskRunSubmissionModel-Output](#model-restoreminertaskrunsubmissionmodel-output) |
+|  |  | `batch_id` | req | `string` |
+|  |  | `execution_log` | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
+|  |  | `run` | req | [RestoreMinerTaskRunModel-Output](#model-restoreminertaskrunmodel-output) |
+|  |  | `score` | req | `number` |
+|  |  | `session` | req | [SessionModel](#model-sessionmodel) |
+|  |  | `specifics` | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
+|  |  | `usage` | req | [UsageModel](#model-usagemodel) |
+|  |  | `validator` | req | [ValidatorModel](#model-validatormodel) |
+| `latest_sequence` |  |  | req | `integer` |
+| `limit` |  |  | req | `integer` |
+| `next_after_sequence` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "after_sequence": {
+      "minimum": 0.0,
+      "title": "After Sequence",
+      "type": "integer"
+    },
+    "batch_id": {
+      "minLength": 1,
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "failure_detail": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/FailureDetailResponse"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "has_more": {
+      "title": "Has More",
+      "type": "boolean"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/components/schemas/SequencedCompletedRunSubmissionModel"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "latest_sequence": {
+      "minimum": 0.0,
+      "title": "Latest Sequence",
+      "type": "integer"
+    },
+    "limit": {
+      "minimum": 1.0,
+      "title": "Limit",
+      "type": "integer"
+    },
+    "next_after_sequence": {
+      "minimum": 0.0,
+      "title": "Next After Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "batch_id",
+    "after_sequence",
+    "limit",
+    "latest_sequence",
+    "next_after_sequence",
+    "has_more",
+    "items"
+  ],
+  "title": "BatchProgressRunsPageResponse",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-batchprogressstatusresponse"></a>
+### Model: BatchProgressStatusResponse
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `batch_id` |  |  | req | `string` |
+| `completed` |  |  | req | `integer` |
+| `error_code` |  |  | opt | `string` (nullable) |
+| `failure_detail` |  |  | opt | [FailureDetailResponse](#model-failuredetailresponse) (nullable) |
+|  | `artifact_id` |  | opt | `string` (nullable) |
+|  | `error_code` |  | req | `string` |
+|  | `error_message` |  | req | `string` |
+|  | `exception_type` |  | opt | `string` (nullable) |
+|  | `occurred_at` |  | req | `string` |
+|  | `task_id` |  | opt | `string` (nullable) |
+|  | `traceback` |  | opt | `string` (nullable) |
+|  | `uid` |  | opt | `integer` (nullable) |
+| `latest_sequence` |  |  | req | `integer` |
+| `provider_model_evidence` |  |  | opt | array[[ProviderEvidenceModel](#model-providerevidencemodel)] |
+|  | `failed_calls` |  | req | `integer` |
+|  | `failure_reason` |  | opt | `string` (nullable) |
+|  | `model` |  | req | `string` |
+|  | `provider` |  | req | `string` |
+|  | `total_calls` |  | req | `integer` |
+| `remaining` |  |  | req | `integer` |
+| `status` |  |  | req | `string` (enum: [unknown, queued, processing, completed, failed]) |
+| `total` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "batch_id": {
+      "minLength": 1,
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "completed": {
+      "minimum": 0.0,
+      "title": "Completed",
+      "type": "integer"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Error Code"
+    },
+    "failure_detail": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/FailureDetailResponse"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "latest_sequence": {
+      "minimum": 0.0,
+      "title": "Latest Sequence",
+      "type": "integer"
+    },
+    "provider_model_evidence": {
+      "items": {
+        "$ref": "#/components/schemas/ProviderEvidenceModel"
+      },
+      "title": "Provider Model Evidence",
+      "type": "array"
+    },
+    "remaining": {
+      "minimum": 0.0,
+      "title": "Remaining",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "unknown",
+        "queued",
+        "processing",
+        "completed",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "total": {
+      "minimum": 0.0,
+      "title": "Total",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "batch_id",
+    "status",
+    "total",
+    "completed",
+    "remaining",
+    "latest_sequence"
+  ],
+  "title": "BatchProgressStatusResponse",
   "type": "object"
 }
 ```
@@ -1152,7 +1395,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `model` |  | req | `string` |
 |  | `provider` |  | req | `string` |
 |  | `total_calls` |  | req | `integer` |
-| `restore_runs` |  |  | opt | array[[RestoreMinerTaskRunSubmissionModel](#model-restoreminertaskrunsubmissionmodel)] |
+| `restore_runs` |  |  | opt | array[[RestoreMinerTaskRunSubmissionModel-Input](#model-restoreminertaskrunsubmissionmodel-input)] |
 |  | `batch_id` |  | req | `string` |
 |  | `execution_log` |  | opt | array[[ToolCall-Input](#model-toolcall-input)] (default: []) |
 |  |  | `details` | req | [ToolCallDetails-Input](#model-toolcalldetails-input) |
@@ -1162,7 +1405,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  |  | `session_id` | req | `string` (format: uuid) |
 |  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
-|  | `run` |  | req | [RestoreMinerTaskRunModel](#model-restoreminertaskrunmodel) |
+|  | `run` |  | req | [RestoreMinerTaskRunModel-Input](#model-restoreminertaskrunmodel-input) |
 |  |  | `artifact_id` | req | `string` |
 |  |  | `completed_at` | opt | `string` (nullable) |
 |  |  | `response` | opt | [Response](#model-response) (nullable) |
@@ -1234,7 +1477,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     },
     "restore_runs": {
       "items": {
-        "$ref": "#/components/schemas/RestoreMinerTaskRunSubmissionModel"
+        "$ref": "#/components/schemas/RestoreMinerTaskRunSubmissionModel-Input"
       },
       "title": "Restore Runs",
       "type": "array"
@@ -1353,380 +1596,6 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     "reference_answer"
   ],
   "title": "MinerTaskRequestModel",
-  "type": "object"
-}
-```
-
-</details>
-
-<a id="model-minertaskrunmodel"></a>
-### Model: MinerTaskRunModel
-
-| 1st level | 2nd level | 3rd level | Req | Notes |
-| --- | --- | --- | --- | --- |
-| `artifact_id` |  |  | req | `string` |
-| `completed_at` |  |  | opt | `string` (nullable) |
-| `query` |  |  | req | [Query](#model-query) |
-|  | `text` |  | req | `string` |
-| `reference_answer` |  |  | req | [ReferenceAnswer](#model-referenceanswer) |
-|  | `citations` |  | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
-|  |  | `note` | opt | `string` (nullable) |
-|  |  | `title` | opt | `string` (nullable) |
-|  |  | `url` | req | `string` |
-|  | `text` |  | req | `string` |
-| `response` |  |  | opt | [Response](#model-response) (nullable) |
-|  | `citations` |  | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
-|  |  | `note` | opt | `string` (nullable) |
-|  |  | `title` | opt | `string` (nullable) |
-|  |  | `url` | req | `string` |
-|  | `text` |  | req | `string` |
-| `task_id` |  |  | req | `string` |
-| `uid` |  |  | req | `integer` |
-
-<details>
-<summary>JSON schema</summary>
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "artifact_id": {
-      "minLength": 1,
-      "title": "Artifact Id",
-      "type": "string"
-    },
-    "completed_at": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "title": "Completed At"
-    },
-    "query": {
-      "$ref": "#/components/schemas/Query"
-    },
-    "reference_answer": {
-      "$ref": "#/components/schemas/ReferenceAnswer"
-    },
-    "response": {
-      "anyOf": [
-        {
-          "$ref": "#/components/schemas/Response"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "task_id": {
-      "minLength": 1,
-      "title": "Task Id",
-      "type": "string"
-    },
-    "uid": {
-      "minimum": 0.0,
-      "title": "Uid",
-      "type": "integer"
-    }
-  },
-  "required": [
-    "uid",
-    "artifact_id",
-    "task_id",
-    "query",
-    "reference_answer"
-  ],
-  "title": "MinerTaskRunModel",
-  "type": "object"
-}
-```
-
-</details>
-
-<a id="model-minertaskrunsubmissionmodel"></a>
-### Model: MinerTaskRunSubmissionModel
-
-| 1st level | 2nd level | 3rd level | Req | Notes |
-| --- | --- | --- | --- | --- |
-| `batch_id` |  |  | req | `string` |
-| `execution_log` |  |  | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
-|  | `details` |  | req | [ToolCallDetails-Output](#model-toolcalldetails-output) |
-|  |  | `actual_cost_provider` | opt | `string` (nullable) |
-|  |  | `actual_cost_usd` | opt | `number` (nullable) |
-|  |  | `cost_usd` | opt | `number` (nullable) |
-|  |  | `execution` | opt | [ToolExecutionFacts](#model-toolexecutionfacts) (nullable) |
-|  |  | `extra` | opt | `object` (nullable) |
-|  |  | `reference_cost_usd` | opt | `number` (nullable) |
-|  |  | `request_hash` | req | `string` |
-|  |  | `request_payload` | opt | [harnyx_miner_sdk__json_types__JsonValue-Output](#model-harnyx_miner_sdk__json_types__jsonvalue-output) (nullable) |
-|  |  | `response_hash` | opt | `string` (nullable) |
-|  |  | `response_payload` | opt | [harnyx_miner_sdk__json_types__JsonValue-Output](#model-harnyx_miner_sdk__json_types__jsonvalue-output) (nullable) |
-|  |  | `result_policy` | opt | [ToolResultPolicy](#model-toolresultpolicy) (default: log_only) |
-|  |  | `results` | opt | array[[ToolResult-Output](#model-toolresult-output)] (default: []) |
-|  | `issued_at` |  | req | `string` (format: date-time) |
-|  | `outcome` |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
-|  | `receipt_id` |  | req | `string` |
-|  | `session_id` |  | req | `string` (format: uuid) |
-|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
-|  | `uid` |  | req | `integer` |
-| `run` |  |  | req | [MinerTaskRunModel](#model-minertaskrunmodel) |
-|  | `artifact_id` |  | req | `string` |
-|  | `completed_at` |  | opt | `string` (nullable) |
-|  | `query` |  | req | [Query](#model-query) |
-|  |  | `text` | req | `string` |
-|  | `reference_answer` |  | req | [ReferenceAnswer](#model-referenceanswer) |
-|  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
-|  |  | `text` | req | `string` |
-|  | `response` |  | opt | [Response](#model-response) (nullable) |
-|  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
-|  |  | `text` | req | `string` |
-|  | `task_id` |  | req | `string` |
-|  | `uid` |  | req | `integer` |
-| `score` |  |  | req | `number` |
-| `session` |  |  | req | [SessionModel](#model-sessionmodel) |
-|  | `expires_at` |  | req | `string` |
-|  | `issued_at` |  | req | `string` |
-|  | `session_id` |  | req | `string` |
-|  | `status` |  | req | `string` |
-|  | `uid` |  | req | `integer` |
-| `specifics` |  |  | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
-|  | `elapsed_ms` |  | opt | `number` (nullable) |
-|  | `error` |  | opt | [EvaluationError](#model-evaluationerror) (nullable) |
-|  |  | `code` | req | [MinerTaskErrorCode](#model-minertaskerrorcode) |
-|  |  | `message` | req | `string` |
-|  | `score_breakdown` |  | opt | [ScoreBreakdown](#model-scorebreakdown) (nullable) |
-|  |  | `comparison_score` | req | `number` |
-|  |  | `reasoning` | opt | [ScorerReasoning](#model-scorerreasoning) (nullable) |
-|  |  | `scoring_version` | req | `string` |
-|  |  | `total_score` | req | `number` |
-|  | `total_tool_usage` |  | opt | [ToolUsageSummary-Output](#model-toolusagesummary-output) |
-|  |  | `actual_cost_by_provider` | opt | `object` |
-|  |  | `actual_total_cost_usd` | opt | `number` (nullable) |
-|  |  | `llm` | opt | [LlmUsageSummary-Output](#model-llmusagesummary-output) |
-|  |  | `llm_cost` | opt | `number` (default: 0.0) |
-|  |  | `reference_cost_by_provider` | opt | `object` |
-|  |  | `reference_total_cost_usd` | opt | `number` (default: 0.0) |
-|  |  | `search_tool` | opt | [SearchToolUsageSummary](#model-searchtoolusagesummary) |
-|  |  | `search_tool_cost` | opt | `number` (default: 0.0) |
-| `usage` |  |  | req | [UsageModel](#model-usagemodel) |
-|  | `by_provider` |  | opt | `object` |
-|  | `call_count` |  | req | `integer` |
-|  | `total_completion_tokens` |  | req | `integer` |
-|  | `total_prompt_tokens` |  | req | `integer` |
-|  | `total_tokens` |  | req | `integer` |
-| `validator` |  |  | req | [ValidatorModel](#model-validatormodel) |
-|  | `uid` |  | req | `integer` |
-
-<details>
-<summary>JSON schema</summary>
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "batch_id": {
-      "minLength": 1,
-      "title": "Batch Id",
-      "type": "string"
-    },
-    "execution_log": {
-      "default": [],
-      "items": {
-        "$ref": "#/components/schemas/ToolCall-Output"
-      },
-      "title": "Execution Log",
-      "type": "array"
-    },
-    "run": {
-      "$ref": "#/components/schemas/MinerTaskRunModel"
-    },
-    "score": {
-      "maximum": 1.0,
-      "minimum": 0.0,
-      "title": "Score",
-      "type": "number"
-    },
-    "session": {
-      "$ref": "#/components/schemas/SessionModel"
-    },
-    "specifics": {
-      "$ref": "#/components/schemas/EvaluationDetails-Output"
-    },
-    "usage": {
-      "$ref": "#/components/schemas/UsageModel"
-    },
-    "validator": {
-      "$ref": "#/components/schemas/ValidatorModel"
-    }
-  },
-  "required": [
-    "batch_id",
-    "validator",
-    "run",
-    "score",
-    "usage",
-    "session",
-    "specifics"
-  ],
-  "title": "MinerTaskRunSubmissionModel",
-  "type": "object"
-}
-```
-
-</details>
-
-<a id="model-progressresponse"></a>
-### Model: ProgressResponse
-
-| 1st level | 2nd level | 3rd level | Req | Notes |
-| --- | --- | --- | --- | --- |
-| `batch_id` |  |  | req | `string` |
-| `completed` |  |  | req | `integer` |
-| `error_code` |  |  | opt | `string` (nullable) |
-| `failure_detail` |  |  | opt | [FailureDetailResponse](#model-failuredetailresponse) (nullable) |
-|  | `artifact_id` |  | opt | `string` (nullable) |
-|  | `error_code` |  | req | `string` |
-|  | `error_message` |  | req | `string` |
-|  | `exception_type` |  | opt | `string` (nullable) |
-|  | `occurred_at` |  | req | `string` |
-|  | `task_id` |  | opt | `string` (nullable) |
-|  | `traceback` |  | opt | `string` (nullable) |
-|  | `uid` |  | opt | `integer` (nullable) |
-| `miner_task_runs` |  |  | req | array[[MinerTaskRunSubmissionModel](#model-minertaskrunsubmissionmodel)] |
-|  | `batch_id` |  | req | `string` |
-|  | `execution_log` |  | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
-|  |  | `details` | req | [ToolCallDetails-Output](#model-toolcalldetails-output) |
-|  |  | `issued_at` | req | `string` (format: date-time) |
-|  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
-|  |  | `receipt_id` | req | `string` |
-|  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
-|  |  | `uid` | req | `integer` |
-|  | `run` |  | req | [MinerTaskRunModel](#model-minertaskrunmodel) |
-|  |  | `artifact_id` | req | `string` |
-|  |  | `completed_at` | opt | `string` (nullable) |
-|  |  | `query` | req | [Query](#model-query) |
-|  |  | `reference_answer` | req | [ReferenceAnswer](#model-referenceanswer) |
-|  |  | `response` | opt | [Response](#model-response) (nullable) |
-|  |  | `task_id` | req | `string` |
-|  |  | `uid` | req | `integer` |
-|  | `score` |  | req | `number` |
-|  | `session` |  | req | [SessionModel](#model-sessionmodel) |
-|  |  | `expires_at` | req | `string` |
-|  |  | `issued_at` | req | `string` |
-|  |  | `session_id` | req | `string` |
-|  |  | `status` | req | `string` |
-|  |  | `uid` | req | `integer` |
-|  | `specifics` |  | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
-|  |  | `elapsed_ms` | opt | `number` (nullable) |
-|  |  | `error` | opt | [EvaluationError](#model-evaluationerror) (nullable) |
-|  |  | `score_breakdown` | opt | [ScoreBreakdown](#model-scorebreakdown) (nullable) |
-|  |  | `total_tool_usage` | opt | [ToolUsageSummary-Output](#model-toolusagesummary-output) |
-|  | `usage` |  | req | [UsageModel](#model-usagemodel) |
-|  |  | `by_provider` | opt | `object` |
-|  |  | `call_count` | req | `integer` |
-|  |  | `total_completion_tokens` | req | `integer` |
-|  |  | `total_prompt_tokens` | req | `integer` |
-|  |  | `total_tokens` | req | `integer` |
-|  | `validator` |  | req | [ValidatorModel](#model-validatormodel) |
-|  |  | `uid` | req | `integer` |
-| `provider_model_evidence` |  |  | opt | array[[ProviderEvidenceModel](#model-providerevidencemodel)] |
-|  | `failed_calls` |  | req | `integer` |
-|  | `failure_reason` |  | opt | `string` (nullable) |
-|  | `model` |  | req | `string` |
-|  | `provider` |  | req | `string` |
-|  | `total_calls` |  | req | `integer` |
-| `remaining` |  |  | req | `integer` |
-| `status` |  |  | req | `string` (enum: [unknown, queued, processing, completed, failed]) |
-| `total` |  |  | req | `integer` |
-
-<details>
-<summary>JSON schema</summary>
-
-```json
-{
-  "additionalProperties": false,
-  "properties": {
-    "batch_id": {
-      "minLength": 1,
-      "title": "Batch Id",
-      "type": "string"
-    },
-    "completed": {
-      "minimum": 0.0,
-      "title": "Completed",
-      "type": "integer"
-    },
-    "error_code": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "title": "Error Code"
-    },
-    "failure_detail": {
-      "anyOf": [
-        {
-          "$ref": "#/components/schemas/FailureDetailResponse"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "miner_task_runs": {
-      "items": {
-        "$ref": "#/components/schemas/MinerTaskRunSubmissionModel"
-      },
-      "title": "Miner Task Runs",
-      "type": "array"
-    },
-    "provider_model_evidence": {
-      "items": {
-        "$ref": "#/components/schemas/ProviderEvidenceModel"
-      },
-      "title": "Provider Model Evidence",
-      "type": "array"
-    },
-    "remaining": {
-      "minimum": 0.0,
-      "title": "Remaining",
-      "type": "integer"
-    },
-    "status": {
-      "enum": [
-        "unknown",
-        "queued",
-        "processing",
-        "completed",
-        "failed"
-      ],
-      "title": "Status",
-      "type": "string"
-    },
-    "total": {
-      "minimum": 0.0,
-      "title": "Total",
-      "type": "integer"
-    }
-  },
-  "required": [
-    "batch_id",
-    "status",
-    "total",
-    "completed",
-    "remaining",
-    "miner_task_runs"
-  ],
-  "title": "ProgressResponse",
   "type": "object"
 }
 ```
@@ -1937,8 +1806,8 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 
 </details>
 
-<a id="model-restoreminertaskrunmodel"></a>
-### Model: RestoreMinerTaskRunModel
+<a id="model-restoreminertaskrunmodel-input"></a>
+### Model: RestoreMinerTaskRunModel-Input
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
@@ -2002,8 +1871,73 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 
 </details>
 
-<a id="model-restoreminertaskrunsubmissionmodel"></a>
-### Model: RestoreMinerTaskRunSubmissionModel
+<a id="model-restoreminertaskrunmodel-output"></a>
+### Model: RestoreMinerTaskRunModel-Output
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `artifact_id` |  |  | req | `string` |
+| `completed_at` |  |  | opt | `string` (nullable) |
+| `response` |  |  | opt | [Response](#model-response) (nullable) |
+|  | `citations` |  | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
+|  |  | `note` | opt | `string` (nullable) |
+|  |  | `title` | opt | `string` (nullable) |
+|  |  | `url` | req | `string` |
+|  | `text` |  | req | `string` |
+| `task_id` |  |  | req | `string` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "minLength": 1,
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Completed At"
+    },
+    "response": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/Response"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id"
+  ],
+  "title": "RestoreMinerTaskRunModel",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-restoreminertaskrunsubmissionmodel-input"></a>
+### Model: RestoreMinerTaskRunSubmissionModel-Input
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
@@ -2028,7 +1962,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `session_id` |  | req | `string` (format: uuid) |
 |  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
 |  | `uid` |  | req | `integer` |
-| `run` |  |  | req | [RestoreMinerTaskRunModel](#model-restoreminertaskrunmodel) |
+| `run` |  |  | req | [RestoreMinerTaskRunModel-Input](#model-restoreminertaskrunmodel-input) |
 |  | `artifact_id` |  | req | `string` |
 |  | `completed_at` |  | opt | `string` (nullable) |
 |  | `response` |  | opt | [Response](#model-response) (nullable) |
@@ -2091,7 +2025,7 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
       "type": "array"
     },
     "run": {
-      "$ref": "#/components/schemas/RestoreMinerTaskRunModel"
+      "$ref": "#/components/schemas/RestoreMinerTaskRunModel-Input"
     },
     "score": {
       "maximum": 1.0,
@@ -2104,6 +2038,132 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     },
     "specifics": {
       "$ref": "#/components/schemas/EvaluationDetails-Input"
+    },
+    "usage": {
+      "$ref": "#/components/schemas/UsageModel"
+    },
+    "validator": {
+      "$ref": "#/components/schemas/ValidatorModel"
+    }
+  },
+  "required": [
+    "batch_id",
+    "validator",
+    "run",
+    "score",
+    "usage",
+    "session",
+    "specifics"
+  ],
+  "title": "RestoreMinerTaskRunSubmissionModel",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-restoreminertaskrunsubmissionmodel-output"></a>
+### Model: RestoreMinerTaskRunSubmissionModel-Output
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `batch_id` |  |  | req | `string` |
+| `execution_log` |  |  | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
+|  | `details` |  | req | [ToolCallDetails-Output](#model-toolcalldetails-output) |
+|  |  | `actual_cost_provider` | opt | `string` (nullable) |
+|  |  | `actual_cost_usd` | opt | `number` (nullable) |
+|  |  | `cost_usd` | opt | `number` (nullable) |
+|  |  | `execution` | opt | [ToolExecutionFacts](#model-toolexecutionfacts) (nullable) |
+|  |  | `extra` | opt | `object` (nullable) |
+|  |  | `reference_cost_usd` | opt | `number` (nullable) |
+|  |  | `request_hash` | req | `string` |
+|  |  | `request_payload` | opt | [harnyx_miner_sdk__json_types__JsonValue-Output](#model-harnyx_miner_sdk__json_types__jsonvalue-output) (nullable) |
+|  |  | `response_hash` | opt | `string` (nullable) |
+|  |  | `response_payload` | opt | [harnyx_miner_sdk__json_types__JsonValue-Output](#model-harnyx_miner_sdk__json_types__jsonvalue-output) (nullable) |
+|  |  | `result_policy` | opt | [ToolResultPolicy](#model-toolresultpolicy) (default: log_only) |
+|  |  | `results` | opt | array[[ToolResult-Output](#model-toolresult-output)] (default: []) |
+|  | `issued_at` |  | req | `string` (format: date-time) |
+|  | `outcome` |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
+|  | `receipt_id` |  | req | `string` |
+|  | `session_id` |  | req | `string` (format: uuid) |
+|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  | `uid` |  | req | `integer` |
+| `run` |  |  | req | [RestoreMinerTaskRunModel-Output](#model-restoreminertaskrunmodel-output) |
+|  | `artifact_id` |  | req | `string` |
+|  | `completed_at` |  | opt | `string` (nullable) |
+|  | `response` |  | opt | [Response](#model-response) (nullable) |
+|  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
+|  |  | `text` | req | `string` |
+|  | `task_id` |  | req | `string` |
+| `score` |  |  | req | `number` |
+| `session` |  |  | req | [SessionModel](#model-sessionmodel) |
+|  | `expires_at` |  | req | `string` |
+|  | `issued_at` |  | req | `string` |
+|  | `session_id` |  | req | `string` |
+|  | `status` |  | req | `string` |
+|  | `uid` |  | req | `integer` |
+| `specifics` |  |  | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
+|  | `elapsed_ms` |  | opt | `number` (nullable) |
+|  | `error` |  | opt | [EvaluationError](#model-evaluationerror) (nullable) |
+|  |  | `code` | req | [MinerTaskErrorCode](#model-minertaskerrorcode) |
+|  |  | `message` | req | `string` |
+|  | `score_breakdown` |  | opt | [ScoreBreakdown](#model-scorebreakdown) (nullable) |
+|  |  | `comparison_score` | req | `number` |
+|  |  | `reasoning` | opt | [ScorerReasoning](#model-scorerreasoning) (nullable) |
+|  |  | `scoring_version` | req | `string` |
+|  |  | `total_score` | req | `number` |
+|  | `total_tool_usage` |  | opt | [ToolUsageSummary-Output](#model-toolusagesummary-output) |
+|  |  | `actual_cost_by_provider` | opt | `object` |
+|  |  | `actual_total_cost_usd` | opt | `number` (nullable) |
+|  |  | `llm` | opt | [LlmUsageSummary-Output](#model-llmusagesummary-output) |
+|  |  | `llm_cost` | opt | `number` (default: 0.0) |
+|  |  | `reference_cost_by_provider` | opt | `object` |
+|  |  | `reference_total_cost_usd` | opt | `number` (default: 0.0) |
+|  |  | `search_tool` | opt | [SearchToolUsageSummary](#model-searchtoolusagesummary) |
+|  |  | `search_tool_cost` | opt | `number` (default: 0.0) |
+| `usage` |  |  | req | [UsageModel](#model-usagemodel) |
+|  | `by_provider` |  | opt | `object` |
+|  | `call_count` |  | req | `integer` |
+|  | `total_completion_tokens` |  | req | `integer` |
+|  | `total_prompt_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
+| `validator` |  |  | req | [ValidatorModel](#model-validatormodel) |
+|  | `uid` |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "batch_id": {
+      "minLength": 1,
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "execution_log": {
+      "default": [],
+      "items": {
+        "$ref": "#/components/schemas/ToolCall-Output"
+      },
+      "title": "Execution Log",
+      "type": "array"
+    },
+    "run": {
+      "$ref": "#/components/schemas/RestoreMinerTaskRunModel-Output"
+    },
+    "score": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Score",
+      "type": "number"
+    },
+    "session": {
+      "$ref": "#/components/schemas/SessionModel"
+    },
+    "specifics": {
+      "$ref": "#/components/schemas/EvaluationDetails-Output"
     },
     "usage": {
       "$ref": "#/components/schemas/UsageModel"
@@ -2329,6 +2389,75 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     }
   },
   "title": "SearchToolUsageSummary",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-sequencedcompletedrunsubmissionmodel"></a>
+### Model: SequencedCompletedRunSubmissionModel
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `sequence` |  |  | req | `integer` |
+| `submission` |  |  | req | [RestoreMinerTaskRunSubmissionModel-Output](#model-restoreminertaskrunsubmissionmodel-output) |
+|  | `batch_id` |  | req | `string` |
+|  | `execution_log` |  | opt | array[[ToolCall-Output](#model-toolcall-output)] (default: []) |
+|  |  | `details` | req | [ToolCallDetails-Output](#model-toolcalldetails-output) |
+|  |  | `issued_at` | req | `string` (format: date-time) |
+|  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
+|  |  | `receipt_id` | req | `string` |
+|  |  | `session_id` | req | `string` (format: uuid) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `uid` | req | `integer` |
+|  | `run` |  | req | [RestoreMinerTaskRunModel-Output](#model-restoreminertaskrunmodel-output) |
+|  |  | `artifact_id` | req | `string` |
+|  |  | `completed_at` | opt | `string` (nullable) |
+|  |  | `response` | opt | [Response](#model-response) (nullable) |
+|  |  | `task_id` | req | `string` |
+|  | `score` |  | req | `number` |
+|  | `session` |  | req | [SessionModel](#model-sessionmodel) |
+|  |  | `expires_at` | req | `string` |
+|  |  | `issued_at` | req | `string` |
+|  |  | `session_id` | req | `string` |
+|  |  | `status` | req | `string` |
+|  |  | `uid` | req | `integer` |
+|  | `specifics` |  | req | [EvaluationDetails-Output](#model-evaluationdetails-output) |
+|  |  | `elapsed_ms` | opt | `number` (nullable) |
+|  |  | `error` | opt | [EvaluationError](#model-evaluationerror) (nullable) |
+|  |  | `score_breakdown` | opt | [ScoreBreakdown](#model-scorebreakdown) (nullable) |
+|  |  | `total_tool_usage` | opt | [ToolUsageSummary-Output](#model-toolusagesummary-output) |
+|  | `usage` |  | req | [UsageModel](#model-usagemodel) |
+|  |  | `by_provider` | opt | `object` |
+|  |  | `call_count` | req | `integer` |
+|  |  | `total_completion_tokens` | req | `integer` |
+|  |  | `total_prompt_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
+|  | `validator` |  | req | [ValidatorModel](#model-validatormodel) |
+|  |  | `uid` | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "sequence": {
+      "minimum": 1.0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "submission": {
+      "$ref": "#/components/schemas/RestoreMinerTaskRunSubmissionModel-Output"
+    }
+  },
+  "required": [
+    "sequence",
+    "submission"
+  ],
+  "title": "SequencedCompletedRunSubmissionModel",
   "type": "object"
 }
 ```

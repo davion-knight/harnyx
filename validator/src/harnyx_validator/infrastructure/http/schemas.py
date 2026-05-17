@@ -196,18 +196,6 @@ class MinerTaskBatchRequestModel(BaseModel):
         return tuple(entry.to_domain() for entry in self.restore_provider_evidence)
 
 
-class MinerTaskRunModel(BaseModel):
-    model_config = VALIDATOR_STRICT_CONFIG
-
-    uid: int = Field(ge=0)
-    artifact_id: str = Field(min_length=1)
-    task_id: str = Field(min_length=1)
-    query: Query
-    reference_answer: ReferenceAnswer
-    completed_at: str | None = None
-    response: Response | None = None
-
-
 class RestoreMinerTaskRunModel(BaseModel):
     model_config = VALIDATOR_STRICT_CONFIG
 
@@ -282,19 +270,6 @@ class RestoreMinerTaskRunSubmissionModel(BaseModel):
             usage=self.usage.to_domain(),
             session=session,
         )
-
-
-class MinerTaskRunSubmissionModel(BaseModel):
-    model_config = VALIDATOR_STRICT_CONFIG
-
-    batch_id: str = Field(min_length=1)
-    validator: ValidatorModel
-    run: MinerTaskRunModel
-    score: float = Field(ge=0.0, le=1.0)
-    execution_log: tuple[ToolCall, ...] = ()
-    usage: UsageModel
-    session: SessionModel
-    specifics: EvaluationDetails
 
 
 def _filter_unknown_execution_log_entries(value: object) -> object:
@@ -386,7 +361,7 @@ class ProviderEvidenceModel(BaseModel):
         return evidence
 
 
-class ProgressResponse(BaseModel):
+class BatchProgressStatusResponse(BaseModel):
     model_config = VALIDATOR_STRICT_CONFIG
 
     batch_id: str = Field(min_length=1)
@@ -396,8 +371,28 @@ class ProgressResponse(BaseModel):
     total: int = Field(ge=0)
     completed: int = Field(ge=0)
     remaining: int = Field(ge=0)
-    miner_task_runs: list[MinerTaskRunSubmissionModel]
+    latest_sequence: int = Field(ge=0)
     provider_model_evidence: list[ProviderEvidenceModel] = Field(default_factory=list)
+
+
+class SequencedCompletedRunSubmissionModel(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    sequence: int = Field(ge=1)
+    submission: RestoreMinerTaskRunSubmissionModel
+
+
+class BatchProgressRunsPageResponse(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    batch_id: str = Field(min_length=1)
+    after_sequence: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    latest_sequence: int = Field(ge=0)
+    next_after_sequence: int = Field(ge=0)
+    has_more: bool
+    items: list[SequencedCompletedRunSubmissionModel]
+    failure_detail: FailureDetailResponse | None = None
 
 
 class ValidatorResourceUsageResponse(BaseModel):
@@ -432,15 +427,17 @@ class ValidatorStatusResponse(BaseModel):
 
 __all__ = [
     "BatchAcceptResponse",
+    "BatchProgressRunsPageResponse",
+    "BatchProgressStatusResponse",
     "FailureDetailResponse",
     "MinerTaskBatchRequestModel",
     "MinerTaskRequestModel",
-    "MinerTaskRunModel",
-    "MinerTaskRunSubmissionModel",
     "ProviderEvidenceModel",
-    "ProgressResponse",
+    "RestoreMinerTaskRunModel",
+    "RestoreMinerTaskRunSubmissionModel",
     "SessionModel",
     "ScriptArtifactRequestModel",
+    "SequencedCompletedRunSubmissionModel",
     "ToolExecuteResponseDTO",
     "ToolResultDTO",
     "UsageModel",

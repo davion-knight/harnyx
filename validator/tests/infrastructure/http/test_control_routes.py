@@ -51,7 +51,7 @@ from harnyx_validator.infrastructure.http.routes import (
     add_control_routes,
 )
 from harnyx_validator.infrastructure.state.batch_inbox import InMemoryBatchInbox
-from harnyx_validator.infrastructure.state.run_progress import InMemoryRunProgress, RunProgressSnapshot
+from harnyx_validator.infrastructure.state.run_progress import InMemoryRunProgress
 from harnyx_validator.runtime.resource_usage import ValidatorResourceUsageSnapshot
 
 
@@ -143,19 +143,56 @@ class _ExplodingResourceUsageProvider:
         raise RuntimeError("resource usage exploded")
 
 
+RunProgressFixture = dict[str, object]
+
+
 class FakeProgressTracker:
-    def __init__(self, *, snapshot: RunProgressSnapshot) -> None:
+    def __init__(self, *, snapshot: RunProgressFixture) -> None:
         self._snapshot = snapshot
 
-    def snapshot(self, _: UUID) -> RunProgressSnapshot:
-        return self._snapshot
+    def summary(self, _: UUID) -> dict[str, object]:
+        return {
+            "batch_id": self._snapshot["batch_id"],
+            "total": self._snapshot["total"],
+            "completed": self._snapshot["completed"],
+            "remaining": self._snapshot["remaining"],
+            "latest_sequence": len(tuple(self._snapshot["run_page_submissions"])),
+            "provider_evidence": self._snapshot["provider_evidence"],
+        }
+
+    def completed_run_page(
+        self,
+        _: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> dict[str, object]:
+        page_error = self._snapshot.get("page_error")
+        if isinstance(page_error, Exception):
+            raise page_error
+        runs = tuple(self._snapshot["run_page_submissions"])
+        selected = tuple(
+            {"sequence": sequence, "submission": submission}
+            for sequence, submission in enumerate(runs, start=1)
+            if sequence > after_sequence
+        )[:limit]
+        next_after_sequence = selected[-1]["sequence"] if selected else after_sequence
+        return {
+            "batch_id": self._snapshot["batch_id"],
+            "after_sequence": after_sequence,
+            "limit": limit,
+            "latest_sequence": len(runs),
+            "next_after_sequence": next_after_sequence,
+            "has_more": next_after_sequence < len(runs),
+            "items": selected,
+        }
 
 
 class DemoControlDependencyProvider:
     def __init__(
         self,
         *,
-        snapshot: RunProgressSnapshot,
+        snapshot: RunProgressFixture,
         auth: ControlRouteAuth | None = None,
         lifecycle: str | None = "processing",
         error_code: str | None = None,
@@ -225,13 +262,13 @@ async def _auth_unavailable(_: str, __: str, ___: bytes, ____: str | None) -> st
 
 def test_status_endpoint_awaits_auth_with_request_primitives() -> None:
     batch_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     auth_calls: list[tuple[str, str, bytes, str | None]] = []
@@ -277,13 +314,13 @@ def test_status_endpoint_awaits_auth_with_request_primitives() -> None:
 
 def test_status_endpoint_returns_signed_ownership_proof_when_timestamp_header_is_present() -> None:
     batch_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot, validator_hotkey=_StubHotkey("5proof"))
@@ -316,13 +353,13 @@ def test_status_endpoint_returns_signed_ownership_proof_when_timestamp_header_is
 
 def test_control_routes_return_503_when_auth_warmup_is_unavailable() -> None:
     batch_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot, auth=_auth_unavailable)
@@ -644,16 +681,16 @@ def _make_restore_run_payload(submission: MinerTaskRunSubmission) -> dict[str, o
     }
 
 
-def test_progress_endpoint_includes_specifics_and_task_fields() -> None:
+def test_status_and_runs_endpoints_split_summary_from_detail_page() -> None:
     batch_id = uuid4()
     task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 1,
         "completed": 1,
         "remaining": 0,
         "tasks": (task,),
-        "miner_task_runs": (submission,),
+        "run_page_submissions": (submission,),
         "provider_evidence": (
             {
                 "provider": "desearch",
@@ -669,7 +706,7 @@ def test_progress_endpoint_includes_specifics_and_task_fields() -> None:
     app = _create_test_app(provider)
     client = TestClient(app)
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/status")
 
     assert response.status_code == 200
     body = response.json()
@@ -678,6 +715,8 @@ def test_progress_endpoint_includes_specifics_and_task_fields() -> None:
     assert body["total"] == 1
     assert body["completed"] == 1
     assert body["remaining"] == 0
+    assert body["latest_sequence"] == 1
+    assert "run_page_submissions" not in body
     assert body["provider_model_evidence"] == [
         {
             "provider": "desearch",
@@ -688,13 +727,24 @@ def test_progress_endpoint_includes_specifics_and_task_fields() -> None:
         }
     ]
 
-    run = body["miner_task_runs"][0]
+    runs_response = client.get(
+        f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10"
+    )
+    assert runs_response.status_code == 200
+    runs_body = runs_response.json()
+    assert runs_body["batch_id"] == str(batch_id)
+    assert runs_body["after_sequence"] == 0
+    assert runs_body["latest_sequence"] == 1
+    assert runs_body["next_after_sequence"] == 1
+    assert runs_body["has_more"] is False
+    item = runs_body["items"][0]
+    assert item["sequence"] == 1
+    run = item["submission"]
     assert run["score"] == pytest.approx(0.9)
-    assert run["run"]["query"]["text"] == "What happened?"
-    assert run["run"]["reference_answer"]["text"] == "The reference answer."
-    assert "citations" not in run["run"]["reference_answer"]
+    assert "query" not in run["run"]
+    assert "reference_answer" not in run["run"]
     assert run["run"]["response"]["text"] == "The miner answer."
-    assert "citations" not in run["run"]["response"]
+    assert run["run"]["response"].get("citations") is None
 
     specifics = run["specifics"]
     assert specifics["total_tool_usage"]["search_tool_cost"] == pytest.approx(0.005)
@@ -725,17 +775,17 @@ def test_progress_endpoint_includes_specifics_and_task_fields() -> None:
     }
 
 
-def test_progress_endpoint_keeps_ordered_runs_visible_when_lifecycle_is_failed() -> None:
+def test_failed_status_keeps_failure_detail_and_runs_page_keeps_sequence() -> None:
     batch_id = uuid4()
     first_task, first_submission = _make_task_submission(batch_id=batch_id)
     second_task, second_submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 2,
         "completed": 2,
         "remaining": 0,
         "tasks": (first_task, second_task),
-        "miner_task_runs": (first_submission, second_submission),
+        "run_page_submissions": (first_submission, second_submission),
         "provider_evidence": (),
     }
 
@@ -757,7 +807,7 @@ def test_progress_endpoint_keeps_ordered_runs_visible_when_lifecycle_is_failed()
     app = _create_test_app(provider)
     client = TestClient(app)
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/status")
 
     assert response.status_code == 200
     body = response.json()
@@ -777,17 +827,20 @@ def test_progress_endpoint_keeps_ordered_runs_visible_when_lifecycle_is_failed()
     assert body["total"] == 2
     assert body["completed"] == 2
     assert body["remaining"] == 0
-    assert [run["run"]["task_id"] for run in body["miner_task_runs"]] == [
+    runs_response = client.get(
+        f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10"
+    )
+    assert runs_response.status_code == 200
+    runs_body = runs_response.json()
+    assert [item["submission"]["run"]["task_id"] for item in runs_body["items"]] == [
         str(first_task.task_id),
         str(second_task.task_id),
     ]
-    assert [run["run"]["query"]["text"] for run in body["miner_task_runs"]] == [
-        first_task.query.text,
-        second_task.query.text,
-    ]
+    assert [item["sequence"] for item in runs_body["items"]] == [1, 2]
+    assert all("query" not in item["submission"]["run"] for item in runs_body["items"])
 
 
-def test_progress_endpoint_orders_real_failed_progress_by_requested_artifact() -> None:
+def test_runs_endpoint_preserves_real_record_sequence_without_artifact_sorting() -> None:
     provider = RealAcceptBatchDependencyProvider()
     app = _create_test_app(provider)
     client = TestClient(app)
@@ -834,32 +887,52 @@ def test_progress_endpoint_orders_real_failed_progress_by_requested_artifact() -
         ),
     )
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "failed"
-    assert body["completed"] == 2
-    assert body["remaining"] == 0
-    assert [run["run"]["artifact_id"] for run in body["miner_task_runs"]] == [
-        str(first_artifact.artifact_id),
+    assert body["latest_sequence"] == 2
+    assert [item["submission"]["run"]["artifact_id"] for item in body["items"]] == [
         str(second_artifact.artifact_id),
+        str(first_artifact.artifact_id),
     ]
 
 
-def test_progress_endpoint_includes_timeout_inconclusive_pair_result_when_batch_fails() -> None:
+def test_runs_endpoint_openapi_declares_page_bounds() -> None:
+    batch_id = uuid4()
+    snapshot: RunProgressFixture = {
+        "batch_id": batch_id,
+        "total": 0,
+        "completed": 0,
+        "remaining": 0,
+        "tasks": (),
+        "run_page_submissions": (),
+        "provider_evidence": (),
+    }
+    provider = DemoControlDependencyProvider(snapshot=snapshot)
+    app = _create_test_app(provider)
+
+    operation = app.openapi()["paths"]["/validator/miner-task-batches/{batch_id}/runs"]["get"]
+    parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+
+    assert parameters["after_sequence"]["schema"]["minimum"] == 0
+    assert parameters["limit"]["schema"]["minimum"] == 1
+    assert parameters["limit"]["schema"]["maximum"] == 500
+
+
+def test_runs_endpoint_includes_timeout_inconclusive_pair_result_when_batch_fails() -> None:
     batch_id = uuid4()
     task, submission = _make_failed_task_submission(
         batch_id=batch_id,
         error_code="timeout_inconclusive",
     )
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 1,
         "completed": 1,
         "remaining": 0,
         "tasks": (task,),
-        "miner_task_runs": (submission,),
+        "run_page_submissions": (submission,),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(
@@ -879,25 +952,32 @@ def test_progress_endpoint_includes_timeout_inconclusive_pair_result_when_batch_
     app = _create_test_app(provider)
     client = TestClient(app)
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/status")
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "failed"
     assert body["failure_detail"]["error_code"] == "timeout_inconclusive"
-    assert body["miner_task_runs"][0]["specifics"]["error"]["code"] == "timeout_inconclusive"
+    runs_response = client.get(
+        f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10"
+    )
+    assert runs_response.status_code == 200
+    assert (
+        runs_response.json()["items"][0]["submission"]["specifics"]["error"]["code"]
+        == "timeout_inconclusive"
+    )
 
 
-def test_progress_endpoint_replaces_blank_failure_message_at_transport_boundary() -> None:
+def test_status_endpoint_replaces_blank_failure_message_at_transport_boundary() -> None:
     batch_id = uuid4()
     task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 1,
         "completed": 1,
         "remaining": 0,
         "tasks": (task,),
-        "miner_task_runs": (submission,),
+        "run_page_submissions": (submission,),
         "provider_evidence": (),
     }
 
@@ -919,7 +999,7 @@ def test_progress_endpoint_replaces_blank_failure_message_at_transport_boundary(
     app = _create_test_app(provider)
     client = TestClient(app)
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/status")
 
     assert response.status_code == 200
     body = response.json()
@@ -941,50 +1021,45 @@ def test_progress_endpoint_replaces_blank_failure_message_at_transport_boundary(
     assert body["remaining"] == 0
 
 
-def test_progress_endpoint_converts_partial_progress_serialization_failure_to_valid_failed_payload() -> None:
+def test_runs_endpoint_converts_page_failure_to_valid_failed_payload() -> None:
     batch_id = uuid4()
     _task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 2,
         "completed": 1,
         "remaining": 1,
         "tasks": (),
-        "miner_task_runs": (submission,),
+        "run_page_submissions": (submission,),
         "provider_evidence": (),
+        "page_error": RuntimeError("page exploded"),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot, lifecycle="processing")
     app = _create_test_app(provider)
     client = TestClient(app)
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10")
 
     assert response.status_code == 200
     body = response.json()
     assert body["batch_id"] == str(batch_id)
-    assert body["status"] == "failed"
-    assert body["error_code"] == "progress_snapshot_failed"
     assert body["failure_detail"]["error_code"] == "progress_snapshot_failed"
     assert body["failure_detail"]["exception_type"] == "RuntimeError"
-    assert "missing from progress snapshot" in body["failure_detail"]["error_message"]
-    assert "RuntimeError: task" in body["failure_detail"]["traceback"]
-    assert body["total"] == 2
-    assert body["completed"] == 0
-    assert body["remaining"] == 2
-    assert body["miner_task_runs"] == []
-    assert body["provider_model_evidence"] == []
+    assert "page exploded" in body["failure_detail"]["error_message"]
+    assert "RuntimeError: page exploded" in body["failure_detail"]["traceback"]
+    assert body["items"] == []
 
 
 def test_signed_validator_route_internal_error_returns_structured_payload_and_captures_sentry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": uuid4(),
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(
@@ -1016,13 +1091,13 @@ def test_signed_validator_route_internal_error_returns_structured_payload_and_ca
 def test_status_route_tolerates_resource_usage_sampling_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": uuid4(),
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(
@@ -1050,13 +1125,13 @@ def test_status_route_tolerates_resource_usage_sampling_failures(
 
 
 def test_validator_route_internal_error_before_auth_success_falls_back_to_generic_500() -> None:
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": uuid4(),
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(
@@ -1079,13 +1154,13 @@ def test_accept_batch_endpoint_accepts_platform_json_payload() -> None:
     batch_id = uuid4()
     task_id = uuid4()
     artifact_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1137,13 +1212,13 @@ def test_accept_batch_endpoint_accepts_platform_json_payload() -> None:
 def test_accept_batch_endpoint_forwards_restore_runs() -> None:
     batch_id = uuid4()
     task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1181,13 +1256,13 @@ def test_accept_batch_endpoint_forwards_restore_runs() -> None:
 def test_accept_batch_endpoint_drops_unknown_restore_execution_log_tools() -> None:
     batch_id = uuid4()
     task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1226,13 +1301,13 @@ def test_accept_batch_endpoint_forwards_terminal_timeout_failed_restore_run_and_
         batch_id=batch_id,
         error_code="timeout_inconclusive",
     )
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1284,13 +1359,13 @@ def test_accept_batch_endpoint_forwards_terminal_timeout_failed_restore_run_and_
 def test_accept_batch_endpoint_rejects_invalid_restore_session_status() -> None:
     batch_id = uuid4()
     task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1324,13 +1399,13 @@ def test_accept_batch_endpoint_rejects_invalid_restore_session_status() -> None:
 def test_accept_batch_endpoint_rejects_restore_run_with_divergent_score_breakdown() -> None:
     batch_id = uuid4()
     task, submission = _make_task_submission(batch_id=batch_id)
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1369,13 +1444,13 @@ def test_accept_batch_endpoint_rejects_legacy_iso_keys() -> None:
     batch_id = uuid4()
     task_id = uuid4()
     artifact_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1415,13 +1490,13 @@ def test_accept_batch_endpoint_rejects_non_strict_artifact_uid_payload() -> None
     batch_id = uuid4()
     task_id = uuid4()
     artifact_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot)
@@ -1474,28 +1549,29 @@ def test_accept_batch_endpoint_is_idempotent_for_exact_duplicate_replay() -> Non
     assert first.json() == second.json()
     assert len(provider.inbox) == 1
     assert provider.status_provider.state.queued_batches == 1
-    snapshot = provider.progress_tracker.snapshot(batch_id)
-    assert snapshot["total"] == 1
-    assert snapshot["completed"] == 0
-    assert snapshot["remaining"] == 1
+    summary = provider.progress_tracker.summary(batch_id)
+    assert summary["total"] == 1
+    assert summary["completed"] == 0
+    assert summary["remaining"] == 1
+    assert summary["latest_sequence"] == 0
 
 
-def test_progress_endpoint_returns_unknown_for_unaccepted_batch() -> None:
+def test_status_endpoint_returns_unknown_for_unaccepted_batch() -> None:
     batch_id = uuid4()
-    snapshot: RunProgressSnapshot = {
+    snapshot: RunProgressFixture = {
         "batch_id": batch_id,
         "total": 0,
         "completed": 0,
         "remaining": 0,
         "tasks": (),
-        "miner_task_runs": (),
+        "run_page_submissions": (),
         "provider_evidence": (),
     }
     provider = DemoControlDependencyProvider(snapshot=snapshot, lifecycle=None)
     app = _create_test_app(provider)
     client = TestClient(app)
 
-    response = client.get(f"/validator/miner-task-batches/{batch_id}/progress")
+    response = client.get(f"/validator/miner-task-batches/{batch_id}/status")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -1506,7 +1582,7 @@ def test_progress_endpoint_returns_unknown_for_unaccepted_batch() -> None:
         "total": 0,
         "completed": 0,
         "remaining": 0,
-        "miner_task_runs": [],
+        "latest_sequence": 0,
         "provider_model_evidence": [],
     }
 

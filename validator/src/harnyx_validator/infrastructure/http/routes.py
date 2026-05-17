@@ -10,20 +10,12 @@ from datetime import UTC, datetime
 from typing import Protocol, cast
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Security, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, Security, status
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 
 from harnyx_commons.bittensor import VerificationError
-from harnyx_commons.domain.miner_task import (
-    MinerTask,
-    MinerTaskErrorCode,
-    Query,
-    ReferenceAnswer,
-)
-from harnyx_commons.domain.miner_task import (
-    Response as MinerTaskResponse,
-)
+from harnyx_commons.domain.miner_task import MinerTaskErrorCode
 from harnyx_commons.domain.session import Session
 from harnyx_commons.errors import ConcurrencyLimitError, ToolProviderError
 from harnyx_commons.protocol_headers import SESSION_ID_HEADER
@@ -43,12 +35,14 @@ from harnyx_validator.application.services.evaluation_runner import ValidatorBat
 from harnyx_validator.application.status import StatusProvider
 from harnyx_validator.infrastructure.http.schemas import (
     BatchAcceptResponse,
+    BatchProgressRunsPageResponse,
+    BatchProgressStatusResponse,
     FailureDetailResponse,
     MinerTaskBatchRequestModel,
-    MinerTaskRunModel,
-    MinerTaskRunSubmissionModel,
-    ProgressResponse,
     ProviderEvidenceModel,
+    RestoreMinerTaskRunModel,
+    RestoreMinerTaskRunSubmissionModel,
+    SequencedCompletedRunSubmissionModel,
     SessionModel,
     UsageModel,
     UsageModelEntry,
@@ -58,7 +52,7 @@ from harnyx_validator.infrastructure.http.schemas import (
     ValidatorStatusResponse,
 )
 from harnyx_validator.infrastructure.observability.sentry import capture_exception
-from harnyx_validator.infrastructure.state.run_progress import RunProgressSnapshot
+from harnyx_validator.infrastructure.state.run_progress import RunProgressPage, RunProgressSummary
 from harnyx_validator.runtime.resource_usage import ValidatorResourceUsageSnapshot
 
 logger = logging.getLogger("harnyx_validator.http")
@@ -86,7 +80,16 @@ class ValidatorControlDeps:
 
 
 class ProgressTracker(Protocol):
-    def snapshot(self, batch_id: UUID) -> RunProgressSnapshot:
+    def summary(self, batch_id: UUID) -> RunProgressSummary:
+        ...
+
+    def completed_run_page(
+        self,
+        batch_id: UUID,
+        *,
+        after_sequence: int,
+        limit: int,
+    ) -> RunProgressPage:
         ...
 
 
@@ -248,69 +251,122 @@ def add_control_routes(
         return BatchAcceptResponse(status="accepted", batch_id=str(batch.batch_id), caller=caller)
 
     @app.get(
-        "/validator/miner-task-batches/{batch_id}/progress",
-        response_model=ProgressResponse,
+        "/validator/miner-task-batches/{batch_id}/status",
+        response_model=BatchProgressStatusResponse,
         responses={500: {"model": ValidatorInternalErrorResponse}},
-        description="Return progress and results for a miner task batch.",
+        description="Return lightweight progress status for a miner task batch.",
     )
-    def progress(
+    def batch_status(
         request: Request,
         batch_id: UUID,
         deps: ValidatorControlDeps = Depends(get_control_deps),  # noqa: B008
         _caller: str = Security(require_bittensor_caller),
-    ) -> ProgressResponse | JSONResponse:
+    ) -> BatchProgressStatusResponse | JSONResponse:
         try:
             lifecycle = deps.accept_batch.lifecycle_for(batch_id)
             if lifecycle is None:
-                return _progress_json_response(
-                    ProgressResponse(
-                        batch_id=str(batch_id),
-                        status="unknown",
-                        error_code=None,
-                        failure_detail=None,
-                        total=0,
-                        completed=0,
-                        remaining=0,
-                        miner_task_runs=[],
-                        provider_model_evidence=[],
-                    )
-                )
-            snapshot = deps.progress_tracker.snapshot(batch_id)
-            tasks_by_id = {task.task_id: task for task in snapshot["tasks"]}
-            try:
-                runs = [_serialize_run(result, tasks_by_id) for result in snapshot["miner_task_runs"]]
-                provider_model_evidence = [
-                    _serialize_provider_evidence(entry) for entry in snapshot["provider_evidence"]
-                ]
-            except Exception as exc:
-                return _progress_internal_failure(batch_id=batch_id, snapshot=snapshot, exc=exc)
-            if lifecycle == "failed":
-                return _progress_json_response(
-                    ProgressResponse(
-                        batch_id=str(batch_id),
-                        status="failed",
-                        error_code=deps.accept_batch.error_code_for(batch_id),
-                        failure_detail=_serialize_failure_detail(deps.accept_batch.failure_detail_for(batch_id)),
-                        total=snapshot["total"],
-                        completed=snapshot["completed"],
-                        remaining=snapshot["remaining"],
-                        miner_task_runs=runs,
-                        provider_model_evidence=provider_model_evidence,
-                    )
-                )
-            return _progress_json_response(
-                ProgressResponse(
+                return BatchProgressStatusResponse(
                     batch_id=str(batch_id),
-                    status=lifecycle,
-                    error_code=deps.accept_batch.error_code_for(batch_id),
+                    status="unknown",
+                    error_code=None,
                     failure_detail=None,
-                    total=snapshot["total"],
-                    completed=snapshot["completed"],
-                    remaining=snapshot["remaining"],
-                    miner_task_runs=runs,
+                    total=0,
+                    completed=0,
+                    remaining=0,
+                    latest_sequence=0,
+                    provider_model_evidence=[],
+                )
+            summary = deps.progress_tracker.summary(batch_id)
+            provider_model_evidence = [
+                _serialize_provider_evidence(entry) for entry in summary["provider_evidence"]
+            ]
+            if lifecycle == "failed":
+                return BatchProgressStatusResponse(
+                    batch_id=str(batch_id),
+                    status="failed",
+                    error_code=deps.accept_batch.error_code_for(batch_id),
+                    failure_detail=_serialize_failure_detail(deps.accept_batch.failure_detail_for(batch_id)),
+                    total=summary["total"],
+                    completed=summary["completed"],
+                    remaining=summary["remaining"],
+                    latest_sequence=summary["latest_sequence"],
                     provider_model_evidence=provider_model_evidence,
                 )
+            return BatchProgressStatusResponse(
+                batch_id=str(batch_id),
+                status=lifecycle,
+                error_code=deps.accept_batch.error_code_for(batch_id),
+                failure_detail=None,
+                total=summary["total"],
+                completed=summary["completed"],
+                remaining=summary["remaining"],
+                latest_sequence=summary["latest_sequence"],
+                provider_model_evidence=provider_model_evidence,
             )
+        except Exception as exc:
+            return _control_route_internal_error_response(request, exc)
+
+    @app.get(
+        "/validator/miner-task-batches/{batch_id}/runs",
+        response_model=BatchProgressRunsPageResponse,
+        responses={500: {"model": ValidatorInternalErrorResponse}},
+        description="Return one bounded page of completed miner task runs for a batch.",
+    )
+    def completed_runs(
+        request: Request,
+        batch_id: UUID,
+        after_sequence: int = Query(default=0, ge=0, description="Cursor; must be >= 0."),
+        limit: int = Query(default=100, ge=1, le=500, description="Page size; must be 1..500."),
+        deps: ValidatorControlDeps = Depends(get_control_deps),  # noqa: B008
+        _caller: str = Security(require_bittensor_caller),
+    ) -> BatchProgressRunsPageResponse | JSONResponse:
+        try:
+            lifecycle = deps.accept_batch.lifecycle_for(batch_id)
+            if lifecycle is None:
+                return BatchProgressRunsPageResponse(
+                    batch_id=str(batch_id),
+                    after_sequence=after_sequence,
+                    limit=limit,
+                    latest_sequence=0,
+                    next_after_sequence=after_sequence,
+                    has_more=False,
+                    items=[],
+                    failure_detail=None,
+                )
+            try:
+                page = deps.progress_tracker.completed_run_page(
+                    batch_id,
+                    after_sequence=after_sequence,
+                    limit=limit,
+                )
+                items = [
+                    SequencedCompletedRunSubmissionModel(
+                        sequence=item["sequence"],
+                        submission=_serialize_restore_run(item["submission"]),
+                    )
+                    for item in page["items"]
+                ]
+            except Exception as exc:
+                summary = deps.progress_tracker.summary(batch_id)
+                return _runs_page_internal_failure(
+                    batch_id=batch_id,
+                    after_sequence=after_sequence,
+                    limit=limit,
+                    latest_sequence=summary["latest_sequence"],
+                    exc=exc,
+                )
+            return BatchProgressRunsPageResponse(
+                batch_id=str(batch_id),
+                after_sequence=page["after_sequence"],
+                limit=page["limit"],
+                latest_sequence=page["latest_sequence"],
+                next_after_sequence=page["next_after_sequence"],
+                has_more=page["has_more"],
+                items=items,
+                failure_detail=None,
+            )
+        except HTTPException:
+            raise
         except Exception as exc:
             return _control_route_internal_error_response(request, exc)
 
@@ -410,22 +466,13 @@ def _control_route_internal_error_response(request: Request, exc: Exception) -> 
     return JSONResponse(status_code=500, content=payload.model_dump(mode="json"))
 
 
-def _serialize_run(
-    submission: MinerTaskRunSubmission,
-    tasks_by_id: dict[UUID, MinerTask],
-) -> MinerTaskRunSubmissionModel:
-    task = tasks_by_id.get(submission.run.task_id)
-    if task is None:
-        raise RuntimeError(f"task {submission.run.task_id} missing from progress snapshot")
-    return MinerTaskRunSubmissionModel(
+def _serialize_restore_run(submission: MinerTaskRunSubmission) -> RestoreMinerTaskRunSubmissionModel:
+    return RestoreMinerTaskRunSubmissionModel(
         batch_id=str(submission.batch_id),
         validator=ValidatorModel(uid=submission.validator_uid),
-        run=MinerTaskRunModel(
-            uid=submission.run.uid,
+        run=RestoreMinerTaskRunModel(
             artifact_id=str(submission.run.artifact_id),
             task_id=str(submission.run.task_id),
-            query=task.query,
-            reference_answer=task.reference_answer,
             completed_at=submission.run.completed_at.isoformat(),
             response=submission.run.response,
         ),
@@ -435,26 +482,6 @@ def _serialize_run(
         session=_serialize_session_block(submission.session),
         specifics=submission.run.details,
     )
-
-
-def _progress_json_response(response: ProgressResponse) -> JSONResponse:
-    payload = response.model_dump(mode="json")
-    serialized_runs = payload.get("miner_task_runs")
-    if isinstance(serialized_runs, list):
-        for serialized_run, domain_run in zip(serialized_runs, response.miner_task_runs, strict=True):
-            if not isinstance(serialized_run, dict):
-                continue
-            run_payload = serialized_run.get("run")
-            if not isinstance(run_payload, dict):
-                continue
-            run_payload["reference_answer"] = _serialize_answer_payload(domain_run.run.reference_answer)
-            if domain_run.run.response is not None:
-                run_payload["response"] = _serialize_answer_payload(domain_run.run.response)
-    return JSONResponse(content=payload)
-
-
-def _serialize_answer_payload(answer: Query | ReferenceAnswer | MinerTaskResponse) -> dict[str, object]:
-    return answer.model_dump(mode="json", exclude_none=True)
 
 
 def _serialize_failure_detail(
@@ -475,18 +502,23 @@ def _serialize_provider_evidence(entry: ProviderFailureEvidence) -> ProviderEvid
     )
 
 
-def _progress_internal_failure(
+def _runs_page_internal_failure(
     *,
     batch_id: UUID,
-    snapshot: RunProgressSnapshot,
+    after_sequence: int,
+    limit: int,
+    latest_sequence: int,
     exc: Exception,
-) -> ProgressResponse:
+) -> BatchProgressRunsPageResponse:
     capture_exception(exc)
-    total = snapshot["total"]
-    return ProgressResponse(
+    return BatchProgressRunsPageResponse(
         batch_id=str(batch_id),
-        status="failed",
-        error_code=MinerTaskErrorCode.PROGRESS_SNAPSHOT_FAILED,
+        after_sequence=after_sequence,
+        limit=limit,
+        latest_sequence=latest_sequence,
+        next_after_sequence=after_sequence,
+        has_more=after_sequence < latest_sequence,
+        items=[],
         failure_detail=FailureDetailResponse(
             error_code=MinerTaskErrorCode.PROGRESS_SNAPSHOT_FAILED,
             error_message=str(exc) or type(exc).__name__,
@@ -494,11 +526,6 @@ def _progress_internal_failure(
             traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
             occurred_at=datetime.now(UTC).isoformat(),
         ),
-        total=total,
-        completed=0,
-        remaining=total,
-        miner_task_runs=[],
-        provider_model_evidence=[],
     )
 
 

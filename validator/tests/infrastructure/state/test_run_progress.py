@@ -147,6 +147,36 @@ def _make_failed_submission(
     )
 
 
+def _make_distinct_multi_submissions(
+    batch: MinerTaskBatchSpec,
+) -> tuple[MinerTaskRunSubmission, ...]:
+    template = _make_submission(batch)
+
+    def build_submission(*, artifact_index: int, task_index: int, score: float) -> MinerTaskRunSubmission:
+        run = template.run.model_copy(
+            update={
+                "session_id": uuid4(),
+                "uid": batch.artifacts[artifact_index].uid,
+                "artifact_id": batch.artifacts[artifact_index].artifact_id,
+                "task_id": batch.tasks[task_index].task_id,
+            }
+        )
+        session = replace(
+            template.session,
+            session_id=run.session_id,
+            uid=run.uid,
+            task_id=run.task_id,
+        )
+        return template.model_copy(update={"run": run, "session": session, "score": score})
+
+    return (
+        build_submission(artifact_index=1, task_index=1, score=0.4),
+        build_submission(artifact_index=0, task_index=1, score=0.3),
+        build_submission(artifact_index=1, task_index=0, score=0.2),
+        build_submission(artifact_index=0, task_index=0, score=0.1),
+    )
+
+
 def test_run_progress_recorded_pairs_returns_exact_finished_pairs() -> None:
     progress = InMemoryRunProgress()
     batch = _make_multi_batch()
@@ -187,11 +217,11 @@ def test_run_progress_register_is_idempotent_for_exact_replay() -> None:
     progress.register(batch)
     progress.register(batch)
 
-    snapshot = progress.snapshot(batch.batch_id)
-    assert snapshot["total"] == 1
-    assert snapshot["completed"] == 0
-    assert snapshot["remaining"] == 1
-    assert snapshot["tasks"] == batch.tasks
+    summary = progress.summary(batch.batch_id)
+    assert summary["total"] == 1
+    assert summary["completed"] == 0
+    assert summary["remaining"] == 1
+    assert summary["latest_sequence"] == 0
 
 
 def test_run_progress_register_rejects_conflicting_replay() -> None:
@@ -215,11 +245,13 @@ def test_run_progress_record_is_idempotent_for_duplicate_pair() -> None:
     progress.record(submission)
     progress.record(submission)
 
-    snapshot = progress.snapshot(batch.batch_id)
-    assert snapshot["total"] == 1
-    assert snapshot["completed"] == 1
-    assert snapshot["remaining"] == 0
-    assert snapshot["miner_task_runs"] == (submission,)
+    summary = progress.summary(batch.batch_id)
+    page = progress.completed_run_page(batch.batch_id, after_sequence=0, limit=10)
+    assert summary["total"] == 1
+    assert summary["completed"] == 1
+    assert summary["remaining"] == 0
+    assert summary["latest_sequence"] == 1
+    assert page["items"] == ({"sequence": 1, "submission": submission},)
 
 
 def test_run_progress_restore_completed_runs_records_terminal_timeout_failed_submission() -> None:
@@ -229,11 +261,13 @@ def test_run_progress_restore_completed_runs_records_terminal_timeout_failed_sub
 
     progress.restore_completed_runs(batch, submissions=(failed_submission,))
 
-    snapshot = progress.snapshot(batch.batch_id)
-    assert snapshot["total"] == 1
-    assert snapshot["completed"] == 1
-    assert snapshot["remaining"] == 0
-    assert snapshot["miner_task_runs"] == (failed_submission,)
+    summary = progress.summary(batch.batch_id)
+    page = progress.completed_run_page(batch.batch_id, after_sequence=0, limit=10)
+    assert summary["total"] == 1
+    assert summary["completed"] == 1
+    assert summary["remaining"] == 0
+    assert summary["latest_sequence"] == 1
+    assert page["items"] == ({"sequence": 1, "submission": failed_submission},)
     assert progress.recorded_pairs(batch.batch_id) == {
         (failed_submission.run.artifact_id, failed_submission.run.task_id),
     }
@@ -394,44 +428,85 @@ def test_run_progress_rejected_restore_does_not_mutate_provider_evidence() -> No
     assert progress.provider_evidence(batch.batch_id) == before
 
 
-def test_run_progress_snapshot_orders_results_by_artifact_then_task_input_position() -> None:
+def test_run_progress_rejected_restore_does_not_advance_sequence_cursor() -> None:
+    progress = InMemoryRunProgress()
+    batch = _make_batch()
+    submission = _make_submission(batch, score=1.0)
+    conflicting = _make_submission(batch, score=0.0).model_copy(
+        update={
+            "run": submission.run.model_copy(),
+            "session": replace(
+                submission.session,
+                session_id=submission.run.session_id,
+                task_id=submission.run.task_id,
+            ),
+        }
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="batch already recorded a different result for artifact/task pair",
+    ):
+        progress.restore_completed_runs(batch, submissions=(submission, conflicting))
+
+    progress.restore_completed_runs(batch, submissions=(submission,))
+
+    summary = progress.summary(batch.batch_id)
+    page = progress.completed_run_page(batch.batch_id, after_sequence=0, limit=10)
+    assert summary["completed"] == 1
+    assert summary["latest_sequence"] == 1
+    assert page["items"] == ({"sequence": 1, "submission": submission},)
+
+
+def test_run_progress_page_preserves_record_sequence_without_global_task_order() -> None:
     progress = InMemoryRunProgress()
     batch = _make_multi_batch()
-    template = _make_submission(batch)
-
-    def build_submission(*, artifact_index: int, task_index: int, score: float) -> MinerTaskRunSubmission:
-        run = template.run.model_copy(
-            update={
-                "session_id": uuid4(),
-                "uid": batch.artifacts[artifact_index].uid,
-                "artifact_id": batch.artifacts[artifact_index].artifact_id,
-                "task_id": batch.tasks[task_index].task_id,
-            }
-        )
-        session = replace(
-            template.session,
-            session_id=run.session_id,
-            uid=run.uid,
-            task_id=run.task_id,
-        )
-        return template.model_copy(update={"run": run, "session": session, "score": score})
-
-    submissions = (
-        build_submission(artifact_index=1, task_index=1, score=0.4),
-        build_submission(artifact_index=0, task_index=1, score=0.3),
-        build_submission(artifact_index=1, task_index=0, score=0.2),
-        build_submission(artifact_index=0, task_index=0, score=0.1),
-    )
+    submissions = _make_distinct_multi_submissions(batch)
 
     progress.register(batch)
     for submission in submissions:
         progress.record(submission)
 
-    snapshot = progress.snapshot(batch.batch_id)
+    page = progress.completed_run_page(batch.batch_id, after_sequence=0, limit=10)
 
-    assert tuple((run.run.artifact_id, run.run.task_id) for run in snapshot["miner_task_runs"]) == (
-        (batch.artifacts[0].artifact_id, batch.tasks[0].task_id),
-        (batch.artifacts[0].artifact_id, batch.tasks[1].task_id),
-        (batch.artifacts[1].artifact_id, batch.tasks[0].task_id),
-        (batch.artifacts[1].artifact_id, batch.tasks[1].task_id),
+    assert tuple(
+        (item["sequence"], item["submission"].run.artifact_id, item["submission"].run.task_id)
+        for item in page["items"]
+    ) == (
+        (1, batch.artifacts[1].artifact_id, batch.tasks[1].task_id),
+        (2, batch.artifacts[0].artifact_id, batch.tasks[1].task_id),
+        (3, batch.artifacts[1].artifact_id, batch.tasks[0].task_id),
+        (4, batch.artifacts[0].artifact_id, batch.tasks[0].task_id),
     )
+
+
+def test_run_progress_page_returns_cursor_window_without_rescanning_prefix() -> None:
+    progress = InMemoryRunProgress()
+    batch = _make_multi_batch()
+    submissions = _make_distinct_multi_submissions(batch)
+
+    progress.register(batch)
+    for submission in submissions:
+        progress.record(submission)
+
+    page = progress.completed_run_page(batch.batch_id, after_sequence=2, limit=1)
+
+    assert page["latest_sequence"] == 4
+    assert page["next_after_sequence"] == 3
+    assert page["has_more"] is True
+    assert page["items"] == ({"sequence": 3, "submission": submissions[2]},)
+
+
+def test_run_progress_page_rejects_missing_dense_sequence() -> None:
+    progress = InMemoryRunProgress()
+    batch = _make_multi_batch()
+    submissions = _make_distinct_multi_submissions(batch)
+
+    progress.register(batch)
+    for submission in submissions:
+        progress.record(submission)
+
+    del progress.pair_by_sequence_by_batch[batch.batch_id][2]
+
+    with pytest.raises(RuntimeError, match="progress sequence points at missing pair"):
+        progress.completed_run_page(batch.batch_id, after_sequence=0, limit=10)
