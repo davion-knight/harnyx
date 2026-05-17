@@ -20,8 +20,9 @@ from harnyx_commons.tools.types import ToolName
 
 pytestmark = pytest.mark.anyio("asyncio")
 TEST_TOKEN = "token"  # noqa: S105
-DEFAULT_LLM_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
-OTHER_LLM_MODEL = "zai-org/GLM-5-TEE"
+DEEPSEEK_V32_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
+GLM5_MODEL = "zai-org/GLM-5-TEE"
+UNCAPPED_LLM_MODEL = "openai/gpt-oss-20b"
 
 
 class RecordingExecutor:
@@ -40,7 +41,7 @@ class FailingExecutor:
 
 
 def _invocation(token: str, tool: ToolName = "search_web") -> ToolInvocationRequest:
-    kwargs = {"model": DEFAULT_LLM_MODEL} if tool == "llm_chat" else {"query": "demo"}
+    kwargs = {"model": UNCAPPED_LLM_MODEL} if tool == "llm_chat" else {"query": "demo"}
     return ToolInvocationRequest(
         session_id=uuid4(),
         token=token,
@@ -163,7 +164,7 @@ def test_search_lane_allows_five_calls_and_blocks_sixth() -> None:
             limiter.release(invocation)
 
 
-def test_llm_lane_allows_two_same_model_calls_and_blocks_third() -> None:
+def test_default_llm_lane_allows_two_same_model_calls_and_blocks_third() -> None:
     limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
     held = [_invocation(TEST_TOKEN, "llm_chat"), _invocation(TEST_TOKEN, "llm_chat")]
     for invocation in held:
@@ -176,21 +177,35 @@ def test_llm_lane_allows_two_same_model_calls_and_blocks_third() -> None:
             limiter.release(invocation)
 
 
+@pytest.mark.parametrize("model", [DEEPSEEK_V32_MODEL, GLM5_MODEL])
+def test_capped_llm_lane_allows_one_call_and_blocks_second(model: str) -> None:
+    limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
+    held = _llm_invocation(TEST_TOKEN, model)
+    limiter.acquire(held)
+    try:
+        with pytest.raises(ConcurrencyLimitError):
+            limiter.acquire(_llm_invocation(TEST_TOKEN, model))
+    finally:
+        limiter.release(held)
+
+
 def test_llm_lane_is_independent_per_model() -> None:
     limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
     held = [
-        _llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL),
-        _llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL),
-        _llm_invocation(TEST_TOKEN, OTHER_LLM_MODEL),
-        _llm_invocation(TEST_TOKEN, OTHER_LLM_MODEL),
+        _llm_invocation(TEST_TOKEN, DEEPSEEK_V32_MODEL),
+        _llm_invocation(TEST_TOKEN, GLM5_MODEL),
+        _llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL),
+        _llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL),
     ]
     for invocation in held:
         limiter.acquire(invocation)
     try:
         with pytest.raises(ConcurrencyLimitError):
-            limiter.acquire(_llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL))
+            limiter.acquire(_llm_invocation(TEST_TOKEN, DEEPSEEK_V32_MODEL))
         with pytest.raises(ConcurrencyLimitError):
-            limiter.acquire(_llm_invocation(TEST_TOKEN, OTHER_LLM_MODEL))
+            limiter.acquire(_llm_invocation(TEST_TOKEN, GLM5_MODEL))
+        with pytest.raises(ConcurrencyLimitError):
+            limiter.acquire(_llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL))
     finally:
         for invocation in held:
             limiter.release(invocation)
@@ -199,18 +214,18 @@ def test_llm_lane_is_independent_per_model() -> None:
 def test_llm_lane_reads_model_from_first_positional_payload() -> None:
     limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
     held = [
-        _llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL, positional_payload=True),
-        _llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL, positional_payload=True),
+        _llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL, positional_payload=True),
+        _llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL, positional_payload=True),
     ]
-    other_model = _llm_invocation(TEST_TOKEN, OTHER_LLM_MODEL, positional_payload=True)
+    capped_model = _llm_invocation(TEST_TOKEN, DEEPSEEK_V32_MODEL, positional_payload=True)
     for invocation in held:
         limiter.acquire(invocation)
     try:
-        limiter.acquire(other_model)
+        limiter.acquire(capped_model)
         with pytest.raises(ConcurrencyLimitError):
-            limiter.acquire(_llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL, positional_payload=True))
+            limiter.acquire(_llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL, positional_payload=True))
     finally:
-        limiter.release(other_model)
+        limiter.release(capped_model)
         for invocation in held:
             limiter.release(invocation)
 
@@ -273,13 +288,42 @@ async def test_default_limits_wait_on_third_same_model_llm_chat_until_release() 
     assert limiter.in_flight(waiter_invocation) == 0
 
 
+@pytest.mark.parametrize("model", [DEEPSEEK_V32_MODEL, GLM5_MODEL])
+async def test_capped_llm_waits_on_second_same_model_llm_chat_until_release(model: str) -> None:
+    limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
+    held = _llm_invocation(TEST_TOKEN, model)
+    waiter_invocation = _llm_invocation(TEST_TOKEN, model)
+    expected = _result(waiter_invocation.session_id, waiter_invocation.tool)
+    executor = RecordingExecutor(expected)
+
+    limiter.acquire(held)
+    held_released = False
+    try:
+        waiter = asyncio.create_task(execute_tool_with_concurrency_permit(executor, limiter, waiter_invocation))
+        await asyncio.sleep(0.05)
+        assert not waiter.done()
+        assert executor.invocations == []
+
+        limiter.release(held)
+        held_released = True
+        result = await asyncio.wait_for(waiter, timeout=1.0)
+
+        assert result == expected
+        assert executor.invocations == [waiter_invocation]
+    finally:
+        if not held_released:
+            limiter.release(held)
+
+    assert limiter.in_flight(waiter_invocation) == 0
+
+
 async def test_default_limits_do_not_wait_on_different_llm_chat_model() -> None:
     limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
     held = [
-        _llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL),
-        _llm_invocation(TEST_TOKEN, DEFAULT_LLM_MODEL),
+        _llm_invocation(TEST_TOKEN, DEEPSEEK_V32_MODEL),
+        _llm_invocation(TEST_TOKEN, GLM5_MODEL),
     ]
-    waiter_invocation = _llm_invocation(TEST_TOKEN, OTHER_LLM_MODEL)
+    waiter_invocation = _llm_invocation(TEST_TOKEN, UNCAPPED_LLM_MODEL)
     expected = _result(waiter_invocation.session_id, waiter_invocation.tool)
     executor = RecordingExecutor(expected)
 

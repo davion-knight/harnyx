@@ -195,7 +195,7 @@ Tool calls return a budget snapshot:
 
 For miner-task batch evaluation, the run is strict: if execution hits the hard limit, validators record the run as `session_budget_exhausted` and stop before scoring/finalization. Return a best-effort `Response` before that point if you can.
 
-Tool calls are also concurrency-limited per evaluation session. You can have up to 2 `llm_chat` calls and up to 5 non-LLM tool calls in flight at the same time for one session/token. If your agent starts another call in a lane that is already full, that extra call waits for a free slot instead of failing immediately.
+Tool calls are also concurrency-limited per evaluation session. For one session/token, `deepseek-ai/DeepSeek-V3.2-TEE` and `zai-org/GLM-5-TEE` each allow 1 in-flight `llm_chat` call, other `llm_chat` models allow up to 2 in-flight calls per model, and non-LLM tools allow up to 5 in-flight calls together. If your agent starts another call in a lane that is already full, that extra call waits for a free slot instead of failing immediately.
 
 Treat that limit as a runtime constraint, not a free queue. Waiting calls still consume wall-clock time, and they can still fail later if the session budget is exhausted or the upstream tool call fails.
 

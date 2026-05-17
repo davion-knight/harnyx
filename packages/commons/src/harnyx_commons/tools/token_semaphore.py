@@ -135,6 +135,11 @@ DEFAULT_TOOL_CONCURRENCY_LIMITS = ToolConcurrencyLimits(
     search_max_parallel_calls=5,
 )
 
+_MODEL_LLM_MAX_PARALLEL_CALL_OVERRIDES: dict[ToolModelName, int] = {
+    "deepseek-ai/DeepSeek-V3.2-TEE": 1,
+    "zai-org/GLM-5-TEE": 1,
+}
+
 SEARCH_LANE_TOOLS: frozenset[ToolName] = frozenset(
     (
         "search_web",
@@ -151,7 +156,12 @@ class ToolConcurrencyLimiter:
 
     def __init__(self, limits: ToolConcurrencyLimits = DEFAULT_TOOL_CONCURRENCY_LIMITS) -> None:
         self._llm_by_model = {
-            model: TokenSemaphore(max_parallel_calls=limits.llm_max_parallel_calls)
+            model: TokenSemaphore(
+                max_parallel_calls=_MODEL_LLM_MAX_PARALLEL_CALL_OVERRIDES.get(
+                    model,
+                    limits.llm_max_parallel_calls,
+                )
+            )
             for model in ALLOWED_TOOL_MODELS
         }
         self._search = TokenSemaphore(max_parallel_calls=limits.search_max_parallel_calls)

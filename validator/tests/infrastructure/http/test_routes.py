@@ -31,12 +31,12 @@ from harnyx_validator.infrastructure.http.routes import ToolRouteDeps, add_tool_
 from validator.tests.fixtures.fakes import FakeReceiptLog, FakeSessionRegistry
 
 DEMO_SESSION_TOKEN = uuid4().hex
-DEFAULT_LLM_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
-OTHER_LLM_MODEL = "zai-org/GLM-5-TEE"
+DEFAULT_LIMIT_LLM_MODEL = "openai/gpt-oss-20b"
+DEEPSEEK_V32_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
 
 
 def _invocation(tool: ToolName = "search_web") -> ToolInvocationRequest:
-    kwargs = {"model": DEFAULT_LLM_MODEL} if tool == "llm_chat" else {}
+    kwargs = {"model": DEFAULT_LIMIT_LLM_MODEL} if tool == "llm_chat" else {}
     return ToolInvocationRequest(
         session_id=uuid4(),
         token=DEMO_SESSION_TOKEN,
@@ -391,7 +391,7 @@ def test_execute_tool_endpoint_waits_for_third_same_model_llm_call_then_succeeds
             app=app,
             provider=provider,
             tool="llm_chat",
-            model=DEFAULT_LLM_MODEL,
+            model=DEFAULT_LIMIT_LLM_MODEL,
             expected_acquire_calls=3,
             unblock_invocation=unblock_invocation,
         )
@@ -422,7 +422,7 @@ def test_execute_tool_endpoint_does_not_wait_for_different_llm_model() -> None:
                     "tool": "llm_chat",
                     "args": [],
                     "kwargs": {
-                        "model": OTHER_LLM_MODEL,
+                        "model": DEEPSEEK_V32_MODEL,
                         "messages": [{"role": "user", "content": "hi"}],
                     },
                 },
@@ -474,7 +474,7 @@ def _issue_waiting_tool_request(
     app: FastAPI,
     provider: DemoDependencyProvider,
     tool: ToolName,
-    model: str = DEFAULT_LLM_MODEL,
+    model: str = DEFAULT_LIMIT_LLM_MODEL,
     expected_acquire_calls: int,
     unblock_invocation: ToolInvocationRequest,
 ) -> Response:

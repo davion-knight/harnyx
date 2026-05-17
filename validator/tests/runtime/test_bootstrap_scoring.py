@@ -36,8 +36,8 @@ from harnyx_validator.runtime.bootstrap import (
 )
 from harnyx_validator.runtime.settings import Settings
 
-DEFAULT_LLM_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
-OTHER_LLM_MODEL = "zai-org/GLM-5-TEE"
+DEFAULT_LIMIT_LLM_MODEL = "openai/gpt-oss-20b"
+DEEPSEEK_V32_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
 
 
 class _FakeLlmProvider:
@@ -297,13 +297,13 @@ def test_build_state_uses_separate_tool_concurrency_lanes() -> None:
             session_id=session_id,
             token=token,
             tool="llm_chat",
-            kwargs={"model": DEFAULT_LLM_MODEL},
+            kwargs={"model": DEFAULT_LIMIT_LLM_MODEL},
         ),
         ToolInvocationRequest(
             session_id=session_id,
             token=token,
             tool="llm_chat",
-            kwargs={"model": DEFAULT_LLM_MODEL},
+            kwargs={"model": DEFAULT_LIMIT_LLM_MODEL},
         ),
     ]
     search_invocations = [
@@ -322,14 +322,14 @@ def test_build_state_uses_separate_tool_concurrency_lanes() -> None:
                 session_id=session_id,
                 token=token,
                 tool="llm_chat",
-                kwargs={"model": DEFAULT_LLM_MODEL},
+                kwargs={"model": DEFAULT_LIMIT_LLM_MODEL},
             )
         )
     other_model_invocation = ToolInvocationRequest(
         session_id=session_id,
         token=token,
         tool="llm_chat",
-        kwargs={"model": OTHER_LLM_MODEL},
+        kwargs={"model": DEEPSEEK_V32_MODEL},
     )
     state.tool_concurrency_limiter.acquire(other_model_invocation)
 
