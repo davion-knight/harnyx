@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -313,6 +315,72 @@ async def test_chutes_provider_persists_stream_ttft_metadata() -> None:
     assert response.metadata is not None
     assert isinstance(response.metadata["ttft_ms"], float)
     assert response.metadata["ttft_ms"] >= 0.0
+
+
+@pytest.mark.anyio("asyncio")
+async def test_chutes_provider_records_ttft_on_reasoning_only_first_stream_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_seconds = 10.0
+
+    def fake_perf_counter() -> float:
+        return clock_seconds
+
+    monkeypatch.setattr("harnyx_commons.llm.providers.chutes.time.perf_counter", fake_perf_counter)
+
+    class _DelayedReasoningThenContentStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal clock_seconds
+            reasoning_payload = {
+                "id": "resp-reasoning-first",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "reasoning": {
+                                "thought_text_parts": ["reasoning trace"],
+                                "has_thought_signature": True,
+                            }
+                        },
+                    }
+                ],
+            }
+            clock_seconds = 10.05
+            yield f"data: {json.dumps(reasoning_payload)}\n\n".encode()
+            await asyncio.sleep(0)
+            content_payload = {
+                "id": "resp-reasoning-first",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "final answer"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+            clock_seconds = 10.2
+            yield f"data: {json.dumps(content_payload)}\n\ndata: [DONE]\n\n".encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(200, stream=_DelayedReasoningThenContentStream(), request=request)
+
+    provider = ChutesLlmProvider(
+        base_url="https://example.com",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+    )
+
+    try:
+        response = await provider.invoke(_basic_chutes_request())
+    finally:
+        await provider.aclose()
+
+    assert response.raw_text == "final answer"
+    assert response.choices[0].message.reasoning == "reasoning trace"
+    assert response.metadata is not None
+    assert response.metadata["ttft_ms"] == pytest.approx(50.0)
 
 
 def test_resolve_chutes_embedding_base_url_returns_expected_live_base_url() -> None:

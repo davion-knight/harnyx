@@ -128,10 +128,10 @@ class ChutesLlmProvider(BaseLlmProvider):
                 invalid_data_message="streamed chat completions returned non-JSON SSE data",
                 invalid_event_message="streamed chat completions SSE event must be a JSON object",
             ):
+                if ttft_ms is None:
+                    ttft_ms = round((time.perf_counter() - started_at) * 1000, 2)
                 reasoning_state.merge_event(event)
-                if state.merge_event(event, reasoning_keys=()):
-                    if ttft_ms is None:
-                        ttft_ms = round((time.perf_counter() - started_at) * 1000, 2)
+                state.merge_event(event, reasoning_keys=())
         return _ChutesChatResponse.from_stream_state(state, reasoning_state=reasoning_state), ttft_ms
 
     def _log_stream_ttft(self, *, model: str, response_id: str, ttft_ms: float | None) -> None:
