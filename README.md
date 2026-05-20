@@ -70,7 +70,7 @@ Notes:
 **Validator flow + gating**
 - The platform sends miner-task batches to validators; validators run script x task combinations and report scored runs.
 - Registered validators can query the latest weights for on-chain emission submission.
-- Miner emission is temporarily capped at `0%`; owner `uid=0` receives all emission.
+- Miner emission is controlled by the platform's configured maximum miner emission fraction, currently defaulting to `0%`; owner `uid=0` receives the remainder.
 - The [live benchmark page](https://dashboard.harnyx.ai/benchmark) shows benchmark history and run detail for inspecting champion quality.
 
 **Roles**
@@ -110,7 +110,7 @@ Because of that:
 
 ### How capped miner emission works
 
-`GET /v1/weights` uses the latest champion weights. Total miner weight is temporarily capped at `0.0`; owner `uid=0` receives all emission, which burns miner emission.
+`GET /v1/weights` uses the latest champion weights. Total miner weight is capped by the configured maximum miner emission fraction times the latest champion batch score; owner `uid=0` receives the remainder.
 
 If no champion selection exists, miner emission is burned for that round.
 

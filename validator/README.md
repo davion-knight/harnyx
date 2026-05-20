@@ -106,7 +106,7 @@ Miner-task restart safety no longer depends on the validator staying alive until
 
 `GET /v1/weights` returns `champion_uid` and `weights`.
 
-When latest champion weights exist, total miner weight is temporarily capped at `0%`. Owner `uid=0` receives all emission, which burns miner emission.
+When latest champion weights exist, total miner weight is capped by the platform's configured maximum miner emission fraction times the latest champion batch score. Owner `uid=0` receives the remainder.
 
 If there is no champion selection, miner emission is burned for that round: `champion_uid=null`, `weights={0: 1.0}`.
 

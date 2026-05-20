@@ -8,8 +8,12 @@ from harnyx_commons.miner_task_emission import (
 )
 
 
-def test_apply_miner_emission_cap_burns_all_miner_emission() -> None:
-    weights = apply_miner_emission_cap({7: 0.6, 8: 0.4}, batch_score=0.5)
+def test_apply_miner_emission_cap_defaults_can_burn_all_miner_emission() -> None:
+    weights = apply_miner_emission_cap(
+        {7: 0.6, 8: 0.4},
+        batch_score=0.5,
+        max_miner_emission_fraction=0.0,
+    )
 
     assert weights == {
         0: pytest.approx(1.0),
@@ -19,31 +23,60 @@ def test_apply_miner_emission_cap_burns_all_miner_emission() -> None:
     assert sum(weights.values()) == pytest.approx(1.0)
 
 
-def test_apply_miner_emission_cap_ignores_owner_weight_in_base_vector() -> None:
-    weights = apply_miner_emission_cap({0: 0.8, 7: 0.6, 8: 0.4}, batch_score=1.0)
+def test_apply_miner_emission_cap_scales_by_configured_max_fraction() -> None:
+    weights = apply_miner_emission_cap(
+        {7: 0.6, 8: 0.4},
+        batch_score=0.5,
+        max_miner_emission_fraction=0.2,
+    )
 
     assert weights == {
-        0: pytest.approx(1.0),
-        7: pytest.approx(0.0),
-        8: pytest.approx(0.0),
+        0: pytest.approx(0.9),
+        7: pytest.approx(0.06),
+        8: pytest.approx(0.04),
+    }
+    assert sum(weights.values()) == pytest.approx(1.0)
+
+
+def test_apply_miner_emission_cap_ignores_owner_weight_in_base_vector() -> None:
+    weights = apply_miner_emission_cap(
+        {0: 0.8, 7: 0.6, 8: 0.4},
+        batch_score=1.0,
+        max_miner_emission_fraction=0.2,
+    )
+
+    assert weights == {
+        0: pytest.approx(0.8),
+        7: pytest.approx(0.12),
+        8: pytest.approx(0.08),
     }
 
 
 @pytest.mark.parametrize("weights", [{}, {0: 1.0}])
 def test_apply_miner_emission_cap_rejects_empty_miner_weights(weights: dict[int, float]) -> None:
     with pytest.raises(ValueError, match="miner weights are empty"):
-        apply_miner_emission_cap(weights, batch_score=1.0)
+        apply_miner_emission_cap(weights, batch_score=1.0, max_miner_emission_fraction=0.0)
 
 
 def test_apply_miner_emission_cap_rejects_non_positive_miner_total() -> None:
     with pytest.raises(ValueError, match="miner weights must have positive miner total"):
-        apply_miner_emission_cap({7: 0.0, 8: 0.0}, batch_score=1.0)
+        apply_miner_emission_cap({7: 0.0, 8: 0.0}, batch_score=1.0, max_miner_emission_fraction=0.0)
 
 
 @pytest.mark.parametrize("batch_score", [-0.1, 1.1, float("nan")])
 def test_apply_miner_emission_cap_rejects_invalid_batch_score(batch_score: float) -> None:
     with pytest.raises(ValueError, match="miner task batch score must be between 0.0 and 1.0"):
-        apply_miner_emission_cap({7: 1.0}, batch_score=batch_score)
+        apply_miner_emission_cap({7: 1.0}, batch_score=batch_score, max_miner_emission_fraction=0.0)
+
+
+@pytest.mark.parametrize("max_fraction", [-0.1, 1.1, float("nan")])
+def test_apply_miner_emission_cap_rejects_invalid_max_fraction(max_fraction: float) -> None:
+    with pytest.raises(ValueError, match="max miner emission fraction must be between 0.0 and 1.0"):
+        apply_miner_emission_cap(
+            {7: 1.0},
+            batch_score=1.0,
+            max_miner_emission_fraction=max_fraction,
+        )
 
 
 def test_owner_fallback_weights_assigns_all_emission_to_owner() -> None:
