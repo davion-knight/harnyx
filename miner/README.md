@@ -365,6 +365,58 @@ uv run --package harnyx-miner harnyx-miner-hash --agent-path ./agent.py
 That command computes the same SHA-256 the platform validates for upload, so it should
 match the response field `content_hash`.
 
+## Miner Script Python Subset
+
+Server upload validates miner scripts with an AST policy before duplicate
+fingerprinting. Normal SDK imports, common stdlib imports, async helpers,
+loops, lambdas, comprehensions, f-strings, dataclass-style classes,
+`json.dumps(...)`, `re.compile(...)`, and ordinary bound method calls are
+supported.
+
+Accepted scripts are also hashed structurally to catch exact copies, formatting
+or comment changes, common helper/local/import alias renames, and unused inert
+top-level helper padding. This is duplicate-submission hardening, not a proof
+that two arbitrary Python programs are semantically equivalent.
+
+The duplicate hash uses an allow-listed normalization policy:
+
+| Transform class | Decision-hash behavior |
+|-----------------|------------------------|
+| Comments, whitespace, parser-erased literal spelling, and source locations | canonicalized |
+| Common lexical renames, import alias order, inert helper padding/order, and stable local keyword names | canonicalized when the transform's mechanical assumptions are true |
+| Keyword argument order, arbitrary statement/import reordering, docstring removal, dead-code removal, constant folding, and semantic equivalence | not normalized in the duplicate-rejection hash |
+
+`canonical_ast_hash_v1` is not semantic equivalence. It intentionally ignores
+some syntactic and identifier-level differences for duplicate rejection. Scripts
+that depend on reflection over helper order, local names, or parameter names are
+not guaranteed to receive distinct hashes.
+
+Review comments on the duplicate hash should distinguish unreliable binding
+assumptions from semantic-equivalence requests. Binding ambiguity is guarded;
+semantic equivalence is out of scope.
+
+Use literal optional-field access:
+
+```python
+title = getattr(result, "title", None)
+```
+
+Direct builtin `eval(...)` calls are allowed when they improve answer accuracy.
+The submitted `eval(...)` call is structurally hashed, but code generated at
+runtime is not inspected by duplicate detection.
+
+Do not alias or pass around `eval`, `getattr`, or `hasattr`, and do not use other
+dynamic reflection or execution APIs such as `exec`, `compile`, `globals`,
+`locals`, `vars`, `dir`, `type`, `help`, `__import__`, `importlib`, `inspect`,
+`setattr`, `delattr`, or dunder attributes such as `__dict__`, `__code__`,
+`__globals__`, `__mro__`, and `__subclasses__`. Reflection helpers such as
+`typing.get_type_hints`, `dataclasses.fields`, and `dataclasses.asdict` are not
+part of the accepted upload subset.
+
+Pattern matching, `del`, `global`, and `nonlocal` are not part of the upload
+subset. Keep class bodies to docstrings, pass statements, field assignments or
+annotations, and method definitions.
+
 ---
 
 ## Common errors
@@ -389,6 +441,7 @@ match the response field `content_hash`.
 | Error | Cause |
 |-------|-------|
 | `sha_mismatch` (422) | Your `sha256` does not match the decoded `script_b64` |
+| `invalid_script_payload` (422) | The script is not valid UTF-8/Python or uses unsupported dynamic/reflection syntax |
 | `duplicate_script` (409) | The same script already exists globally |
 
 ### Runtime (during evaluation)
