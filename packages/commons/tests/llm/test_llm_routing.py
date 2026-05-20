@@ -160,19 +160,19 @@ def test_resolve_llm_route_routes_chutes_selected_openrouter_routed_model_to_ope
     assert route == ResolvedLlmRoute(surface="tool", provider="openrouter", model=model)
 
 
-def test_resolve_llm_route_custom_gpt_oss_20b_override_wins_over_openrouter_fallback() -> None:
+def test_resolve_llm_route_vertex_keeps_gpt_oss_20b_on_vertex_when_vertex_is_default() -> None:
     route = resolve_llm_route(
         surface="tool",
-        default_provider="chutes",
+        default_provider="vertex",
         model="openai/gpt-oss-20b",
-        overrides={"tool": {"openai/gpt-oss-20b": "custom-openai-compatible:gpt-oss-20b-gke"}},
+        overrides={},
         allowed_providers={"chutes", "vertex"},
         allow_custom_openai_compatible=True,
     )
 
     assert route == ResolvedLlmRoute(
         surface="tool",
-        provider="custom-openai-compatible:gpt-oss-20b-gke",
+        provider="vertex",
         model="openai/gpt-oss-20b",
     )
 
