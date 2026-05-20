@@ -32,7 +32,7 @@ from harnyx_validator.application.dto.evaluation import (
 )
 from harnyx_validator.application.ports.progress import ProviderFailureEvidence
 from harnyx_validator.application.services.evaluation_runner import ValidatorBatchFailureDetail
-from harnyx_validator.application.status import StatusProvider
+from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.infrastructure.http.schemas import (
     BatchAcceptResponse,
     BatchProgressRunsPageResponse,
@@ -77,6 +77,7 @@ class ValidatorControlDeps:
     progress_tracker: ProgressTracker
     validator_hotkey: StatusSigner
     resource_usage_provider: ResourceUsageProvider
+    batch_activity: BatchActivityTracker
 
 
 class ProgressTracker(Protocol):
@@ -265,6 +266,7 @@ def add_control_routes(
         try:
             lifecycle = deps.accept_batch.lifecycle_for(batch_id)
             if lifecycle is None:
+                activity = deps.batch_activity.snapshot(batch_id)
                 return BatchProgressStatusResponse(
                     batch_id=str(batch_id),
                     status="unknown",
@@ -275,8 +277,13 @@ def add_control_routes(
                     remaining=0,
                     latest_sequence=0,
                     provider_model_evidence=[],
+                    activity_last_updated_at=activity.last_activity_at,
+                    activity_stage=activity.last_activity_stage,
+                    active_artifact_count=activity.active_artifact_count,
+                    active_task_session_count=activity.active_task_session_count,
                 )
             summary = deps.progress_tracker.summary(batch_id)
+            activity = deps.batch_activity.snapshot(batch_id)
             provider_model_evidence = [
                 _serialize_provider_evidence(entry) for entry in summary["provider_evidence"]
             ]
@@ -291,6 +298,10 @@ def add_control_routes(
                     remaining=summary["remaining"],
                     latest_sequence=summary["latest_sequence"],
                     provider_model_evidence=provider_model_evidence,
+                    activity_last_updated_at=activity.last_activity_at,
+                    activity_stage=activity.last_activity_stage,
+                    active_artifact_count=activity.active_artifact_count,
+                    active_task_session_count=activity.active_task_session_count,
                 )
             return BatchProgressStatusResponse(
                 batch_id=str(batch_id),
@@ -302,6 +313,10 @@ def add_control_routes(
                 remaining=summary["remaining"],
                 latest_sequence=summary["latest_sequence"],
                 provider_model_evidence=provider_model_evidence,
+                activity_last_updated_at=activity.last_activity_at,
+                activity_stage=activity.last_activity_stage,
+                active_artifact_count=activity.active_artifact_count,
+                active_task_session_count=activity.active_task_session_count,
             )
         except Exception as exc:
             return _control_route_internal_error_response(request, exc)

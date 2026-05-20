@@ -42,7 +42,7 @@ from harnyx_validator.application.dto.evaluation import (
     TokenUsageSummary,
 )
 from harnyx_validator.application.services.evaluation_runner import ValidatorBatchFailureDetail
-from harnyx_validator.application.status import StatusProvider
+from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.domain.evaluation import MinerTaskRun
 from harnyx_validator.infrastructure.http.middleware import request_logging_middleware
 from harnyx_validator.infrastructure.http.routes import (
@@ -215,6 +215,7 @@ class DemoControlDependencyProvider:
             resource_usage_provider=(
                 StubResourceUsageProvider() if resource_usage_provider is None else resource_usage_provider
             ),
+            batch_activity=BatchActivityTracker(),
         )
 
     def __call__(self) -> ValidatorControlDeps:
@@ -239,6 +240,7 @@ class RealAcceptBatchDependencyProvider:
             progress_tracker=self.progress_tracker,
             validator_hotkey=self.validator_hotkey,
             resource_usage_provider=StubResourceUsageProvider(),
+            batch_activity=BatchActivityTracker(),
         )
 
     def __call__(self) -> ValidatorControlDeps:
@@ -1584,6 +1586,10 @@ def test_status_endpoint_returns_unknown_for_unaccepted_batch() -> None:
         "remaining": 0,
         "latest_sequence": 0,
         "provider_model_evidence": [],
+        "activity_last_updated_at": None,
+        "activity_stage": None,
+        "active_artifact_count": 0,
+        "active_task_session_count": 0,
     }
 
 

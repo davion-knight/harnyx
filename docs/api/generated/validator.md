@@ -195,6 +195,10 @@ Body: [BatchProgressStatusResponse](#model-batchprogressstatusresponse)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
+| `active_artifact_count` |  |  | opt | `integer` (default: 0) |
+| `active_task_session_count` |  |  | opt | `integer` (default: 0) |
+| `activity_last_updated_at` |  |  | opt | `string` (format: date-time; nullable) |
+| `activity_stage` |  |  | opt | `string` (nullable) |
 | `batch_id` |  |  | req | `string` |
 | `completed` |  |  | req | `integer` |
 | `error_code` |  |  | opt | `string` (nullable) |
@@ -556,6 +560,10 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
+| `active_artifact_count` |  |  | opt | `integer` (default: 0) |
+| `active_task_session_count` |  |  | opt | `integer` (default: 0) |
+| `activity_last_updated_at` |  |  | opt | `string` (format: date-time; nullable) |
+| `activity_stage` |  |  | opt | `string` (nullable) |
 | `batch_id` |  |  | req | `string` |
 | `completed` |  |  | req | `integer` |
 | `error_code` |  |  | opt | `string` (nullable) |
@@ -586,6 +594,41 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 {
   "additionalProperties": false,
   "properties": {
+    "active_artifact_count": {
+      "default": 0,
+      "minimum": 0.0,
+      "title": "Active Artifact Count",
+      "type": "integer"
+    },
+    "active_task_session_count": {
+      "default": 0,
+      "minimum": 0.0,
+      "title": "Active Task Session Count",
+      "type": "integer"
+    },
+    "activity_last_updated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Activity Last Updated At"
+    },
+    "activity_stage": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Activity Stage"
+    },
     "batch_id": {
       "minLength": 1,
       "title": "Batch Id",

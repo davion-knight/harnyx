@@ -40,7 +40,7 @@ from harnyx_validator.application.services.evaluation_runner import (
     ValidatorBatchFailedError,
     ValidatorBatchFailureDetail,
 )
-from harnyx_validator.application.status import StatusProvider
+from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 
 logger = logging.getLogger("harnyx_validator.miner_task_batch")
 
@@ -102,6 +102,7 @@ class MinerTaskBatchService:
         sandbox_options_factory: Callable[[], SandboxOptions],
         agent_resolver: AgentResolver,
         status_provider: StatusProvider | None = None,
+        activity: BatchActivityTracker | None = None,
         config: EvaluationBatchConfig | None = None,
         progress: ProgressRecorder | None = None,
     ) -> None:
@@ -133,6 +134,7 @@ class MinerTaskBatchService:
             sandbox_options_factory=sandbox_options_factory,
             agent_resolver=agent_resolver,
             progress=progress,
+            activity=activity,
             config=self._config,
         )
 

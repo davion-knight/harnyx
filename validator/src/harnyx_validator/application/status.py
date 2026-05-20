@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from threading import Lock
 from typing import TypedDict
 from uuid import UUID
 
@@ -34,6 +35,84 @@ class StatusSnapshot(TypedDict):
     last_error: str | None
     last_weight_submission_at: str | None
     last_weight_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchActivitySnapshot:
+    last_activity_at: datetime | None = None
+    last_activity_stage: str | None = None
+    active_artifact_count: int = 0
+    active_task_session_count: int = 0
+
+
+@dataclass(slots=True)
+class _MutableBatchActivity:
+    last_activity_at: datetime | None = None
+    last_activity_stage: str | None = None
+    active_artifact_ids: set[UUID] = field(default_factory=set)
+    active_task_session_count: int = 0
+
+
+class BatchActivityTracker:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._activity_by_batch: dict[UUID, _MutableBatchActivity] = {}
+
+    def mark_batch_started(self, batch_id: UUID) -> None:
+        self._mark(batch_id, "batch_started")
+
+    def mark_batch_finished(self, batch_id: UUID) -> None:
+        with self._lock:
+            self._activity_by_batch.pop(batch_id, None)
+
+    def mark_artifact_started(self, batch_id: UUID, artifact_id: UUID) -> None:
+        with self._lock:
+            activity = self._activity_by_batch.setdefault(batch_id, _MutableBatchActivity())
+            activity.active_artifact_ids.add(artifact_id)
+            self._record_activity(activity, "artifact_started")
+
+    def mark_artifact_stage(self, batch_id: UUID, stage: str) -> None:
+        self._mark(batch_id, stage)
+
+    def mark_artifact_finished(self, batch_id: UUID, artifact_id: UUID) -> None:
+        with self._lock:
+            activity = self._activity_by_batch.setdefault(batch_id, _MutableBatchActivity())
+            activity.active_artifact_ids.discard(artifact_id)
+            self._record_activity(activity, "artifact_finished")
+
+    def mark_task_session_started(self, batch_id: UUID) -> None:
+        with self._lock:
+            activity = self._activity_by_batch.setdefault(batch_id, _MutableBatchActivity())
+            activity.active_task_session_count += 1
+            self._record_activity(activity, "task_session_started")
+
+    def mark_task_session_finished(self, batch_id: UUID) -> None:
+        with self._lock:
+            activity = self._activity_by_batch.setdefault(batch_id, _MutableBatchActivity())
+            activity.active_task_session_count = max(0, activity.active_task_session_count - 1)
+            self._record_activity(activity, "task_session_finished")
+
+    def snapshot(self, batch_id: UUID) -> BatchActivitySnapshot:
+        with self._lock:
+            activity = self._activity_by_batch.get(batch_id)
+            if activity is None:
+                return BatchActivitySnapshot()
+            return BatchActivitySnapshot(
+                last_activity_at=activity.last_activity_at,
+                last_activity_stage=activity.last_activity_stage,
+                active_artifact_count=len(activity.active_artifact_ids),
+                active_task_session_count=activity.active_task_session_count,
+            )
+
+    def _mark(self, batch_id: UUID, stage: str) -> None:
+        with self._lock:
+            activity = self._activity_by_batch.setdefault(batch_id, _MutableBatchActivity())
+            self._record_activity(activity, stage)
+
+    @staticmethod
+    def _record_activity(activity: _MutableBatchActivity, stage: str) -> None:
+        activity.last_activity_at = datetime.now(UTC)
+        activity.last_activity_stage = stage
 
 
 @dataclass(slots=True)
@@ -94,4 +173,10 @@ class StatusProvider:
         return value.isoformat() if value else None
 
 
-__all__ = ["StatusProvider", "InMemoryStatus", "StatusSnapshot"]
+__all__ = [
+    "BatchActivitySnapshot",
+    "BatchActivityTracker",
+    "StatusProvider",
+    "InMemoryStatus",
+    "StatusSnapshot",
+]

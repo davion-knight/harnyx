@@ -23,6 +23,7 @@ from harnyx_validator.application.ports.evaluation_record import EvaluationRecor
 from harnyx_validator.application.ports.progress import ProgressRecorder
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
 from harnyx_validator.application.scheduler import EvaluationScheduler, SchedulerConfig
+from harnyx_validator.application.status import BatchActivityTracker
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,7 @@ class BatchExecutionPlanner:
         agent_resolver: AgentResolver,
         progress: ProgressRecorder | None,
         config: EvaluationBatchConfig,
+        activity: BatchActivityTracker | None = None,
     ) -> None:
         self._subtensor = subtensor_client
         self._sandbox_manager = sandbox_manager
@@ -86,6 +88,7 @@ class BatchExecutionPlanner:
         self._sandbox_options_factory = sandbox_options_factory
         self._agent_resolver = agent_resolver
         self._progress = progress
+        self._activity = activity
         self._config = config
 
     def build_run_context(self, batch: MinerTaskBatchSpec) -> RunContext:
@@ -133,6 +136,7 @@ class BatchExecutionPlanner:
                 artifact_task_parallelism=run_ctx.config.artifact_task_parallelism,
             ),
             progress=self._progress,
+            activity=self._activity,
         )
 
     def _build_sandbox_options_factory(

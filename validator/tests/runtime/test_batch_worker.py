@@ -33,7 +33,7 @@ from harnyx_validator.application.services.evaluation_runner import (
     ValidatorBatchFailedError,
     ValidatorBatchFailureDetail,
 )
-from harnyx_validator.application.status import StatusProvider
+from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.domain.evaluation import MinerTaskRun
 from harnyx_validator.infrastructure.state.batch_inbox import InMemoryBatchInbox
 from harnyx_validator.runtime.evaluation_worker import EvaluationWorker
@@ -607,6 +607,7 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
 
     monkeypatch.setattr(worker_mod, "create_platform_agent_resolver", lambda _platform: object())
     monkeypatch.setattr(worker_mod, "MinerTaskBatchService", CapturingBatchService)
+    batch_activity = BatchActivityTracker()
 
     context = SimpleNamespace(
         settings=SimpleNamespace(artifact_parallelism=4, artifact_task_parallelism=5),
@@ -620,6 +621,7 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
         create_evaluation_orchestrator=lambda _client: object(),
         build_sandbox_options=lambda: object(),
         status_provider=StatusProvider(),
+        batch_activity=batch_activity,
         progress_tracker=object(),
         batch_inbox=InMemoryBatchInbox(),
         control_deps_provider=lambda: SimpleNamespace(accept_batch=object()),
@@ -632,3 +634,4 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
     assert isinstance(config, EvaluationBatchConfig)
     assert config.artifact_parallelism == 4
     assert config.artifact_task_parallelism == 5
+    assert captured["activity"] is batch_activity

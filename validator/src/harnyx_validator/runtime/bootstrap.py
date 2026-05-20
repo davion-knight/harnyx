@@ -46,7 +46,7 @@ from harnyx_validator.application.invoke_entrypoint import EntrypointInvoker, Sa
 from harnyx_validator.application.ports.evaluation_record import EvaluationRecordPort
 from harnyx_validator.application.ports.platform import PlatformPort
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
-from harnyx_validator.application.status import StatusProvider
+from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.application.submit_weights import WeightSubmissionService
 from harnyx_validator.infrastructure.auth.sr25519 import BittensorSr25519InboundVerifier
 from harnyx_validator.infrastructure.http.routes import (
@@ -177,6 +177,7 @@ class RuntimeContext:
     platform_client: PlatformPort | None
     batch_inbox: InMemoryBatchInbox
     status_provider: StatusProvider
+    batch_activity: BatchActivityTracker
     tool_route_deps_provider: Callable[[], ToolRouteDeps]
     control_deps_provider: Callable[[], ValidatorControlDeps]
     inbound_auth_verifier: BittensorSr25519InboundVerifier
@@ -197,6 +198,7 @@ class InMemoryState:
     evaluation_records: EvaluationRecordPort
     progress_tracker: InMemoryRunProgress
     batch_inbox: InMemoryBatchInbox
+    batch_activity: BatchActivityTracker
     usage_tracker: UsageTracker
     tool_concurrency_limiter: ToolConcurrencyLimiter
     session_manager: SessionManager
@@ -274,6 +276,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         platform_client=platform_client,
         batch_inbox=state.batch_inbox,
         status_provider=status_provider,
+        batch_activity=state.batch_activity,
         tool_route_deps_provider=tool_route_provider,
         control_deps_provider=control_provider,
         inbound_auth_verifier=inbound_auth_verifier,
@@ -287,6 +290,7 @@ def _build_state() -> InMemoryState:
     evaluation_records = InMemoryEvaluationRecordStore()
     progress_tracker = InMemoryRunProgress()
     batch_inbox = InMemoryBatchInbox()
+    batch_activity = BatchActivityTracker()
     tool_concurrency_limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
     usage_tracker = UsageTracker()
     session_manager = SessionManager(session_registry, token_registry)
@@ -297,6 +301,7 @@ def _build_state() -> InMemoryState:
         evaluation_records=evaluation_records,
         progress_tracker=progress_tracker,
         batch_inbox=batch_inbox,
+        batch_activity=batch_activity,
         usage_tracker=usage_tracker,
         tool_concurrency_limiter=tool_concurrency_limiter,
         session_manager=session_manager,
@@ -453,6 +458,7 @@ def _build_http_dependencies(
         state.progress_tracker,
         validator_hotkey,
         resource_usage_provider,
+        state.batch_activity,
     )
     return tool_route_provider, control_provider, status_provider, inbound_auth
 
@@ -577,6 +583,7 @@ def _make_control_provider(
     progress_tracker: InMemoryRunProgress,
     validator_hotkey: bt.Keypair,
     resource_usage_provider: ValidatorResourceUsageProvider | None = None,
+    batch_activity: BatchActivityTracker | None = None,
 ) -> Callable[[], ValidatorControlDeps]:
     effective_resource_usage_provider = resource_usage_provider or ValidatorResourceUsageProvider()
 
@@ -603,6 +610,7 @@ def _make_control_provider(
             progress_tracker=progress_tracker,
             validator_hotkey=cast(StatusSigner, validator_hotkey),
             resource_usage_provider=effective_resource_usage_provider,
+            batch_activity=batch_activity or BatchActivityTracker(),
         )
 
     return provider

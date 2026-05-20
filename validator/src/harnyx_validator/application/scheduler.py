@@ -11,6 +11,7 @@ from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from types import TracebackType
 from typing import TypeVar
 from uuid import UUID
 
@@ -44,6 +45,7 @@ from harnyx_validator.application.services.evaluation_runner import (
     ValidatorBatchFailedError,
     ValidatorBatchFailureDetail,
 )
+from harnyx_validator.application.status import BatchActivityTracker
 from harnyx_validator.runtime.agent_artifact import ArtifactPreparationError
 
 SandboxOptionsFactory = Callable[[ScriptArtifactSpec], SandboxOptions]
@@ -152,6 +154,42 @@ class SchedulerConfig:
     session_ttl: timedelta
     artifact_parallelism: int = 4
     artifact_task_parallelism: int = 20
+
+
+class _BatchTaskSessionLimiter:
+    def __init__(
+        self,
+        max_sessions: int,
+        *,
+        batch_id: UUID,
+        activity: BatchActivityTracker | None,
+    ) -> None:
+        self.max_sessions = max(1, max_sessions)
+        self._semaphore = asyncio.Semaphore(self.max_sessions)
+        self._active_count = 0
+        self._batch_id = batch_id
+        self._activity = activity
+
+    async def __aenter__(self) -> None:
+        await self._semaphore.acquire()
+        self._active_count += 1
+        if self._activity is not None:
+            self._activity.mark_task_session_started(self._batch_id)
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._active_count -= 1
+        if self._activity is not None:
+            self._activity.mark_task_session_finished(self._batch_id)
+        self._semaphore.release()
+
+    @property
+    def active_count(self) -> int:
+        return self._active_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +369,7 @@ class EvaluationScheduler:
         clock: Clock,
         config: SchedulerConfig,
         progress: ProgressRecorder | None = None,
+        activity: BatchActivityTracker | None = None,
     ) -> None:
         self._tasks = tuple(tasks)
         self._sandboxes = sandbox_manager
@@ -340,6 +379,7 @@ class EvaluationScheduler:
         self._clock = clock
         self._blocking_executor = blocking_executor
         self._config = config
+        self._activity = activity
         self._runner = EvaluationRunner(
             subtensor_client=subtensor_client,
             session_manager=session_manager,
@@ -381,6 +421,13 @@ class EvaluationScheduler:
     ) -> MinerTaskBatchRunResult:
         recorded_pairs = self._progress.recorded_pairs(batch_id) if self._progress is not None else frozenset()
         artifact_parallelism = min(max(1, self._config.artifact_parallelism), len(artifacts))
+        task_session_limiter = _BatchTaskSessionLimiter(
+            self._config.artifact_task_parallelism,
+            batch_id=batch_id,
+            activity=self._activity,
+        )
+        if self._activity is not None:
+            self._activity.mark_batch_started(batch_id)
         _log_batch_execution_started(
             batch_id=batch_id,
             artifact_count=len(artifacts),
@@ -412,17 +459,22 @@ class EvaluationScheduler:
                     work_coordinator=work_coordinator,
                     dispatch=dispatch,
                     blocking_executor=blocking_executor,
+                    task_session_limiter=task_session_limiter,
                 )
             )
             for _ in range(artifact_parallelism)
         ]
         try:
-            await asyncio.gather(*workers)
-        except BaseException:
-            for worker in workers:
-                worker.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
-            raise
+            try:
+                await asyncio.gather(*workers)
+            except BaseException:
+                for worker in workers:
+                    worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+                raise
+        finally:
+            if self._activity is not None:
+                self._activity.mark_batch_finished(batch_id)
 
         if dispatch.published_batch_failure is not None:
             raise self._build_final_batch_failure(
@@ -445,6 +497,7 @@ class EvaluationScheduler:
         work_coordinator: _ArtifactWorkCoordinator,
         dispatch: _BatchArtifactDispatchState,
         blocking_executor: Executor,
+        task_session_limiter: _BatchTaskSessionLimiter,
     ) -> None:
         while True:
             work_item = await work_coordinator.next_work()
@@ -486,6 +539,7 @@ class EvaluationScheduler:
                 earlier_submissions=work_item.earlier_submissions,
                 retry_round=work_item.retry_round,
                 stop_dequeuing=lambda: self._stop_artifact_dequeue(dispatch),
+                task_session_limiter=task_session_limiter,
             )
 
             async with dispatch.merge_lock:
@@ -544,6 +598,7 @@ class EvaluationScheduler:
         completed_artifact_baseline: Callable[[], ValidatorModelLlmBaseline] | None = None,
         timeout_retry_state_by_pair: dict[tuple[UUID, UUID], TimeoutRetryState],
         earlier_submissions: tuple[MinerTaskRunSubmission, ...] = (),
+        task_session_limiter: _BatchTaskSessionLimiter | None = None,
     ) -> ArtifactEvaluationOutcome:
         artifact_result = await self._runner.evaluate_artifact_with_state(
             batch_id=batch_id,
@@ -557,6 +612,7 @@ class EvaluationScheduler:
                 for pair_key, state in timeout_retry_state_by_pair.items()
             },
             earlier_submissions=earlier_submissions,
+            task_session_limiter=task_session_limiter,
         )
         return ArtifactEvaluationOutcome(
             submissions=artifact_result.submissions,
@@ -580,6 +636,7 @@ class EvaluationScheduler:
         earlier_submissions: tuple[MinerTaskRunSubmission, ...] = (),
         retry_round: int = 0,
         stop_dequeuing: Callable[[], None] | None = None,
+        task_session_limiter: _BatchTaskSessionLimiter | None = None,
     ) -> _CompletedArtifactResult:
         remaining_tasks = tuple(
             task for task in tasks if (artifact.artifact_id, task.task_id) not in recorded_pairs
@@ -593,6 +650,8 @@ class EvaluationScheduler:
                 retry_round=retry_round,
             )
 
+        if self._activity is not None:
+            self._activity.mark_artifact_started(batch_id, artifact.artifact_id)
         artifact_started_at = time.monotonic()
         setup_ms = 0.0
         evaluation_ms = 0.0
@@ -603,6 +662,8 @@ class EvaluationScheduler:
         error_code: str | None = None
         backfill_primary_outcome: tuple[str, str] | None = None
         try:
+            if self._activity is not None:
+                self._activity.mark_artifact_stage(batch_id, "sandbox_setup_started")
             setup_started_at = time.monotonic()
             deployment = await self._start_artifact_with_retry(
                 batch_id=batch_id,
@@ -610,6 +671,8 @@ class EvaluationScheduler:
                 tasks=remaining_tasks,
                 blocking_executor=blocking_executor,
             )
+            if self._activity is not None:
+                self._activity.mark_artifact_stage(batch_id, "sandbox_setup_finished")
             setup_ms = _monotonic_elapsed_ms(
                 started_at=setup_started_at,
                 completed_at=time.monotonic(),
@@ -641,6 +704,8 @@ class EvaluationScheduler:
                 )
                 if stop_dequeuing is not None:
                     stop_dequeuing()
+                if self._activity is not None:
+                    self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
                 return _CompletedArtifactResult(
                     artifact_id=artifact.artifact_id,
                     submissions=earlier_submissions,
@@ -688,6 +753,8 @@ class EvaluationScheduler:
                     outcome="setup_failed",
                     error_code=str(exc.error_code),
                 )
+                if self._activity is not None:
+                    self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
                 raise backfill_exc.cause from backfill_exc
             success_count, failure_count = _count_submission_outcomes(artifact_submissions)
             _log_artifact_execution_finished(
@@ -709,6 +776,8 @@ class EvaluationScheduler:
                 outcome="setup_failed",
                 error_code=str(exc.error_code),
             )
+            if self._activity is not None:
+                self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
             return _CompletedArtifactResult(
                 artifact_id=artifact.artifact_id,
                 submissions=artifact_submissions,
@@ -722,6 +791,8 @@ class EvaluationScheduler:
         evaluation_started_at: float | None = None
         try:
             orchestrator = self._make_orchestrator(deployment.client)
+            if self._activity is not None:
+                self._activity.mark_artifact_stage(batch_id, "artifact_evaluation_started")
             evaluation_started_at = time.monotonic()
             artifact_result = await self._evaluate_artifact_with_timeout_state(
                 batch_id=batch_id,
@@ -732,6 +803,7 @@ class EvaluationScheduler:
                 completed_artifact_baseline=completed_artifact_baseline,
                 timeout_retry_state_by_pair=timeout_retry_state_snapshot,
                 earlier_submissions=earlier_submissions,
+                task_session_limiter=task_session_limiter,
             )
             evaluation_ms = _monotonic_elapsed_ms(
                 started_at=evaluation_started_at,
@@ -792,6 +864,8 @@ class EvaluationScheduler:
                 outcome, error_code = backfill_primary_outcome
             raise
         finally:
+            if self._activity is not None:
+                self._activity.mark_artifact_stage(batch_id, "sandbox_teardown_started")
             teardown_started_at = time.monotonic()
             teardown_exc: Exception | None = None
             try:
@@ -850,7 +924,11 @@ class EvaluationScheduler:
                 outcome=outcome,
                 primary_failure_raised=primary_failure_raised,
             ):
+                if self._activity is not None:
+                    self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
                 raise teardown_exc
+            if self._activity is not None:
+                self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
 
         if artifact_result is None:
             raise RuntimeError("artifact evaluation completed without result")

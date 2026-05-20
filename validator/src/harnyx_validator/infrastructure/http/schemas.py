@@ -373,6 +373,10 @@ class BatchProgressStatusResponse(BaseModel):
     remaining: int = Field(ge=0)
     latest_sequence: int = Field(ge=0)
     provider_model_evidence: list[ProviderEvidenceModel] = Field(default_factory=list)
+    activity_last_updated_at: datetime | None = None
+    activity_stage: str | None = None
+    active_artifact_count: int = Field(default=0, ge=0)
+    active_task_session_count: int = Field(default=0, ge=0)
 
 
 class SequencedCompletedRunSubmissionModel(BaseModel):

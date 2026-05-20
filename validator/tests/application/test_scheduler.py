@@ -420,6 +420,91 @@ async def test_scheduler_runs_all_tasks_for_each_artifact(
         assert extra["error_code"] is None
 
 
+async def test_scheduler_caps_task_sessions_across_whole_batch(
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    tasks = tuple(_task(f"task {index}") for index in range(4))
+    artifacts = (
+        ScriptArtifactSpec(uid=3, artifact_id=uuid4(), content_hash="a", size_bytes=0),
+        ScriptArtifactSpec(uid=5, artifact_id=uuid4(), content_hash="b", size_bytes=0),
+    )
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    sandbox_manager = DummySandboxManager()
+    active_task_sessions = 0
+    max_active_task_sessions = 0
+    entered_task_sessions = 0
+    first_wave_entered = asyncio.Event()
+    active_lock = asyncio.Lock()
+
+    async def run_tracked_task_session(task_session_limiter) -> None:
+        nonlocal active_task_sessions, max_active_task_sessions, entered_task_sessions
+        async with task_session_limiter:
+            async with active_lock:
+                active_task_sessions += 1
+                entered_task_sessions += 1
+                max_active_task_sessions = max(max_active_task_sessions, active_task_sessions)
+                if entered_task_sessions == 2:
+                    first_wave_entered.set()
+            await first_wave_entered.wait()
+            await asyncio.sleep(0)
+            async with active_lock:
+                active_task_sessions -= 1
+
+    class _TrackedRunner:
+        async def evaluate_artifact_with_state(
+            self,
+            *,
+            batch_id: UUID,
+            artifact: ScriptArtifactSpec,
+            tasks,
+            task_session_limiter,
+            **_kwargs,
+        ) -> ArtifactEvaluationOutcome:
+            await asyncio.gather(
+                *(run_tracked_task_session(task_session_limiter) for _task_item in tasks)
+            )
+            return ArtifactEvaluationOutcome(
+                submissions=tuple(
+                    _submission_for_task(
+                        batch_id=batch_id,
+                        validator_uid=41,
+                        artifact=artifact,
+                        task=task,
+                    )
+                    for task in tasks
+                ),
+                unresolved_tasks=(),
+                timeout_observations_by_pair={},
+                validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+            )
+
+    scheduler = EvaluationScheduler(
+        tasks=tasks,
+        subtensor_client=subtensor,
+        sandbox_manager=sandbox_manager,
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=DummyReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=lambda _client: object(),
+        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        clock=lambda: datetime(2025, 10, 27, tzinfo=UTC),
+        config=SchedulerConfig(
+            token_secret_bytes=8,
+            session_ttl=timedelta(minutes=5),
+            artifact_parallelism=2,
+            artifact_task_parallelism=2,
+        ),
+    )
+    scheduler._runner = _TrackedRunner()
+
+    result = await scheduler.run(batch_id=uuid4(), requested_artifacts=artifacts)
+
+    assert len(result.runs) == len(tasks) * len(artifacts)
+    assert max_active_task_sessions == 2
+
+
 async def test_scheduler_flattens_runs_in_requested_artifact_order_when_completion_is_out_of_order(
     blocking_executor: ThreadPoolExecutor,
 ) -> None:

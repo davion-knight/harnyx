@@ -314,11 +314,13 @@ class DockerSandboxManager(SandboxManager):
         client_factory: Callable[[str, str | None], SandboxClient] | None = None,
         log_consumer: Callable[[str], None] | None = None,
         log_runner: Callable[..., subprocess.Popen[str]] | None = None,
+        command_timeout_seconds: float = 120.0,
     ) -> None:
         self._docker = docker_binary
         self._host = host
         self._published_port_bind_host = published_port_bind_host
         self._run = command_runner or self._default_run
+        self._command_timeout_seconds = command_timeout_seconds
         self._client_factory = client_factory or (
             lambda base_url, host_container_url: HttpSandboxClient(
                 base_url,
@@ -465,7 +467,7 @@ class DockerSandboxManager(SandboxManager):
             },
         )
         try:
-            result = self._run(args, capture_output=True, text=True, check=True)
+            result = self._run_command(args, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:  # pragma: no cover - exercised in integration
             self._write_failure_diagnostics(
                 options=options,
@@ -475,6 +477,18 @@ class DockerSandboxManager(SandboxManager):
                 docker_run_result=exc,
             )
             self._raise_run_error(exc, args, options)
+        except subprocess.TimeoutExpired as exc:  # pragma: no cover - integration only
+            self._write_failure_diagnostics(
+                options=options,
+                container_id=None,
+                error=exc,
+                docker_run_args=args,
+                docker_run_result=None,
+            )
+            redacted_command = _shell_join(_redact_docker_run_args(args))
+            raise RuntimeError(
+                f"docker run timed out after {self._command_timeout_seconds:g}s: {redacted_command}"
+            ) from exc
         container_id = result.stdout.strip()
         if not container_id:
             raise RuntimeError("docker run did not return a container identifier")
@@ -569,7 +583,7 @@ class DockerSandboxManager(SandboxManager):
         options: SandboxOptions,
     ) -> None:
         try:
-            result = self._run(args, capture_output=True, text=True, check=True)
+            result = self._run_command(args, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:
             write_private_text(
                 path.with_suffix(f"{path.suffix}.error.txt"),
@@ -578,6 +592,17 @@ class DockerSandboxManager(SandboxManager):
                     f"returncode={exc.returncode}\n"
                     f"stdout={_redact_sensitive_text(exc.stdout or '', options)}\n"
                     f"stderr={_redact_sensitive_text(exc.stderr or '', options)}\n"
+                ),
+            )
+            return
+        except subprocess.TimeoutExpired as exc:
+            write_private_text(
+                path.with_suffix(f"{path.suffix}.error.txt"),
+                (
+                    f"command={_shell_join(args)}\n"
+                    f"timeout={exc.timeout}\n"
+                    f"stdout={_redact_sensitive_text(str(exc.stdout or ''), options)}\n"
+                    f"stderr={_redact_sensitive_text(str(exc.stderr or ''), options)}\n"
                 ),
             )
             return
@@ -606,10 +631,12 @@ class DockerSandboxManager(SandboxManager):
             str(options.container_port),
         ]
         try:
-            result = self._run(args, capture_output=True, text=True, check=True)
+            result = self._run_command(args, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:  # pragma: no cover - integration only
             stderr = (exc.stderr or "").strip()
             raise RuntimeError(f"docker port failed: stderr={stderr}") from exc
+        except subprocess.TimeoutExpired as exc:  # pragma: no cover - integration only
+            raise RuntimeError(f"docker port timed out after {self._command_timeout_seconds:g}s") from exc
 
         output = (result.stdout or "").strip()
         if not output:
@@ -642,7 +669,10 @@ class DockerSandboxManager(SandboxManager):
             "{{json .NetworkSettings.Networks}}",
             options.container_name,
         ]
-        result = self._run(args, capture_output=True, text=True, check=True)
+        try:
+            result = self._run_command(args, capture_output=True, text=True, check=True)
+        except subprocess.TimeoutExpired as exc:  # pragma: no cover - integration only
+            raise RuntimeError(f"docker inspect timed out after {self._command_timeout_seconds:g}s") from exc
         output = (result.stdout or "").strip()
         if not output:
             raise RuntimeError("docker inspect returned empty network settings")
@@ -684,13 +714,19 @@ class DockerSandboxManager(SandboxManager):
         args.append(identifier)
         logger.info("stopping sandbox container", extra={"container": identifier})
         try:
-            self._run(args, capture_output=True, text=True, check=True)
+            self._run_command(args, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:  # pragma: no cover - exercised in integration
             logger.warning(
                 "docker stop failed (ignored): returncode=%s stderr=%s",
                 exc.returncode,
                 exc.stderr,
                 extra={"container": identifier, "stderr": exc.stderr},
+            )
+        except subprocess.TimeoutExpired as exc:  # pragma: no cover - integration only
+            logger.warning(
+                "docker stop timed out (ignored): timeout=%s",
+                exc.timeout,
+                extra={"container": identifier, "timeout": exc.timeout},
             )
         deployment.client.close()
         self._stop_log_stream(identifier)
@@ -701,13 +737,19 @@ class DockerSandboxManager(SandboxManager):
             args.extend(["-t", str(stop_timeout_seconds)])
         args.append(container_id)
         try:
-            self._run(args, capture_output=True, text=True, check=True)
+            self._run_command(args, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:  # pragma: no cover - integration only
             logger.warning(
                 "docker stop failed (ignored): returncode=%s stderr=%s",
                 exc.returncode,
                 exc.stderr,
                 extra={"container": container_id, "stderr": exc.stderr},
+            )
+        except subprocess.TimeoutExpired as exc:  # pragma: no cover - integration only
+            logger.warning(
+                "docker stop timed out (ignored): timeout=%s",
+                exc.timeout,
+                extra={"container": container_id, "timeout": exc.timeout},
             )
 
     def _wait_for_healthz(self, base_url: str, *, path: str, timeout_seconds: float) -> None:
@@ -763,6 +805,15 @@ class DockerSandboxManager(SandboxManager):
         **kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:  # pragma: no cover - thin wrapper
         return subprocess.run(*args, **kwargs)  # noqa: S603
+
+    def _run_command(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = self._command_timeout_seconds
+        return self._run(*args, **kwargs)
 
     @staticmethod
     def _default_popen(

@@ -6,7 +6,8 @@ import asyncio
 import logging
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -72,11 +73,21 @@ if TYPE_CHECKING:
 Clock = Callable[[], datetime]
 SubmissionFactory = Callable[[MinerTask, SessionIssued], Awaitable[MinerTaskRunSubmission]]
 CompletedArtifactBaseline = Callable[[], ValidatorModelLlmBaseline]
+TaskSessionLimiter = AbstractAsyncContextManager[None]
 
 logger = logging.getLogger("harnyx_validator.scheduler")
 measurement_logger = logging.getLogger("harnyx_validator.measurement")
 LOCAL_RETRY_ATTEMPTS = 2
 IN_FLIGHT_LLM_TIMEOUT_REVIEW_WAIT_SECONDS = 300.0
+
+
+@asynccontextmanager
+async def _limited_task_session(limiter: TaskSessionLimiter | None) -> AsyncIterator[None]:
+    if limiter is None:
+        yield
+        return
+    async with limiter:
+        yield
 
 
 def _elapsed_ms(*, issued_at: datetime, completed_at: datetime) -> float:
@@ -296,6 +307,7 @@ class EvaluationRunner:
         completed_artifact_baseline: CompletedArtifactBaseline | None = None,
         timeout_observations_by_pair: dict[tuple[UUID, UUID], tuple[TimeoutObservationEvidence, ...]],
         earlier_submissions: tuple[MinerTaskRunSubmission, ...] = (),
+        task_session_limiter: TaskSessionLimiter | None = None,
     ) -> ArtifactEvaluationOutcome:
         indexed_tasks = tuple(enumerate(tasks))
         if not indexed_tasks:
@@ -324,6 +336,7 @@ class EvaluationRunner:
                     pending_tasks=pending_tasks,
                     dispatch=dispatch,
                     completed_artifact_baseline=completed_artifact_baseline,
+                    task_session_limiter=task_session_limiter,
                 )
             )
             for _ in range(
@@ -378,6 +391,7 @@ class EvaluationRunner:
         pending_tasks: asyncio.Queue[tuple[int, MinerTask]],
         dispatch: _ArtifactDispatchState,
         completed_artifact_baseline: CompletedArtifactBaseline | None = None,
+        task_session_limiter: TaskSessionLimiter | None = None,
     ) -> None:
         while True:
             if dispatch.validator_failure is not None or dispatch.unexpected_failure is not None:
@@ -389,15 +403,16 @@ class EvaluationRunner:
 
             try:
                 pair_key = (artifact.artifact_id, task.task_id)
-                decision = await self._evaluate_task_with_retry(
-                    batch_id=batch_id,
-                    artifact=artifact,
-                    task=task,
-                    orchestrator=orchestrator,
-                    validator_model_llm_baseline=dispatch.validator_model_llm_baseline,
-                    completed_artifact_baseline=completed_artifact_baseline,
-                    prior_timeout_observations=dispatch.timeout_observations_by_pair.get(pair_key, ()),
-                )
+                async with _limited_task_session(task_session_limiter):
+                    decision = await self._evaluate_task_with_retry(
+                        batch_id=batch_id,
+                        artifact=artifact,
+                        task=task,
+                        orchestrator=orchestrator,
+                        validator_model_llm_baseline=dispatch.validator_model_llm_baseline,
+                        completed_artifact_baseline=completed_artifact_baseline,
+                        prior_timeout_observations=dispatch.timeout_observations_by_pair.get(pair_key, ()),
+                    )
                 if decision.kind is AttemptControlKind.SUBMISSION:
                     submission = _require_submission(decision)
                     dispatch.submissions_by_index[task_index] = submission

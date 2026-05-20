@@ -92,6 +92,25 @@ def test_docker_sandbox_manager_writes_diagnostics_when_docker_run_fails(tmp_pat
     assert not (tmp_path / "docker-logs.txt").exists()
 
 
+def test_docker_sandbox_manager_times_out_docker_run(tmp_path: Path) -> None:
+    observed_timeout: float | None = None
+
+    def command_runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal observed_timeout
+        observed_timeout = kwargs["timeout"]
+        raise subprocess.TimeoutExpired(cmd=args, timeout=observed_timeout)
+
+    options = _sandbox_options(tmp_path)
+    manager = DockerSandboxManager(command_runner=command_runner, command_timeout_seconds=3.5)
+
+    with pytest.raises(RuntimeError, match="docker run timed out after 3.5s"):
+        manager.start(options)
+
+    assert observed_timeout == 3.5
+    error_text = (tmp_path / "error.txt").read_text(encoding="utf-8")
+    assert error_text.startswith("TimeoutExpired:")
+
+
 def test_docker_sandbox_manager_writes_inspect_and_logs_before_cleanup(tmp_path: Path) -> None:
     commands: list[list[str]] = []
     container_id = "sandbox-container-1"
