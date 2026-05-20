@@ -31,6 +31,7 @@ class EvaluationBatchConfig:
 
     state_dir: str = DEFAULT_STATE_DIR
     token_secret_bytes: int = 16
+    artifact_parallelism: int = 4
     artifact_task_parallelism: int = 20
 
 
@@ -128,6 +129,7 @@ class BatchExecutionPlanner:
             config=SchedulerConfig(
                 token_secret_bytes=run_ctx.config.token_secret_bytes,
                 session_ttl=timedelta(minutes=5),
+                artifact_parallelism=run_ctx.config.artifact_parallelism,
                 artifact_task_parallelism=run_ctx.config.artifact_task_parallelism,
             ),
             progress=self._progress,

@@ -122,6 +122,7 @@ def test_batch_execution_planner_passes_task_parallelism_to_scheduler(
 ) -> None:
     config = EvaluationBatchConfig(
         state_dir=str(tmp_path),
+        artifact_parallelism=4,
         artifact_task_parallelism=7,
     )
     planner = BatchExecutionPlanner(
@@ -142,6 +143,7 @@ def test_batch_execution_planner_passes_task_parallelism_to_scheduler(
     run_ctx = planner.build_run_context(batch)
     _artifacts, scheduler = planner.prepare_execution(run_ctx, batch)
 
+    assert scheduler._config.artifact_parallelism == 4
     assert scheduler._config.artifact_task_parallelism == 7
 
 

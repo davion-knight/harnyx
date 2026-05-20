@@ -46,6 +46,29 @@ def test_settings_defaults_artifact_task_parallelism_to_external_default(monkeyp
     assert settings.artifact_task_parallelism == 20
 
 
+def test_settings_defaults_artifact_parallelism_to_external_default(monkeypatch) -> None:
+    monkeypatch.delenv("VALIDATOR_ARTIFACT_PARALLELISM", raising=False)
+
+    settings = Settings.load()
+
+    assert settings.artifact_parallelism == 4
+
+
+def test_settings_accepts_artifact_parallelism_override(monkeypatch) -> None:
+    monkeypatch.setenv("VALIDATOR_ARTIFACT_PARALLELISM", "2")
+
+    settings = Settings.load()
+
+    assert settings.artifact_parallelism == 2
+
+
+def test_settings_rejects_non_positive_artifact_parallelism(monkeypatch) -> None:
+    monkeypatch.setenv("VALIDATOR_ARTIFACT_PARALLELISM", "0")
+
+    with pytest.raises(ValidationError):
+        Settings.load()
+
+
 def test_settings_accepts_artifact_task_parallelism_override(monkeypatch) -> None:
     monkeypatch.setenv("VALIDATOR_TASK_PARALLELISM", "5")
 

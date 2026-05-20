@@ -609,7 +609,7 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
     monkeypatch.setattr(worker_mod, "MinerTaskBatchService", CapturingBatchService)
 
     context = SimpleNamespace(
-        settings=SimpleNamespace(artifact_task_parallelism=5),
+        settings=SimpleNamespace(artifact_parallelism=4, artifact_task_parallelism=5),
         platform_client=object(),
         subtensor_client=object(),
         sandbox_manager=object(),
@@ -630,4 +630,5 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
     assert isinstance(worker, EvaluationWorker)
     config = captured["config"]
     assert isinstance(config, EvaluationBatchConfig)
+    assert config.artifact_parallelism == 4
     assert config.artifact_task_parallelism == 5

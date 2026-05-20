@@ -150,7 +150,7 @@ class SchedulerConfig:
 
     token_secret_bytes: int
     session_ttl: timedelta
-    artifact_parallelism: int = 2
+    artifact_parallelism: int = 4
     artifact_task_parallelism: int = 20
 
 

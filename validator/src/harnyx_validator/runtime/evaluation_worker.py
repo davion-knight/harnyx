@@ -295,6 +295,7 @@ def create_evaluation_worker_from_context(context: RuntimeContext) -> Evaluation
 
     agent_resolver = create_platform_agent_resolver(context.platform_client)
     batch_config = EvaluationBatchConfig(
+        artifact_parallelism=context.settings.artifact_parallelism,
         artifact_task_parallelism=context.settings.artifact_task_parallelism,
     )
     batch_service = MinerTaskBatchService(
