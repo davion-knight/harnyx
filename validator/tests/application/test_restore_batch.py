@@ -71,14 +71,14 @@ def test_restore_uses_null_next_cursor_not_advisory_total() -> None:
             batch_id=batch_id,
             snapshot_received_at=snapshot,
             total_restore_runs=99,
-            page_limit=500,
+            page_limit=50,
         ),
         pages=[
             RestoreRunsPage(
                 batch_id=batch_id,
                 snapshot_received_at=snapshot,
                 cursor=0,
-                limit=500,
+                limit=50,
                 next_cursor=None,
                 items=(),
             )

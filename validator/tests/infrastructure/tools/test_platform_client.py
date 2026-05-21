@@ -369,7 +369,7 @@ def test_get_restore_runs_page_accepts_null_next_cursor() -> None:
                     "batch_id": str(batch_id),
                     "snapshot_received_at": "2026-05-21T06:00:00+00:00",
                     "cursor": 0,
-                    "limit": 500,
+                    "limit": 50,
                     "next_cursor": None,
                     "items": [],
                 },
@@ -387,12 +387,47 @@ def test_get_restore_runs_page_accepts_null_next_cursor() -> None:
         batch=batch,
         snapshot_received_at=datetime.fromisoformat("2026-05-21T06:00:00+00:00"),
         cursor=0,
-        limit=500,
+        limit=50,
     )
 
     assert page.next_cursor is None
     assert page.items == ()
+    restore_request = requests[-1]
+    assert restore_request.extensions["timeout"]["read"] == pytest.approx(300.0)
     assert [request.url.path for request in requests] == [
         f"/v1/miner-task-batches/batch/{batch_id}",
         f"/v1/miner-task-batches/{batch_id}/restore/runs",
     ]
+
+
+def test_get_restore_metadata_uses_long_restore_timeout() -> None:
+    batch_id = uuid4()
+    keypair = _keypair()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == f"/v1/miner-task-batches/{batch_id}/restore":
+            _assert_signed(request, keypair)
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "batch_id": str(batch_id),
+                    "snapshot_received_at": "2026-05-21T06:00:00+00:00",
+                    "total_restore_runs": 0,
+                    "page_limit": 50,
+                    "provider_model_evidence": [],
+                },
+            )
+        return httpx.Response(status_code=404)
+
+    client = HttpPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+
+    metadata = client.get_restore_metadata(batch_id)
+
+    assert metadata.page_limit == 50
+    assert requests[0].extensions["timeout"]["read"] == pytest.approx(300.0)

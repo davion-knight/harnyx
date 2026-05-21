@@ -27,6 +27,7 @@ from harnyx_validator.infrastructure.parsers import parse_batch
 from harnyx_validator.infrastructure.transient_network import classify_transient_network_failure
 
 _GET_ATTEMPTS = 2
+_RESTORE_GET_TIMEOUT_SECONDS = 300.0
 
 
 class PlatformClientError(RuntimeError):
@@ -73,13 +74,17 @@ class HttpPlatformClient(PlatformPort):
             headers["Content-Type"] = "application/json"
         return headers
 
-    def _get(self, path: str) -> httpx.Response:
+    def _get(self, path: str, *, timeout_seconds: float | None = None) -> httpx.Response:
         for attempt in range(_GET_ATTEMPTS):
             try:
                 with self._client() as client:
+                    kwargs: dict[str, Any] = {}
+                    if timeout_seconds is not None:
+                        kwargs["timeout"] = timeout_seconds
                     return client.get(
                         path,
                         headers=self._request_headers("GET", path, b""),
+                        **kwargs,
                     )
             except httpx.TransportError as exc:
                 if classify_transient_network_failure(exc) is None or attempt == _GET_ATTEMPTS - 1:
@@ -122,7 +127,7 @@ class HttpPlatformClient(PlatformPort):
 
     def get_restore_metadata(self, batch_id: UUID) -> RestoreMetadata:
         path = f"/v1/miner-task-batches/{batch_id}/restore"
-        response = self._get(path)
+        response = self._get(path, timeout_seconds=_RESTORE_GET_TIMEOUT_SECONDS)
         if response.status_code != httpx.codes.OK:
             raise PlatformClientError(
                 status_code=response.status_code,
@@ -157,7 +162,7 @@ class HttpPlatformClient(PlatformPort):
             }
         )
         path = f"/v1/miner-task-batches/{batch.batch_id}/restore/runs?{query}"
-        response = self._get(path)
+        response = self._get(path, timeout_seconds=_RESTORE_GET_TIMEOUT_SECONDS)
         if response.status_code != httpx.codes.OK:
             raise PlatformClientError(
                 status_code=response.status_code,
