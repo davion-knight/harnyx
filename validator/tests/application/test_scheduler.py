@@ -567,6 +567,7 @@ async def test_scheduler_flattens_runs_in_requested_artifact_order_when_completi
     task = _task("ordered")
     subtensor = FakeSubtensorClient()
     subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+
     scheduler = EvaluationScheduler(
         tasks=(task,),
         subtensor_client=subtensor,
@@ -2921,6 +2922,17 @@ async def test_scheduler_retries_sandbox_start_once_before_running_tasks(
 
         return StubOrchestrator()
 
+    option_calls: list[dict[str, object]] = []
+
+    def sandbox_options_factory(artifact: ScriptArtifactSpec) -> dict[str, object]:
+        option = {
+            "call": len(option_calls),
+            "uid": artifact.uid,
+            "artifact_id": artifact.artifact_id,
+        }
+        option_calls.append(option)
+        return option
+
     scheduler = EvaluationScheduler(
         tasks=(task,),
         subtensor_client=subtensor,
@@ -2930,7 +2942,7 @@ async def test_scheduler_retries_sandbox_start_once_before_running_tasks(
         receipt_log=receipt_log,
         blocking_executor=blocking_executor,
         orchestrator_factory=orchestrator_factory,
-        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        sandbox_options_factory=sandbox_options_factory,
         clock=lambda: datetime(2025, 10, 27, tzinfo=UTC),
         config=SchedulerConfig(
             token_secret_bytes=8,
@@ -2943,6 +2955,16 @@ async def test_scheduler_retries_sandbox_start_once_before_running_tasks(
     result = await scheduler.run(batch_id=uuid4(), requested_artifacts=artifacts)
 
     assert len(sandbox_manager.starts) == 2
+    assert sandbox_manager.starts[0] == {
+        "call": 0,
+        "uid": artifacts[0].uid,
+        "artifact_id": artifacts[0].artifact_id,
+    }
+    assert sandbox_manager.starts[1] == {
+        "call": 1,
+        "uid": artifacts[0].uid,
+        "artifact_id": artifacts[0].artifact_id,
+    }
     assert result.completed_run_count == 1
     assert evaluation_records.records_by_batch[0].score == pytest.approx(0.75)
 

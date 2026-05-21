@@ -36,6 +36,7 @@ class SandboxOptions:
     seccomp_profile: str | None = None
     ulimits: Sequence[str] = field(default_factory=tuple)
     failure_diagnostics_dir: str | None = None
+    labels: Mapping[str, str] = field(default_factory=dict)
 
 
 __all__ = [

@@ -975,37 +975,14 @@ class EvaluationScheduler:
         tasks: Sequence[MinerTask],
         blocking_executor: Executor,
     ) -> SandboxDeployment:
-        try:
-            options = await _run_blocking_call(blocking_executor, self._sandbox_options, artifact)
-        except ArtifactPreparationError as exc:
-            logger.error(
-                "failed to prepare sandbox options",
-                extra={"batch_id": str(batch_id), "uid": artifact.uid, "artifact_id": str(artifact.artifact_id)},
-                exc_info=exc,
-            )
-            raise self._artifact_execution_failure(
-                artifact=artifact,
-                tasks=tasks,
-                error_code=MinerTaskErrorCode(exc.error_code),
-                error_message=str(exc),
-                exception_type=exc.exception_type,
-            ) from exc
-        except Exception as exc:
-            logger.error(
-                "failed to prepare sandbox options",
-                extra={"batch_id": str(batch_id), "uid": artifact.uid, "artifact_id": str(artifact.artifact_id)},
-                exc_info=exc,
-            )
-            raise self._artifact_execution_failure(
-                artifact=artifact,
-                tasks=tasks,
-                error_code=MinerTaskErrorCode.ARTIFACT_SETUP_FAILED,
-                error_message=str(exc),
-                exception_type=type(exc).__name__,
-            ) from exc
-
         last_error_message = ""
         for attempt_number in range(1, LOCAL_RETRY_ATTEMPTS + 1):
+            options = await self._build_sandbox_options_or_raise_artifact_failure(
+                batch_id=batch_id,
+                artifact=artifact,
+                tasks=tasks,
+                blocking_executor=blocking_executor,
+            )
             try:
                 return await _run_blocking_call(blocking_executor, self._sandboxes.start, options)
             except Exception as exc:
@@ -1033,6 +1010,43 @@ class EvaluationScheduler:
             error_message=last_error_message or "artifact setup failed",
             exception_type=None,
         )
+
+    async def _build_sandbox_options_or_raise_artifact_failure(
+        self,
+        *,
+        batch_id: UUID,
+        artifact: ScriptArtifactSpec,
+        tasks: Sequence[MinerTask],
+        blocking_executor: Executor,
+    ) -> SandboxOptions:
+        try:
+            return await _run_blocking_call(blocking_executor, self._sandbox_options, artifact)
+        except ArtifactPreparationError as exc:
+            logger.error(
+                "failed to prepare sandbox options",
+                extra={"batch_id": str(batch_id), "uid": artifact.uid, "artifact_id": str(artifact.artifact_id)},
+                exc_info=exc,
+            )
+            raise self._artifact_execution_failure(
+                artifact=artifact,
+                tasks=tasks,
+                error_code=MinerTaskErrorCode(exc.error_code),
+                error_message=str(exc),
+                exception_type=exc.exception_type,
+            ) from exc
+        except Exception as exc:
+            logger.error(
+                "failed to prepare sandbox options",
+                extra={"batch_id": str(batch_id), "uid": artifact.uid, "artifact_id": str(artifact.artifact_id)},
+                exc_info=exc,
+            )
+            raise self._artifact_execution_failure(
+                artifact=artifact,
+                tasks=tasks,
+                error_code=MinerTaskErrorCode.ARTIFACT_SETUP_FAILED,
+                error_message=str(exc),
+                exception_type=type(exc).__name__,
+            ) from exc
 
     def _log_artifact_retry(
         self,

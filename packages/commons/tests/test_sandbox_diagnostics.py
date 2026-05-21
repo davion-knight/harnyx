@@ -289,7 +289,7 @@ def _sandbox_options(
 
 
 def _expected_docker_run(options: SandboxOptions) -> list[str]:
-    return [
+    args = [
         "docker",
         "run",
         "--pull",
@@ -298,18 +298,25 @@ def _expected_docker_run(options: SandboxOptions) -> list[str]:
         "--rm",
         "--name",
         options.container_name,
-        "-p",
-        _expected_port_publish(options),
-        "-e",
-        "SANDBOX_HOST=0.0.0.0",
-        "-e",
-        "SANDBOX_PORT=8000",
-        "-e",
-        "AGENT_PATH=/state/agent.py",
-        "-e",
-        "SECRET_TOKEN=super-secret",
-        options.image,
     ]
+    for key, value in sorted(options.labels.items()):
+        args.extend(["--label", f"{key}={value}"])
+    args.extend(
+        [
+            "-p",
+            _expected_port_publish(options),
+            "-e",
+            "SANDBOX_HOST=0.0.0.0",
+            "-e",
+            "SANDBOX_PORT=8000",
+            "-e",
+            "AGENT_PATH=/state/agent.py",
+            "-e",
+            "SECRET_TOKEN=super-secret",
+            options.image,
+        ]
+    )
+    return args
 
 
 def _expected_port_publish(options: SandboxOptions) -> str:

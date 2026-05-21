@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
 from harnyx_commons.application.session_manager import SessionManager
@@ -46,6 +46,12 @@ class AgentArtifact(Protocol):
 
 
 AgentResolver = Callable[[UUID, ScriptArtifactSpec, Path, str], AgentArtifact]
+
+SANDBOX_CONTAINER_NAME_PREFIX = "harnyx-sandbox"
+SANDBOX_LABELS = {
+    "harnyx.sandbox.managed": "true",
+    "harnyx.sandbox.owner": "validator",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,8 +153,19 @@ class BatchExecutionPlanner:
         resolved_artifacts: dict[UUID, AgentArtifact] = {}
 
         def sandbox_options_factory(artifact: ScriptArtifactSpec) -> SandboxOptions:
-            container_name = (
-                f"harnyx-sandbox-{artifact.uid}-{artifact.artifact_id.hex[:8]}-{run_ctx.batch_id.hex[:8]}"
+            container_name_prefix = (
+                f"{SANDBOX_CONTAINER_NAME_PREFIX}-{artifact.uid}-"
+                f"{artifact.artifact_id.hex[:8]}-{run_ctx.batch_id.hex[:8]}"
+            )
+            container_name = f"{container_name_prefix}-{uuid4().hex[:12]}"
+            labels = dict(run_ctx.base_options.labels)
+            labels.update(
+                SANDBOX_LABELS
+                | {
+                    "harnyx.sandbox.batch_id": str(run_ctx.batch_id),
+                    "harnyx.sandbox.artifact_id": str(artifact.artifact_id),
+                    "harnyx.sandbox.uid": str(artifact.uid),
+                }
             )
             env = dict(run_ctx.base_env)
             env["MINER_UID"] = str(artifact.uid)
@@ -166,6 +183,7 @@ class BatchExecutionPlanner:
             return replace(
                 run_ctx.base_options,
                 container_name=container_name,
+                labels=labels,
                 env=env,
                 volumes=volumes,
             )
@@ -173,4 +191,10 @@ class BatchExecutionPlanner:
         return sandbox_options_factory
 
 
-__all__ = ["RunContext", "BatchExecutionPlanner", "EvaluationBatchConfig"]
+__all__ = [
+    "BatchExecutionPlanner",
+    "EvaluationBatchConfig",
+    "RunContext",
+    "SANDBOX_CONTAINER_NAME_PREFIX",
+    "SANDBOX_LABELS",
+]

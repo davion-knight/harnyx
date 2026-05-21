@@ -366,6 +366,50 @@ def test_build_state_prunes_stale_run_progress_dirs(tmp_path: Path) -> None:
     assert not stale_dir.exists()
 
 
+def test_build_runtime_cleans_stale_sandbox_containers_on_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSandboxManager:
+        def __init__(self) -> None:
+            self.cleanup_calls: list[dict[str, object]] = []
+
+        def cleanup_stale_sandbox_containers(self, *, labels: dict[str, str], name_prefix: str) -> None:
+            self.cleanup_calls.append({"labels": dict(labels), "name_prefix": name_prefix})
+
+    manager = FakeSandboxManager()
+
+    monkeypatch.setattr(bootstrap, "_build_external_clients", lambda _settings: (object(), object(), object()))
+    monkeypatch.setattr(bootstrap, "_build_llm_clients", lambda _settings: (None, None, None, None, object()))
+    monkeypatch.setattr(bootstrap, "_build_tooling", lambda **_kwargs: (object(), object()))
+    monkeypatch.setattr(bootstrap, "_build_services", lambda **_kwargs: (object(), object()))
+    monkeypatch.setattr(
+        bootstrap,
+        "_build_factories",
+        lambda **_kwargs: (lambda _client: object(), lambda _client: object(), lambda: object()),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_build_http_dependencies",
+        lambda **_kwargs: (lambda: object(), lambda: object(), object(), object(), object()),
+    )
+    monkeypatch.setattr(bootstrap, "create_sandbox_manager", lambda **_kwargs: manager)
+    settings = Settings.model_construct(
+        validator_state_dir=tmp_path,
+        run_progress_retention_seconds=3600,
+    )
+
+    runtime = bootstrap.build_runtime(settings)
+    runtime.batch_blocking_executor.shutdown(wait=False, cancel_futures=True)
+
+    assert manager.cleanup_calls == [
+        {
+            "labels": {"harnyx.sandbox.managed": "true", "harnyx.sandbox.owner": "validator"},
+            "name_prefix": "harnyx-sandbox-",
+        }
+    ]
+
+
 def test_create_scoring_service_does_not_require_vertex_config_at_bootstrap() -> None:
     settings = Settings.model_construct(
         rpc_listen_host="127.0.0.1",

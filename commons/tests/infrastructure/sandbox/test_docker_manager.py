@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from dataclasses import dataclass
 from subprocess import CompletedProcess
@@ -133,6 +134,156 @@ def test_docker_sandbox_manager_builds_commands(monkeypatch) -> None:
     assert stop_args == ["docker", "stop", "-t", "5", "container123"]
     assert deployment.client.closed is True
     assert created_clients[0].closed is True
+
+
+def test_docker_sandbox_manager_adds_labels_to_docker_run() -> None:
+    runner = RecordingRunner()
+
+    def client_factory(base_url: str, host_container_url: str | None) -> DummyClient:
+        return DummyClient(base_url, host_container_url)
+
+    manager = DockerSandboxManager(
+        docker_binary="docker",
+        host="127.0.0.1",
+        command_runner=runner,
+        client_factory=client_factory,
+    )
+
+    options = SandboxOptions(
+        image="harnyx/sandbox:demo",
+        container_name="sandbox-demo",
+        host_port=9000,
+        container_port=8000,
+        labels={"b": "two", "a": "one"},
+        network="harnyx-net",
+        host_container_url=_HOST_CONTAINER_URL,
+    )
+
+    deployment = manager.start(options)
+    run_args, _ = runner.commands[0]
+
+    name_index = run_args.index("--name")
+    assert run_args[name_index : name_index + 8] == [
+        "--name",
+        "sandbox-demo",
+        "--label",
+        "a=one",
+        "--label",
+        "b=two",
+        "-p",
+        "9000:8000",
+    ]
+    manager.stop(deployment)
+
+
+def test_docker_sandbox_manager_removes_labeled_and_non_running_legacy_prefixed_containers() -> None:
+    commands: list[list[str]] = []
+
+    def command_runner(args: list[str], **kwargs: object):
+        commands.append(list(args))
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["check"] is True
+        if args == [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "label=harnyx.sandbox.managed=true",
+            "--filter",
+            "label=harnyx.sandbox.owner=validator",
+        ]:
+            return subprocess_completed(args, "new-labeled\n")
+        if args == [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "name=^/harnyx-sandbox-",
+            "--filter",
+            "status=created",
+        ]:
+            return subprocess_completed(args, "old-created\n")
+        if args == [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "name=^/harnyx-sandbox-",
+            "--filter",
+            "status=exited",
+        ]:
+            return subprocess_completed(args, "old-exited\n")
+        if args == [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "name=^/harnyx-sandbox-",
+            "--filter",
+            "status=dead",
+        ]:
+            return subprocess_completed(args, "old-dead\nnew-labeled\n")
+        if args == ["docker", "rm", "-f", "new-labeled", "old-created", "old-dead", "old-exited"]:
+            return subprocess_completed(args, "")
+        raise AssertionError(f"unexpected command: {args}")
+
+    manager = DockerSandboxManager(docker_binary="docker", command_runner=command_runner)
+
+    manager.cleanup_stale_sandbox_containers(
+        labels={"harnyx.sandbox.managed": "true", "harnyx.sandbox.owner": "validator"},
+        name_prefix="harnyx-sandbox-",
+    )
+
+    assert commands == [
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "label=harnyx.sandbox.managed=true",
+            "--filter",
+            "label=harnyx.sandbox.owner=validator",
+        ],
+        ["docker", "ps", "-aq", "--filter", "name=^/harnyx-sandbox-", "--filter", "status=created"],
+        ["docker", "ps", "-aq", "--filter", "name=^/harnyx-sandbox-", "--filter", "status=exited"],
+        ["docker", "ps", "-aq", "--filter", "name=^/harnyx-sandbox-", "--filter", "status=dead"],
+        ["docker", "rm", "-f", "new-labeled", "old-created", "old-dead", "old-exited"],
+    ]
+
+
+def test_docker_sandbox_manager_logs_and_continues_when_stale_list_fails(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="harnyx_commons.sandbox.docker")
+
+    def command_runner(args: list[str], **kwargs: object):
+        raise subprocess.CalledProcessError(returncode=1, cmd=args, stderr="docker unavailable")
+
+    manager = DockerSandboxManager(docker_binary="docker", command_runner=command_runner)
+
+    manager.cleanup_stale_sandbox_containers(
+        labels={"harnyx.sandbox.managed": "true", "harnyx.sandbox.owner": "validator"},
+        name_prefix="harnyx-sandbox-",
+    )
+
+    assert "failed to remove stale sandbox containers" in caplog.text
+
+
+def test_docker_sandbox_manager_logs_and_continues_when_stale_cleanup_fails(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="harnyx_commons.sandbox.docker")
+
+    def command_runner(args: list[str], **kwargs: object):
+        if args[1:3] == ["ps", "-aq"]:
+            return subprocess_completed(args, "stale-container\n")
+        raise subprocess.CalledProcessError(returncode=1, cmd=args, stderr="remove failed")
+
+    manager = DockerSandboxManager(docker_binary="docker", command_runner=command_runner)
+
+    manager.cleanup_stale_sandbox_containers(
+        labels={"harnyx.sandbox.managed": "true", "harnyx.sandbox.owner": "validator"},
+        name_prefix="harnyx-sandbox-",
+    )
+
+    assert "failed to remove stale sandbox containers" in caplog.text
 
 
 def test_docker_sandbox_manager_binds_published_port_when_configured() -> None:

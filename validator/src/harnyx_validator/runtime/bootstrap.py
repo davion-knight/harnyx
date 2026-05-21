@@ -48,6 +48,10 @@ from harnyx_validator.application.ports.evaluation_record import EvaluationRecor
 from harnyx_validator.application.ports.platform import PlatformPort
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
 from harnyx_validator.application.restore_batch import RestoreEvaluationBatch
+from harnyx_validator.application.services.evaluation_batch_prep import (
+    SANDBOX_CONTAINER_NAME_PREFIX,
+    SANDBOX_LABELS,
+)
 from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.application.submit_weights import WeightSubmissionService
 from harnyx_validator.infrastructure.auth.sr25519 import BittensorSr25519InboundVerifier
@@ -237,6 +241,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
     )
 
     sandbox_manager = create_sandbox_manager(logger_name="harnyx_validator.sandbox")
+    _cleanup_stale_sandbox_containers(sandbox_manager)
     entrypoint_factory, orchestrator_factory, options_factory = _build_factories(
         resolved=resolved,
         state=state,
@@ -294,6 +299,13 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         tool_route_deps_provider=tool_route_provider,
         control_deps_provider=control_provider,
         inbound_auth_verifier=inbound_auth_verifier,
+    )
+
+
+def _cleanup_stale_sandbox_containers(sandbox_manager: DockerSandboxManager) -> None:
+    sandbox_manager.cleanup_stale_sandbox_containers(
+        labels=SANDBOX_LABELS,
+        name_prefix=f"{SANDBOX_CONTAINER_NAME_PREFIX}-",
     )
 
 

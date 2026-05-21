@@ -39,6 +39,7 @@ _MOUNTINFO_CONTAINER_ID_PATTERN = re.compile(
     r"/containers/([0-9a-f]{12,64})/(?:hostname|hosts|resolv\.conf)(?:\s|$)"
 )
 _NON_SENSITIVE_DIAGNOSTIC_ENV_KEYS = frozenset({"SANDBOX_HOST", "SANDBOX_PORT"})
+_STALE_LEGACY_CONTAINER_STATUSES = ("created", "exited", "dead")
 
 
 class HttpSandboxClient(SandboxClient):
@@ -392,6 +393,8 @@ class DockerSandboxManager(SandboxManager):
             "--name",
             options.container_name,
         ]
+        for key, value in sorted(options.labels.items()):
+            args.extend(["--label", f"{key}={value}"])
         if options.user:
             args.extend(["--user", options.user])
         return args
@@ -731,6 +734,71 @@ class DockerSandboxManager(SandboxManager):
         deployment.client.close()
         self._stop_log_stream(identifier)
 
+    def cleanup_stale_sandbox_containers(
+        self,
+        *,
+        labels: Mapping[str, str],
+        name_prefix: str,
+    ) -> None:
+        """Best-effort remove stale sandbox containers selected by labels or name prefix."""
+        if not name_prefix:
+            logger.warning("skipping stale sandbox cleanup because name_prefix is empty")
+            return
+        try:
+            labeled_ids: tuple[str, ...] = ()
+            if labels:
+                labeled_ids = self._list_container_ids_all_states(
+                    tuple(("label", f"{key}={value}") for key, value in sorted(labels.items()))
+                )
+            prefixed_ids = tuple(
+                container_id
+                for status in _STALE_LEGACY_CONTAINER_STATUSES
+                for container_id in self._list_container_ids_all_states(
+                    (("name", f"^/{name_prefix}"), ("status", status))
+                )
+            )
+            container_ids = sorted(set(labeled_ids) | set(prefixed_ids))
+            if not container_ids:
+                return
+            self._run_command(
+                [self._docker, "rm", "-f", *container_ids],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            logger.info(
+                "removed stale sandbox containers",
+                extra={"container_count": len(container_ids), "name_prefix": name_prefix},
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.warning(
+                "failed to remove stale sandbox containers",
+                extra={"returncode": exc.returncode, "stderr": exc.stderr, "name_prefix": name_prefix},
+                exc_info=exc,
+            )
+        except subprocess.TimeoutExpired as exc:
+            logger.warning(
+                "failed to remove stale sandbox containers",
+                extra={"timeout": exc.timeout, "name_prefix": name_prefix},
+                exc_info=exc,
+            )
+        except Exception as exc:  # pragma: no cover - defensive best-effort cleanup
+            logger.warning(
+                "failed to remove stale sandbox containers",
+                extra={"name_prefix": name_prefix},
+                exc_info=exc,
+            )
+
+    def _list_container_ids_all_states(
+        self,
+        filters: Sequence[tuple[str, str]],
+    ) -> tuple[str, ...]:
+        args = [self._docker, "ps", "-aq"]
+        for filter_name, filter_value in filters:
+            args.extend(["--filter", f"{filter_name}={filter_value}"])
+        result = self._run_command(args, capture_output=True, text=True, check=True)
+        return tuple(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+
     def _best_effort_stop(self, container_id: str, *, stop_timeout_seconds: int | None) -> None:
         args = [self._docker, "stop"]
         if stop_timeout_seconds is not None:
@@ -900,6 +968,7 @@ def _diagnostic_options_snapshot(options: SandboxOptions) -> dict[str, object]:
         "user": options.user,
         "seccomp_profile": options.seccomp_profile,
         "ulimits": list(options.ulimits),
+        "labels": dict(sorted(options.labels.items())),
     }
 
 

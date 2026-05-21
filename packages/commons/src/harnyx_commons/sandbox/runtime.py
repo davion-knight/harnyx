@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
@@ -74,6 +75,7 @@ def build_sandbox_options(
     volumes: tuple[tuple[str, str, str | None], ...] = (),
     extra_env: dict[str, str] | None = None,
     host_container_url: str | None = None,
+    labels: Mapping[str, str] | None = None,
 ) -> SandboxOptions:
     """Build hardened sandbox options shared by platform and validator."""
 
@@ -112,6 +114,7 @@ def build_sandbox_options(
         seccomp_profile=default_profile_path(),
         ulimits=CONTAINER_SECURITY.ulimits,
         extra_args=CONTAINER_SECURITY.extra_args,
+        labels=labels or {},
     )
 
 

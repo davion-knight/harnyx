@@ -12,6 +12,7 @@ from harnyx_commons.domain.miner_task import EvaluationDetails, EvaluationError,
 from harnyx_commons.domain.session import Session
 from harnyx_commons.infrastructure.state.session_registry import InMemorySessionRegistry
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
+from harnyx_commons.sandbox.agent_staging import AgentArtifact
 from harnyx_commons.sandbox.options import SandboxOptions
 from harnyx_validator.application.accept_batch import AcceptEvaluationBatch
 from harnyx_validator.application.dto.evaluation import (
@@ -149,6 +150,55 @@ def test_batch_execution_planner_passes_task_parallelism_to_scheduler(
 
     assert scheduler._config.artifact_parallelism == 4
     assert scheduler._config.artifact_task_parallelism == 7
+
+
+def test_batch_execution_planner_uses_unique_labeled_sandbox_names(
+    tmp_path: Path,
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    planner = BatchExecutionPlanner(
+        subtensor_client=FakeSubtensorClient(),
+        sandbox_manager=object(),
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=FakeReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=lambda client: client,
+        sandbox_options_factory=lambda: SandboxOptions(
+            image="sandbox:test",
+            container_name="sandbox-base",
+            labels={"existing": "kept"},
+        ),
+        agent_resolver=lambda *_args: AgentArtifact(
+            content_hash="abc",
+            host_path=tmp_path / "agent.py",
+            container_path="/state/agent.py",
+        ),
+        progress=_progress(tmp_path),
+        config=EvaluationBatchConfig(state_dir=str(tmp_path)),
+    )
+    batch = _batch()
+
+    run_ctx = planner.build_run_context(batch)
+    _artifacts, scheduler = planner.prepare_execution(run_ctx, batch)
+
+    first = scheduler._sandbox_options(batch.artifacts[0])
+    second = scheduler._sandbox_options(batch.artifacts[0])
+    artifact = batch.artifacts[0]
+    prefix = f"harnyx-sandbox-{artifact.uid}-{artifact.artifact_id.hex[:8]}-{batch.batch_id.hex[:8]}-"
+
+    assert first.container_name.startswith(prefix)
+    assert second.container_name.startswith(prefix)
+    assert first.container_name != second.container_name
+    assert first.labels == {
+        "existing": "kept",
+        "harnyx.sandbox.managed": "true",
+        "harnyx.sandbox.owner": "validator",
+        "harnyx.sandbox.batch_id": str(batch.batch_id),
+        "harnyx.sandbox.artifact_id": str(artifact.artifact_id),
+        "harnyx.sandbox.uid": str(artifact.uid),
+    }
+    assert second.labels == first.labels
 
 
 async def test_process_async_fails_batch_after_scheduler_escape(
