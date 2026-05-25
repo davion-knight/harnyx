@@ -243,11 +243,11 @@ class LlmSettings(BaseSettings):
     chutes_api_key: SecretStr = Field(default_factory=lambda: SecretStr(""), alias="CHUTES_API_KEY")
 
     # --- Concurrency limits ---
-    vertex_max_concurrent: int = Field(default=10, alias="VERTEX_MAX_CONCURRENT")
-    bedrock_max_concurrent: int = Field(default=20, alias="BEDROCK_MAX_CONCURRENT")
-    chutes_max_concurrent: int = Field(default=20, alias="CHUTES_MAX_CONCURRENT")
-    desearch_max_concurrent: int = Field(default=5, alias="DESEARCH_MAX_CONCURRENT")
-    parallel_max_concurrent: int = Field(default=5, alias="PARALLEL_MAX_CONCURRENT")
+    vertex_max_concurrent: int = Field(default=100, alias="VERTEX_MAX_CONCURRENT")
+    bedrock_max_concurrent: int = Field(default=100, alias="BEDROCK_MAX_CONCURRENT")
+    chutes_max_concurrent: int = Field(default=100, alias="CHUTES_MAX_CONCURRENT")
+    desearch_max_concurrent: int = Field(default=100, alias="DESEARCH_MAX_CONCURRENT")
+    parallel_max_concurrent: int = Field(default=100, alias="PARALLEL_MAX_CONCURRENT")
 
     # --- Validators ---
     @field_validator("desearch_api_key", mode="before")

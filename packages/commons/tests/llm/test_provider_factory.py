@@ -12,9 +12,11 @@ from harnyx_commons.llm import provider_factory
 
 
 def test_llm_settings_default_provider_concurrency_targets_match_activation_slice() -> None:
-    assert LlmSettings.model_fields["bedrock_max_concurrent"].default == 20
-    assert LlmSettings.model_fields["chutes_max_concurrent"].default == 20
-    assert LlmSettings.model_fields["vertex_max_concurrent"].default == 10
+    assert LlmSettings.model_fields["bedrock_max_concurrent"].default == 100
+    assert LlmSettings.model_fields["chutes_max_concurrent"].default == 100
+    assert LlmSettings.model_fields["desearch_max_concurrent"].default == 100
+    assert LlmSettings.model_fields["parallel_max_concurrent"].default == 100
+    assert LlmSettings.model_fields["vertex_max_concurrent"].default == 100
 
 
 def test_default_llm_timeout_surfaces_are_300_seconds() -> None:
