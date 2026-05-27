@@ -147,9 +147,9 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 <a id="endpoint-post-v1-miner-task-batches-batch"></a>
 #### POST /v1/miner-task-batches/batch
 
-Owner emergency recovery route. Each request force-creates a fresh batch, is not replay-safe, and fails fast with 409 while batch creation is already in progress or another batch is running. Returns once the worker has persisted the build claim, started the background continuation, and can identify the accepted batch.
+Subnet owner or platform admin API-key emergency recovery route. Each request force-creates a fresh batch, is not replay-safe, and fails fast with 409 while batch creation is already in progress or another batch is running. Returns once the worker has persisted the build claim, started the background continuation, and can identify the accepted batch.
 
-**Auth**: Bittensor-signed (`Authorization: Bittensor ss58="...",sig="..."`)
+**Auth**: ConfiguredApiKey OR Bittensor-signed (`Authorization: Bittensor ss58="...",sig="..."`)
 
 **Request**
 Content-Type: `application/json`

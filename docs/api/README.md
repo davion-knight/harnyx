@@ -21,6 +21,9 @@ The benchmark page is the public surface for inspecting benchmark history and sa
 - **Bittensor-signed requests**
   - `Authorization: Bittensor ss58="<ss58>",sig="<hex>"`
   - Signature is over canonical `{method, path+query, body}`.
+- **Platform admin API keys**
+  - Some endpoints may accept an out-of-band `X-Api-Key` platform admin key.
+  - This is not miner or validator identity and is not the same as Bittensor signing.
 - **Sandbox tool execution (auth + session context)**
   - Validator → Sandbox headers: `x-session-id` + `x-platform-token` + `x-host-container-url`
   - Sandbox → tool host (`POST /v1/tools/execute`) headers: `x-session-id` + `x-platform-token`
