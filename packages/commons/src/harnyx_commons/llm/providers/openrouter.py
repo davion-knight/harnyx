@@ -20,10 +20,16 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_SUPPORTED_MODELS = (
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
+    "deepseek-ai/DeepSeek-V3.2-TEE",
+    "zai-org/GLM-5-TEE",
     "Qwen/Qwen3.6-27B-TEE",
+    "google/gemma-4-31B-turbo-TEE",
 )
 OPENROUTER_MODEL_ALIASES: Mapping[str, str] = {
+    "deepseek-ai/DeepSeek-V3.2-TEE": "deepseek/deepseek-v3.2",
+    "zai-org/GLM-5-TEE": "z-ai/glm-5",
     "Qwen/Qwen3.6-27B-TEE": "qwen/qwen3.6-27b",
+    "google/gemma-4-31B-turbo-TEE": "google/gemma-4-31b-it",
 }
 
 

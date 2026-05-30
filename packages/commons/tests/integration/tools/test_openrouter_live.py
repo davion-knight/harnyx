@@ -4,9 +4,10 @@ import pytest
 from pydantic import SecretStr
 
 from harnyx_commons.config.bedrock import BedrockSettings
-from harnyx_commons.config.llm import LlmSettings
+from harnyx_commons.config.llm import LlmSettings, OpenRouterModelProviderOptions
 from harnyx_commons.config.vertex import VertexSettings
 from harnyx_commons.llm.provider_factory import build_cached_llm_provider_registry
+from harnyx_commons.llm.providers.openrouter import OPENROUTER_SUPPORTED_MODELS, OpenRouterLlmProvider
 from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest, LlmThinkingConfig
 from harnyx_commons.tools.invocation_clients import build_tool_llm_provider
 
@@ -62,6 +63,47 @@ async def test_chutes_tool_route_invokes_openrouter_routed_model_live(
         response = await provider.invoke(request)
     finally:
         await registry.aclose()
+
+    assert response.raw_text
+    assert response.metadata is not None
+    assert response.metadata["effective_provider"] == "openrouter"
+    assert response.metadata["effective_model"] == model
+    raw_usage = response.metadata["raw_response"]["usage"]
+    assert isinstance(raw_usage["cost"], (int, float))
+    assert raw_usage["cost"] >= 0.0
+    assert response.usage.reasoning_tokens is None or response.usage.reasoning_tokens >= 0
+
+
+@pytest.mark.parametrize("model", OPENROUTER_SUPPORTED_MODELS)
+async def test_openrouter_provider_invokes_supported_model_live(model: str) -> None:
+    settings = LlmSettings()
+    assert settings.openrouter_api_key_value, "OPENROUTER_API_KEY must be configured"
+
+    provider = OpenRouterLlmProvider(
+        openrouter_api_key=settings.openrouter_api_key,
+        model_provider_options={
+            model: OpenRouterModelProviderOptions(require_parameters=True),
+        },
+    )
+    request = LlmRequest(
+        provider="openrouter",
+        model=model,
+        messages=(
+            LlmMessage(
+                role="user",
+                content=(LlmMessageContentPart.input_text('Reply with only "ok".'),),
+            ),
+        ),
+        temperature=0.0,
+        max_output_tokens=256,
+        thinking=LlmThinkingConfig(enabled=True, effort="low"),
+        timeout_seconds=180.0,
+    )
+
+    try:
+        response = await provider.invoke(request)
+    finally:
+        await provider.aclose()
 
     assert response.raw_text
     assert response.metadata is not None
