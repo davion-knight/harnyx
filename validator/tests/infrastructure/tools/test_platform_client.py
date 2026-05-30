@@ -172,6 +172,37 @@ def test_get_miner_task_batch_parses_tasks_and_artifacts() -> None:
     assert batch.artifacts[0].artifact_id == artifact_id
 
 
+def test_get_miner_task_batch_accepts_bri_494_deployment_safe_response_shape() -> None:
+    batch_id = uuid4()
+    task_id = uuid4()
+    artifact_id = uuid4()
+    champion_artifact_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _assert_signed(request, keypair)
+        if request.method == "GET" and request.url.path == f"/v1/miner-task-batches/batch/{batch_id}":
+            return _batch_response(
+                batch_id=batch_id,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                champion_artifact_id=champion_artifact_id,
+                budget_usd=0.1,
+            )
+        return httpx.Response(status_code=404)
+
+    keypair = _keypair()
+    client = HttpPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+
+    batch = client.get_miner_task_batch(batch_id)
+
+    assert batch.artifacts[0].artifact_id == artifact_id
+    assert not hasattr(batch.artifacts[0], "task_retry_count")
+
+
 def test_get_champion_weights_retries_transient_connect_timeout() -> None:
     keypair = _keypair()
     transport = _FlakyTransport(

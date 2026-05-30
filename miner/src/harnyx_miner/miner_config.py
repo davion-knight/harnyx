@@ -12,6 +12,8 @@ from harnyx_miner.submit import _authorization_header, _platform_base_url
 
 _CONFIG_PATH = "/v1/miner-config"
 _SUPPORTED_PROVIDERS = frozenset({"chutes", "openrouter", "desearch", "parallel"})
+_MIN_TASK_RETRY_COUNT = 0
+_MAX_TASK_RETRY_COUNT = 3
 
 
 def get_config(*, wallet_name: str, hotkey_name: str) -> dict[str, object]:
@@ -55,6 +57,22 @@ def delete_provider_credential(
     return _request_json(
         method="DELETE",
         payload={"key": f"provider_credentials.{normalized_provider}"},
+        wallet_name=wallet_name,
+        hotkey_name=hotkey_name,
+    )
+
+
+def put_task_retry_count(
+    *,
+    task_retry_count: int,
+    wallet_name: str,
+    hotkey_name: str,
+) -> dict[str, object]:
+    if task_retry_count < _MIN_TASK_RETRY_COUNT or task_retry_count > _MAX_TASK_RETRY_COUNT:
+        raise ValueError("task retry count must be between 0 and 3")
+    return _request_json(
+        method="PUT",
+        payload={"key": "task_retry_count", "value": str(task_retry_count)},
         wallet_name=wallet_name,
         hotkey_name=hotkey_name,
     )
@@ -120,6 +138,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--provider", help="Provider to configure.")
     parser.add_argument("--api-key", help="Provider API key to upload.")
     parser.add_argument("--delete-provider", help="Provider credential to delete.")
+    parser.add_argument("--task-retry-count", type=int, help="Miner task retry count, 0 through 3.")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     try:
@@ -141,13 +160,22 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
             bool(args.get),
             bool(args.provider and args.api_key),
             bool(args.delete_provider),
+            args.task_retry_count is not None,
         )
         if enabled
     )
     if requested_operations != 1:
-        raise ValueError("choose exactly one of --get, --provider with --api-key, or --delete-provider")
+        raise ValueError(
+            "choose exactly one of --get, --provider with --api-key, --delete-provider, or --task-retry-count"
+        )
     if args.get:
         return get_config(wallet_name=wallet_name, hotkey_name=hotkey_name)
+    if args.task_retry_count is not None:
+        return put_task_retry_count(
+            task_retry_count=int(args.task_retry_count),
+            wallet_name=wallet_name,
+            hotkey_name=hotkey_name,
+        )
     if args.delete_provider:
         return delete_provider_credential(
             provider=str(args.delete_provider),
@@ -167,4 +195,5 @@ __all__ = [
     "get_config",
     "main",
     "put_provider_credential",
+    "put_task_retry_count",
 ]

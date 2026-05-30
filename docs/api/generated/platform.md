@@ -162,6 +162,7 @@ Body: [MinerConfigResponse](#model-minerconfigresponse)
 | --- | --- | --- | --- | --- |
 | `miner_hotkey_ss58` |  |  | req | `string` |
 | `provider_credentials` |  |  | req | `object` |
+| `task_retry_count` |  |  | req | `integer` |
 | `uid` |  |  | req | `integer` (nullable) |
 
 
@@ -190,6 +191,7 @@ Body: [MinerConfigResponse](#model-minerconfigresponse)
 | --- | --- | --- | --- | --- |
 | `miner_hotkey_ss58` |  |  | req | `string` |
 | `provider_credentials` |  |  | req | `object` |
+| `task_retry_count` |  |  | req | `integer` |
 | `uid` |  |  | req | `integer` (nullable) |
 
 `422` Validation Error
@@ -228,6 +230,7 @@ Body: [MinerConfigResponse](#model-minerconfigresponse)
 | --- | --- | --- | --- | --- |
 | `miner_hotkey_ss58` |  |  | req | `string` |
 | `provider_credentials` |  |  | req | `object` |
+| `task_retry_count` |  |  | req | `integer` |
 | `uid` |  |  | req | `integer` (nullable) |
 
 `422` Validation Error
@@ -2256,6 +2259,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | --- | --- | --- | --- | --- |
 | `miner_hotkey_ss58` |  |  | req | `string` |
 | `provider_credentials` |  |  | req | `object` |
+| `task_retry_count` |  |  | req | `integer` |
 | `uid` |  |  | req | `integer` (nullable) |
 
 <details>
@@ -2276,6 +2280,10 @@ Body: [WeightsResponse](#model-weightsresponse)
       "title": "Provider Credentials",
       "type": "object"
     },
+    "task_retry_count": {
+      "title": "Task Retry Count",
+      "type": "integer"
+    },
     "uid": {
       "anyOf": [
         {
@@ -2291,6 +2299,7 @@ Body: [WeightsResponse](#model-weightsresponse)
   "required": [
     "miner_hotkey_ss58",
     "uid",
+    "task_retry_count",
     "provider_credentials"
   ],
   "title": "MinerConfigResponse",

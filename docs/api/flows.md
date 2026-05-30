@@ -12,7 +12,7 @@ These diagrams are intentionally **linear** (no `alt` / `par` / `loop`) to keep 
 ## Quick index
 
 - Subnet runtime (Platform ↔ Validator ↔ Miner)
-  - [Miner provider credential config](#miner-provider-credential-config)
+  - [Miner config](#miner-config)
   - [Miner script upload](#miner-script-upload)
   - [Miner-task batch](#miner-task-batch)
   - [Tool execution](#tool-execution)
@@ -23,7 +23,7 @@ These diagrams are intentionally **linear** (no `alt` / `par` / `loop`) to keep 
 
 | Domain | Flow | Goal | Actors | Auth / Context |
 |--------|------|------|--------|------|
-| Subnet runtime | Miner provider credential config | upload, read, or delete redacted provider credential status | Miner ↔ Platform | `Authorization: Bittensor ...` |
+| Subnet runtime | Miner config | configure retry count; upload, read, or delete redacted provider credential status | Miner ↔ Platform | `Authorization: Bittensor ...` |
 | Subnet runtime | Miner script upload | upload script artifact | Miner ↔ Platform | `Authorization: Bittensor ...` |
 | Subnet runtime | Miner-task batch | forward batch + run sandbox + poll status and drain run pages | Platform ↔ Validator ↔ Sandbox | `Authorization: Bittensor ...` + `x-platform-token` + `x-session-id` + `x-host-container-url` |
 | Subnet runtime | Tool execution | agent invokes host tools | Sandbox agent ↔ Tool host | `x-platform-token` + `x-session-id` |
@@ -35,14 +35,14 @@ These diagrams are intentionally **linear** (no `alt` / `par` / `loop`) to keep 
 
 These flows are the subnet’s core evaluation path.
 
-### Miner provider credential config
+### Miner config
 
 | Overview | |
 |---|---|
-| **What’s happening** | Miner manages platform-stored provider credentials for a signing hotkey. |
+| **What’s happening** | Miner manages platform-stored config for a signing hotkey. |
 | **Actors** | Miner ↔ Platform |
 | **Auth** | `Authorization: Bittensor ss58="...",sig="..."` |
-| **Happy path** | `GET`, `PUT`, or `DELETE /v1/miner-config` returns redacted provider status. |
+| **Happy path** | `GET`, `PUT`, or `DELETE /v1/miner-config` returns retry count and redacted provider status. |
 
 ```mermaid
 sequenceDiagram
@@ -52,13 +52,16 @@ sequenceDiagram
   Note over M,P: Authorization: Bittensor ss58="...",sig="..."
 
   M->>P: GET /v1/miner-config
-  P-->>M: 200 { provider_credentials:{...exists/timestamps...} }
+  P-->>M: 200 { task_retry_count, provider_credentials:{...exists/timestamps...} }
+
+  M->>P: PUT /v1/miner-config<br/>{ key:"task_retry_count", value:"3" }
+  P-->>M: 200 { task_retry_count:3, provider_credentials:{...} }
 
   M->>P: PUT /v1/miner-config<br/>{ key:"provider_credentials.chutes", value:"..." }
-  P-->>M: 200 { provider_credentials:{ chutes:{ exists:true } } }
+  P-->>M: 200 { task_retry_count, provider_credentials:{ chutes:{ exists:true } } }
 
   M->>P: DELETE /v1/miner-config<br/>{ key:"provider_credentials.chutes" }
-  P-->>M: 200 { provider_credentials:{ chutes:{ exists:false } } }
+  P-->>M: 200 { task_retry_count, provider_credentials:{ chutes:{ exists:false } } }
 ```
 
 **Endpoints involved**
