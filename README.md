@@ -70,7 +70,7 @@ Notes:
 **Validator flow + gating**
 - The platform sends miner-task batches to validators; validators run script x task combinations and report scored runs.
 - Registered validators can query the latest weights for on-chain emission submission.
-- Miner emission is controlled by the platform's configured maximum miner emission fraction, currently defaulting to `0%`; owner `uid=0` receives the remainder.
+- Miner emission keeps champion emission active and adds `0.004` weight per distinct miner hotkey whose artifact participated in the latest terminal source batch with artifacts; owner `uid=0` receives the final remainder and unregistered participant shares.
 - The [live benchmark page](https://dashboard.harnyx.ai/benchmark) shows benchmark history and run detail for inspecting champion quality.
 
 **Roles**
@@ -108,11 +108,11 @@ Because of that:
 - challenger order matters
 - small score differences inside the tolerance band do not automatically replace the incumbent
 
-### How capped miner emission works
+### How participant miner emission works
 
-`GET /v1/weights` uses the latest champion weights. Total miner weight is capped by the configured maximum miner emission fraction times the latest champion batch score; owner `uid=0` receives the remainder.
+`GET /v1/weights` still uses latest champion weights for champion emission. It also uses the latest terminal source batch with artifacts for participant emission. Each distinct participating miner hotkey gets `0.004` intended weight, projected to its current metagraph UID when registered; owner `uid=0` receives the final remainder.
 
-If no champion selection exists, miner emission is burned for that round.
+Failed terminal batches with artifacts count for participant emission. Initializing/running batches and terminal batches without artifacts do not update the emitted participant source. If no terminal source batch with artifacts exists, only the champion component remains active.
 
 
 

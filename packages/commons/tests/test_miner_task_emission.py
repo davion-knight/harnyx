@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from harnyx_commons.miner_task_emission import (
+    OWNER_UID,
     apply_miner_emission_cap,
+    compose_emission_weights,
+    compose_participant_emission_weights,
     owner_fallback_weights,
 )
 
@@ -81,3 +84,63 @@ def test_apply_miner_emission_cap_rejects_invalid_max_fraction(max_fraction: flo
 
 def test_owner_fallback_weights_assigns_all_emission_to_owner() -> None:
     assert owner_fallback_weights() == {0: 1.0}
+
+
+def test_participant_emission_pays_fixed_weight_per_registered_uid() -> None:
+    weights = compose_participant_emission_weights((10, 11))
+
+    assert weights == {
+        10: pytest.approx(0.004),
+        11: pytest.approx(0.004),
+    }
+
+
+def test_participant_emission_empty_participants_returns_empty_component() -> None:
+    assert compose_participant_emission_weights(()) == {}
+
+
+def test_participant_emission_deduplicates_registered_uids() -> None:
+    assert compose_participant_emission_weights((10, 10)) == {
+        10: pytest.approx(0.004),
+    }
+
+
+def test_participant_emission_rejects_total_weight_over_one() -> None:
+    with pytest.raises(ValueError, match="participant emission exceeds total weight"):
+        compose_participant_emission_weights(tuple(range(1, 252)))
+
+
+def test_compose_emission_weights_adds_champion_and_participant_components() -> None:
+    weights = compose_emission_weights({10: 0.1}, {11: 0.004, 12: 0.004})
+
+    assert weights == {
+        OWNER_UID: pytest.approx(0.892),
+        10: pytest.approx(0.1),
+        11: pytest.approx(0.004),
+        12: pytest.approx(0.004),
+    }
+    assert sum(weights.values()) == pytest.approx(1.0)
+
+
+def test_compose_emission_weights_adds_same_uid_components() -> None:
+    weights = compose_emission_weights({10: 0.1}, {10: 0.004})
+
+    assert weights == {
+        OWNER_UID: pytest.approx(0.896),
+        10: pytest.approx(0.104),
+    }
+
+
+def test_compose_emission_weights_ignores_component_owner_remainders() -> None:
+    weights = compose_emission_weights({OWNER_UID: 0.9, 10: 0.1}, {OWNER_UID: 0.996, 11: 0.004})
+
+    assert weights == {
+        OWNER_UID: pytest.approx(0.896),
+        10: pytest.approx(0.1),
+        11: pytest.approx(0.004),
+    }
+
+
+def test_compose_emission_weights_rejects_combined_overflow() -> None:
+    with pytest.raises(ValueError, match="emission exceeds total weight"):
+        compose_emission_weights({10: 0.998}, {11: 0.004})
