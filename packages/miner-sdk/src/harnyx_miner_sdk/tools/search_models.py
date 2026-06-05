@@ -8,12 +8,15 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from harnyx_miner_sdk.tools.types import ToolInvocationTimeout
 
+SearchProviderName = Literal["desearch", "parallel"]
+
 
 class SearchWebSearchRequest(BaseModel):
     """Query parameters for the `search_web` tool."""
 
     model_config = ConfigDict(extra="forbid")
 
+    provider: SearchProviderName
     search_queries: tuple[str, ...] = Field(min_length=1)
     num: int | None = Field(default=None, ge=0)
     timeout: ToolInvocationTimeout | None = None
@@ -34,7 +37,7 @@ class SearchWebSearchRequest(BaseModel):
         return normalized
 
     def to_query_params(self) -> dict[str, Any]:
-        return self.model_dump(exclude_none=True, exclude={"timeout"})
+        return self.model_dump(exclude_none=True, exclude={"provider", "timeout"})
 
 
 class SearchWebResult(BaseModel):
@@ -175,6 +178,7 @@ class SearchAiSearchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    provider: SearchProviderName
     prompt: str = Field(min_length=1)
     count: int = Field(default=10, ge=10, le=200)
     timeout: ToolInvocationTimeout | None = None
@@ -201,6 +205,7 @@ class FetchPageRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    provider: SearchProviderName
     url: str = Field(min_length=1)
     timeout: ToolInvocationTimeout | None = None
 
@@ -223,6 +228,7 @@ class FetchPageResponse(BaseModel):
 
 __all__ = [
     "ToolInvocationTimeout",
+    "SearchProviderName",
     "SearchWebSearchRequest",
     "SearchWebSearchResponse",
     "SearchWebResult",

@@ -18,7 +18,7 @@ from harnyx_commons.infrastructure.state.receipt_log import InMemoryReceiptLog
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
 from harnyx_commons.protocol_headers import SESSION_ID_HEADER
 from harnyx_commons.tools.dto import ToolBudgetSnapshot, ToolInvocationRequest, ToolInvocationResult
-from harnyx_commons.tools.executor import ToolExecutor
+from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext
 from harnyx_commons.tools.runtime_invoker import build_miner_sandbox_tool_invoker
 from harnyx_commons.tools.token_semaphore import (
     DEFAULT_TOOL_CONCURRENCY_LIMITS,
@@ -46,6 +46,11 @@ def _invocation(tool: ToolName = "search_web") -> ToolInvocationRequest:
     )
 
 
+def _mixed_invocations(count: int) -> list[ToolInvocationRequest]:
+    tools: tuple[ToolName, ...] = ("search_web", "search_ai", "fetch_page", "tooling_info", "test_tool", "llm_chat")
+    return [_invocation(tools[index % len(tools)]) for index in range(count)]
+
+
 def create_test_app(dependency_provider: DemoDependencyProvider) -> FastAPI:
     app = FastAPI()
     add_tool_routes(app, dependency_provider)
@@ -62,6 +67,7 @@ class RecordingToolInvoker:
         *,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        context: ToolInvocationContext | None = None,
     ) -> dict[str, object]:
         self.calls.append((tool_name, args, kwargs))
         query = kwargs.get("query", "demo")
@@ -374,14 +380,14 @@ def test_execute_tool_endpoint_supports_tooling_info() -> None:
     assert session_snapshot.usage.total_cost_usd == pytest.approx(0.0)
 
 
-def test_execute_tool_endpoint_waits_for_third_same_model_llm_call_then_succeeds() -> None:
+def test_execute_tool_endpoint_waits_when_shared_tool_cap_is_full_then_succeeds() -> None:
     provider = DemoDependencyProvider()
     provider.dependencies = ToolRouteDeps(
         tool_executor=cast(ToolExecutor, _StaticToolExecutor()),
         tool_concurrency_limiter=provider.tool_concurrency_limiter,
     )
     app = create_test_app(provider)
-    held = [_invocation("llm_chat"), _invocation("llm_chat")]
+    held = _mixed_invocations(20)
     for invocation in held:
         provider.tool_concurrency_limiter.acquire(invocation)
 
@@ -392,7 +398,7 @@ def test_execute_tool_endpoint_waits_for_third_same_model_llm_call_then_succeeds
             provider=provider,
             tool="llm_chat",
             model=DEFAULT_LIMIT_LLM_MODEL,
-            expected_acquire_calls=3,
+            expected_acquire_calls=21,
             unblock_invocation=unblock_invocation,
         )
     finally:
@@ -403,34 +409,27 @@ def test_execute_tool_endpoint_waits_for_third_same_model_llm_call_then_succeeds
     assert provider.tool_concurrency_limiter.in_flight(_invocation("llm_chat")) == 0
 
 
-def test_execute_tool_endpoint_does_not_wait_for_different_llm_model() -> None:
+def test_execute_tool_endpoint_uses_same_cap_for_different_llm_models() -> None:
     provider = DemoDependencyProvider()
     provider.dependencies = ToolRouteDeps(
         tool_executor=cast(ToolExecutor, _StaticToolExecutor()),
         tool_concurrency_limiter=provider.tool_concurrency_limiter,
     )
     app = create_test_app(provider)
-    held = [_invocation("llm_chat"), _invocation("llm_chat")]
+    held = _mixed_invocations(20)
     for invocation in held:
         provider.tool_concurrency_limiter.acquire(invocation)
 
     try:
-        with TestClient(app) as client:
-            response = client.post(
-                "/v1/tools/execute",
-                json={
-                    "tool": "llm_chat",
-                    "args": [],
-                    "kwargs": {
-                        "model": DEEPSEEK_V32_MODEL,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    },
-                },
-                headers={
-                    "x-platform-token": DEMO_SESSION_TOKEN,
-                    SESSION_ID_HEADER: str(provider.session.session_id),
-                },
-            )
+        unblock_invocation = held.pop()
+        response = _issue_waiting_tool_request(
+            app=app,
+            provider=provider,
+            tool="llm_chat",
+            model=DEEPSEEK_V32_MODEL,
+            expected_acquire_calls=21,
+            unblock_invocation=unblock_invocation,
+        )
     finally:
         for invocation in held:
             provider.tool_concurrency_limiter.release(invocation)
@@ -439,16 +438,10 @@ def test_execute_tool_endpoint_does_not_wait_for_different_llm_model() -> None:
     assert provider.tool_concurrency_limiter.in_flight(_invocation("llm_chat")) == 0
 
 
-def test_execute_tool_endpoint_waits_for_sixth_non_llm_call_then_succeeds() -> None:
+def test_execute_tool_endpoint_waits_for_twenty_first_mixed_tool_call_then_succeeds() -> None:
     provider = DemoDependencyProvider()
     app = create_test_app(provider)
-    held = [
-        _invocation("search_web"),
-        _invocation("search_ai"),
-        _invocation("fetch_page"),
-        _invocation("tooling_info"),
-        _invocation("test_tool"),
-    ]
+    held = _mixed_invocations(20)
     for invocation in held:
         provider.tool_concurrency_limiter.acquire(invocation)
 
@@ -458,7 +451,7 @@ def test_execute_tool_endpoint_waits_for_sixth_non_llm_call_then_succeeds() -> N
             app=app,
             provider=provider,
             tool="search_web",
-            expected_acquire_calls=6,
+            expected_acquire_calls=21,
             unblock_invocation=unblock_invocation,
         )
     finally:

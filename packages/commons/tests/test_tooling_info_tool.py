@@ -4,13 +4,15 @@ import pytest
 
 from harnyx_commons.infrastructure.state.receipt_log import InMemoryReceiptLog
 from harnyx_commons.llm.pricing import (
+    MINER_TOOL_LLM_PRICING,
     MODEL_PRICING,
     SEARCH_PRICING_PER_REFERENCEABLE_RESULT,
     price_llm,
+    price_miner_llm,
     price_parallel_search,
 )
 from harnyx_commons.llm.schema import LlmUsage
-from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, parse_tool_model
+from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, MINER_SELECTED_LLM_PROVIDER_MODELS, parse_tool_model
 from harnyx_commons.tools.runtime_invoker import RuntimeToolInvoker, build_miner_sandbox_tool_invoker
 
 pytestmark = pytest.mark.anyio("asyncio")
@@ -18,6 +20,9 @@ pytestmark = pytest.mark.anyio("asyncio")
 
 def test_tool_model_pricing_covers_every_allowed_tool_model() -> None:
     assert set(MODEL_PRICING) == set(ALLOWED_TOOL_MODELS)
+    assert set(MINER_TOOL_LLM_PRICING) == set(MINER_SELECTED_LLM_PROVIDER_MODELS)
+    for provider, models in MINER_SELECTED_LLM_PROVIDER_MODELS.items():
+        assert set(MINER_TOOL_LLM_PRICING[provider]) == set(models)
 
 
 async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
@@ -44,50 +49,59 @@ async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
     assert "search_items" not in payload["tool_names"]
     assert "search_items" not in payload["pricing"]
 
-    model_prices = payload["pricing"]["llm_chat"]["models"]
-    assert "openai/gpt-oss-20b-TEE" not in payload["allowed_tool_models"]
-    assert "openai/gpt-oss-20b-TEE" not in model_prices
-    assert "openai/gpt-oss-120b-TEE" not in payload["allowed_tool_models"]
-    assert "openai/gpt-oss-120b-TEE" not in model_prices
-    assert "openai/gpt-oss-20b" in payload["allowed_tool_models"]
-    assert model_prices["openai/gpt-oss-20b"]["input_per_million"] == pytest.approx(0.03)
-    assert model_prices["openai/gpt-oss-20b"]["output_per_million"] == pytest.approx(0.14)
-    assert model_prices["openai/gpt-oss-20b"]["reasoning_per_million"] == pytest.approx(0.14)
-    assert "openai/gpt-oss-120b" in payload["allowed_tool_models"]
-    assert model_prices["openai/gpt-oss-120b"]["input_per_million"] == pytest.approx(0.039)
-    assert model_prices["openai/gpt-oss-120b"]["output_per_million"] == pytest.approx(0.18)
-    assert model_prices["openai/gpt-oss-120b"]["reasoning_per_million"] == pytest.approx(0.18)
-    assert "zai-org/GLM-5-TEE" in payload["allowed_tool_models"]
-    assert model_prices["zai-org/GLM-5-TEE"]["input_per_million"] == pytest.approx(
+    assert "allowed_tool_models" not in payload
+    assert "models" not in payload["pricing"]["llm_chat"]
+    model_prices = payload["pricing"]["llm_chat"]["provider_models"]
+    provider_models = payload["allowed_llm_provider_models"]
+    assert provider_models == {
+        provider: list(models)
+        for provider, models in MINER_SELECTED_LLM_PROVIDER_MODELS.items()
+    }
+    assert "openai/gpt-oss-20b-TEE" not in provider_models["openrouter"]
+    assert "openai/gpt-oss-120b-TEE" not in provider_models["openrouter"]
+    assert "openai/gpt-oss-20b" in provider_models["openrouter"]
+    assert model_prices["openrouter"]["openai/gpt-oss-20b"]["input_per_million"] == pytest.approx(0.03)
+    assert model_prices["openrouter"]["openai/gpt-oss-20b"]["output_per_million"] == pytest.approx(0.14)
+    assert model_prices["openrouter"]["openai/gpt-oss-20b"]["reasoning_per_million"] == pytest.approx(0.14)
+    assert "openai/gpt-oss-120b" in provider_models["openrouter"]
+    assert model_prices["openrouter"]["openai/gpt-oss-120b"]["input_per_million"] == pytest.approx(0.039)
+    assert model_prices["openrouter"]["openai/gpt-oss-120b"]["output_per_million"] == pytest.approx(0.18)
+    assert model_prices["openrouter"]["openai/gpt-oss-120b"]["reasoning_per_million"] == pytest.approx(0.18)
+    assert "zai-org/GLM-5-TEE" in provider_models["chutes"]
+    assert model_prices["chutes"]["zai-org/GLM-5-TEE"]["input_per_million"] == pytest.approx(
         MODEL_PRICING["zai-org/GLM-5-TEE"].input_per_million
     )
-    assert model_prices["zai-org/GLM-5-TEE"]["output_per_million"] == pytest.approx(
+    assert model_prices["chutes"]["zai-org/GLM-5-TEE"]["output_per_million"] == pytest.approx(
         MODEL_PRICING["zai-org/GLM-5-TEE"].output_per_million
     )
-    assert model_prices["zai-org/GLM-5-TEE"]["reasoning_per_million"] == pytest.approx(
+    assert model_prices["chutes"]["zai-org/GLM-5-TEE"]["reasoning_per_million"] == pytest.approx(
         MODEL_PRICING["zai-org/GLM-5-TEE"].billable_reasoning_per_million
     )
-    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" not in payload["allowed_tool_models"]
-    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" not in model_prices
-    assert "Qwen/Qwen3.6-27B-TEE" in payload["allowed_tool_models"]
-    assert model_prices["Qwen/Qwen3.6-27B-TEE"]["input_per_million"] == pytest.approx(0.50)
-    assert model_prices["Qwen/Qwen3.6-27B-TEE"]["output_per_million"] == pytest.approx(2.00)
-    assert model_prices["Qwen/Qwen3.6-27B-TEE"]["reasoning_per_million"] == pytest.approx(2.00)
-    assert "deepseek-ai/DeepSeek-V3.1-TEE" not in payload["allowed_tool_models"]
-    assert "deepseek-ai/DeepSeek-V3.1-TEE" not in model_prices
-    assert "google/gemma-4-31B-it" not in payload["allowed_tool_models"]
-    assert "google/gemma-4-31B-it" not in model_prices
-    assert "google/gemma-4-31B-turbo-TEE" in payload["allowed_tool_models"]
-    assert model_prices["google/gemma-4-31B-turbo-TEE"]["input_per_million"] == pytest.approx(0.13)
-    assert model_prices["google/gemma-4-31B-turbo-TEE"]["output_per_million"] == pytest.approx(0.38)
-    assert model_prices["google/gemma-4-31B-turbo-TEE"]["reasoning_per_million"] == pytest.approx(0.38)
+    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" not in provider_models["chutes"]
+    assert "Qwen/Qwen3-Next-80B-A3B-Instruct" not in model_prices["chutes"]
+    assert "Qwen/Qwen3.6-27B-TEE" in provider_models["chutes"]
+    assert model_prices["chutes"]["Qwen/Qwen3.6-27B-TEE"]["input_per_million"] == pytest.approx(0.50)
+    assert model_prices["chutes"]["Qwen/Qwen3.6-27B-TEE"]["output_per_million"] == pytest.approx(2.00)
+    assert model_prices["chutes"]["Qwen/Qwen3.6-27B-TEE"]["reasoning_per_million"] == pytest.approx(2.00)
+    assert "deepseek-ai/DeepSeek-V3.1-TEE" not in provider_models["chutes"]
+    assert "deepseek-ai/DeepSeek-V3.1-TEE" not in model_prices["chutes"]
+    assert "google/gemma-4-31B-it" not in provider_models["chutes"]
+    assert "google/gemma-4-31B-it" not in model_prices["chutes"]
+    assert "google/gemma-4-31B-turbo-TEE" in provider_models["chutes"]
+    assert model_prices["chutes"]["google/gemma-4-31B-turbo-TEE"]["input_per_million"] == pytest.approx(0.13)
+    assert model_prices["chutes"]["google/gemma-4-31B-turbo-TEE"]["output_per_million"] == pytest.approx(0.38)
+    assert model_prices["chutes"]["google/gemma-4-31B-turbo-TEE"]["reasoning_per_million"] == pytest.approx(0.38)
     model = "deepseek-ai/DeepSeek-V3.2-TEE"
-    assert model in payload["allowed_tool_models"]
+    assert model in provider_models["chutes"]
     assert MODEL_PRICING[model].reasoning_per_million == pytest.approx(0.0)
-    assert model_prices[model]["input_per_million"] == pytest.approx(MODEL_PRICING[model].input_per_million)
-    assert model_prices[model]["output_per_million"] == pytest.approx(MODEL_PRICING[model].output_per_million)
-    assert model_prices[model]["reasoning_per_million"] == pytest.approx(
+    assert model_prices["chutes"][model]["input_per_million"] == pytest.approx(MODEL_PRICING[model].input_per_million)
+    assert model_prices["chutes"][model]["output_per_million"] == pytest.approx(MODEL_PRICING[model].output_per_million)
+    assert model_prices["chutes"][model]["reasoning_per_million"] == pytest.approx(
         MODEL_PRICING[model].billable_reasoning_per_million
+    )
+    assert "deepseek/deepseek-v3.2" in provider_models["openrouter"]
+    assert model_prices["openrouter"]["deepseek/deepseek-v3.2"]["input_per_million"] == pytest.approx(
+        MODEL_PRICING[model].input_per_million
     )
 
 
@@ -117,6 +131,8 @@ def test_zero_reasoning_price_falls_back_to_output_price() -> None:
     assert price_llm(parse_tool_model("google/gemma-4-31B-turbo-TEE"), usage) == pytest.approx(0.89)
     assert price_llm(parse_tool_model("openai/gpt-oss-20b"), usage) == pytest.approx(0.31)
     assert price_llm(parse_tool_model("openai/gpt-oss-120b"), usage) == pytest.approx(0.399)
+    assert price_miner_llm("openrouter", "deepseek/deepseek-v3.2", usage) == pytest.approx(1.12)
+    assert price_miner_llm("chutes", "deepseek-ai/DeepSeek-V3.2-TEE", usage) == pytest.approx(1.12)
 
 
 @pytest.mark.parametrize(

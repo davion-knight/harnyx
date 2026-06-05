@@ -18,6 +18,8 @@ Generated from FastAPI OpenAPI.
   - [GET /v1/miner-task-batches/{batch_id}/restore/runs](#endpoint-get-v1-miner-task-batches-batch_id-restore-runs)
 - [miners](#miners)
   - [POST /v1/miners/scripts](#endpoint-post-v1-miners-scripts)
+- [platform-tool-proxy](#platform-tool-proxy)
+  - [POST /v1/platform-tool-proxy/grants](#endpoint-post-v1-platform-tool-proxy-grants)
 - [repo-search](#repo-search)
   - [POST /v1/repo-search/ensure-index](#endpoint-post-v1-repo-search-ensure-index)
   - [POST /v1/repo-search/get-file](#endpoint-post-v1-repo-search-get-file)
@@ -311,11 +313,13 @@ Body: [MinerTaskBatchModel](#model-minertaskbatchmodel)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
-| `artifacts` |  |  | req | array[[ScriptArtifactModel](#model-scriptartifactmodel)] |
+| `artifacts` |  |  | req | array[[MinerTaskBatchArtifactModel](#model-minertaskbatchartifactmodel)] |
 |  | `artifact_id` |  | req | `string` (format: uuid) |
 |  | `content_hash` |  | req | `string` |
+|  | `miner_hotkey_ss58` |  | req | `string` |
 |  | `size_bytes` |  | req | `integer` |
 |  | `submitted_at` |  | req | `string` (format: date-time) |
+|  | `task_retry_count` |  | req | `integer` |
 |  | `uid` |  | req | `integer` |
 | `batch_id` |  |  | req | `string` (format: uuid) |
 | `champion_artifact_id` |  |  | req | `string` (format: uuid; nullable) |
@@ -532,6 +536,52 @@ Body: [ScriptArtifactModel](#model-scriptartifactmodel)
 | `size_bytes` |  |  | req | `integer` |
 | `submitted_at` |  |  | req | `string` (format: date-time) |
 | `uid` |  |  | req | `integer` |
+
+`422` Validation Error
+Content-Type: `application/json`
+Body: [HTTPValidationError](#model-httpvalidationerror)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `detail` |  |  | opt | array[[ValidationError](#model-validationerror)] |
+|  | `loc` |  | req | array[anyOf: `string` OR `integer`] |
+|  | `msg` |  | req | `string` |
+|  | `type` |  | req | `string` |
+
+
+
+## platform-tool-proxy
+
+### grants
+
+<a id="endpoint-post-v1-platform-tool-proxy-grants"></a>
+#### POST /v1/platform-tool-proxy/grants
+
+Create a short-lived platform-tool-proxy token for a validator-owned batch delivery.
+
+**Auth**: Bittensor-signed (`Authorization: Bittensor ss58="...",sig="..."`)
+
+**Request**
+Content-Type: `application/json`
+Body: [PlatformToolProxyGrantRequest](#model-platformtoolproxygrantrequest)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `artifact_id` |  |  | req | `string` (format: uuid) |
+| `attempt_number` |  |  | req | `integer` |
+| `batch_id` |  |  | req | `string` (format: uuid) |
+| `task_id` |  |  | req | `string` (format: uuid) |
+| `validator_session_id` |  |  | req | `string` (format: uuid) |
+
+**Responses**
+`200` Successful Response
+Content-Type: `application/json`
+Body: [PlatformToolProxyGrantResponse](#model-platformtoolproxygrantresponse)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `expires_at` |  |  | req | `string` (format: date-time) |
+| `token` |  |  | req | `string` |
 
 `422` Validation Error
 Content-Type: `application/json`
@@ -2425,16 +2475,84 @@ Body: [WeightsResponse](#model-weightsresponse)
 
 </details>
 
+<a id="model-minertaskbatchartifactmodel"></a>
+### Model: MinerTaskBatchArtifactModel
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `artifact_id` |  |  | req | `string` (format: uuid) |
+| `content_hash` |  |  | req | `string` |
+| `miner_hotkey_ss58` |  |  | req | `string` |
+| `size_bytes` |  |  | req | `integer` |
+| `submitted_at` |  |  | req | `string` (format: date-time) |
+| `task_retry_count` |  |  | req | `integer` |
+| `uid` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "properties": {
+    "artifact_id": {
+      "format": "uuid",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "content_hash": {
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "miner_hotkey_ss58": {
+      "title": "Miner Hotkey Ss58",
+      "type": "string"
+    },
+    "size_bytes": {
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "submitted_at": {
+      "format": "date-time",
+      "title": "Submitted At",
+      "type": "string"
+    },
+    "task_retry_count": {
+      "title": "Task Retry Count",
+      "type": "integer"
+    },
+    "uid": {
+      "title": "Uid",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "uid",
+    "artifact_id",
+    "content_hash",
+    "size_bytes",
+    "submitted_at",
+    "miner_hotkey_ss58",
+    "task_retry_count"
+  ],
+  "title": "MinerTaskBatchArtifactModel",
+  "type": "object"
+}
+```
+
+</details>
+
 <a id="model-minertaskbatchmodel"></a>
 ### Model: MinerTaskBatchModel
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
-| `artifacts` |  |  | req | array[[ScriptArtifactModel](#model-scriptartifactmodel)] |
+| `artifacts` |  |  | req | array[[MinerTaskBatchArtifactModel](#model-minertaskbatchartifactmodel)] |
 |  | `artifact_id` |  | req | `string` (format: uuid) |
 |  | `content_hash` |  | req | `string` |
+|  | `miner_hotkey_ss58` |  | req | `string` |
 |  | `size_bytes` |  | req | `integer` |
 |  | `submitted_at` |  | req | `string` (format: date-time) |
+|  | `task_retry_count` |  | req | `integer` |
 |  | `uid` |  | req | `integer` |
 | `batch_id` |  |  | req | `string` (format: uuid) |
 | `champion_artifact_id` |  |  | req | `string` (format: uuid; nullable) |
@@ -2459,7 +2577,7 @@ Body: [WeightsResponse](#model-weightsresponse)
   "properties": {
     "artifacts": {
       "items": {
-        "$ref": "#/components/schemas/ScriptArtifactModel"
+        "$ref": "#/components/schemas/MinerTaskBatchArtifactModel"
       },
       "title": "Artifacts",
       "type": "array"
@@ -3038,6 +3156,100 @@ Body: [WeightsResponse](#model-weightsresponse)
     "tasks"
   ],
   "title": "OverrideMinerTaskDatasetModel",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-platformtoolproxygrantrequest"></a>
+### Model: PlatformToolProxyGrantRequest
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `artifact_id` |  |  | req | `string` (format: uuid) |
+| `attempt_number` |  |  | req | `integer` |
+| `batch_id` |  |  | req | `string` (format: uuid) |
+| `task_id` |  |  | req | `string` (format: uuid) |
+| `validator_session_id` |  |  | req | `string` (format: uuid) |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "format": "uuid",
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "attempt_number": {
+      "minimum": 1.0,
+      "title": "Attempt Number",
+      "type": "integer"
+    },
+    "batch_id": {
+      "format": "uuid",
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "task_id": {
+      "format": "uuid",
+      "title": "Task Id",
+      "type": "string"
+    },
+    "validator_session_id": {
+      "format": "uuid",
+      "title": "Validator Session Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "batch_id",
+    "artifact_id",
+    "task_id",
+    "validator_session_id",
+    "attempt_number"
+  ],
+  "title": "PlatformToolProxyGrantRequest",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-platformtoolproxygrantresponse"></a>
+### Model: PlatformToolProxyGrantResponse
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `expires_at` |  |  | req | `string` (format: date-time) |
+| `token` |  |  | req | `string` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "token": {
+      "title": "Token",
+      "type": "string"
+    }
+  },
+  "required": [
+    "token",
+    "expires_at"
+  ],
+  "title": "PlatformToolProxyGrantResponse",
   "type": "object"
 }
 ```

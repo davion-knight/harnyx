@@ -127,6 +127,8 @@ class ScriptArtifactRequestModel(BaseModel):
     artifact_id: str = Field(min_length=1)
     content_hash: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
+    miner_hotkey_ss58: str = Field(min_length=1)
+    task_retry_count: int = Field(ge=0, le=3)
 
     @field_validator("artifact_id")
     @classmethod
@@ -139,6 +141,8 @@ class ScriptArtifactRequestModel(BaseModel):
             artifact_id=UUID(self.artifact_id),
             content_hash=self.content_hash,
             size_bytes=self.size_bytes,
+            miner_hotkey_ss58=self.miner_hotkey_ss58,
+            task_retry_count=self.task_retry_count,
         )
 
 

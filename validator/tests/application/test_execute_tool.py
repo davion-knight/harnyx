@@ -18,14 +18,20 @@ from harnyx_commons.domain.tool_call import (
 )
 from harnyx_commons.errors import ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
-from harnyx_commons.llm.pricing import price_llm
+from harnyx_commons.llm.pricing import price_llm, price_miner_llm
 from harnyx_commons.llm.schema import LlmChoice, LlmChoiceMessage, LlmMessageContentPart, LlmResponse, LlmUsage
 from harnyx_commons.llm.tool_models import parse_tool_model
 from harnyx_commons.tools.dto import ToolInvocationRequest
-from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationOutput, ToolInvoker
+from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext, ToolInvocationOutput, ToolInvoker
 from harnyx_commons.tools.usage_tracker import UsageTracker
 from harnyx_validator.application.evaluate_task_run import UsageSummarizer
 from harnyx_validator.domain.exceptions import BudgetExceededError
+from harnyx_validator.infrastructure.tools.platform_client import (
+    PlatformToolProxyBudgetExceededError,
+    PlatformToolProxyInvocationError,
+    PlatformToolProxyProviderError,
+    PlatformToolProxyToolTimeoutError,
+)
 from validator.tests.fixtures.fakes import FakeReceiptLog, FakeSessionRegistry
 
 pytestmark = pytest.mark.anyio("asyncio")
@@ -45,6 +51,7 @@ class RecordingToolInvoker(ToolInvoker):
         *,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        context: ToolInvocationContext | None = None,
     ) -> dict[str, object]:
         self.calls.append((tool_name, args, kwargs))
         return {"data": [], "search_queries": kwargs.get("search_queries", [])}
@@ -76,6 +83,7 @@ class BlockingLlmInvoker(ToolInvoker):
         *,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        context: ToolInvocationContext | None = None,
     ) -> dict[str, object]:
         assert tool_name == "llm_chat"
         self.started.set()
@@ -114,6 +122,7 @@ class BlockingProviderErrorInvoker(ToolInvoker):
         *,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        context: ToolInvocationContext | None = None,
     ) -> dict[str, object]:
         assert tool_name == "llm_chat"
         self.started.set()
@@ -436,6 +445,7 @@ async def test_execute_tool_budget_snapshot_clamps_remaining_after_soft_budget_i
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             assert tool_name == "search_web"
             return {
@@ -483,6 +493,7 @@ async def test_execute_tool_prices_search_web_by_referenceable_results() -> None
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> ToolInvocationOutput:
             assert tool_name == "search_web"
             return ToolInvocationOutput(
@@ -543,6 +554,7 @@ async def test_execute_tool_prices_search_ai_by_referenceable_results() -> None:
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             assert tool_name == "search_ai"
             return {
@@ -651,6 +663,7 @@ async def test_execute_tool_debug_log_preserves_raw_payload_and_error_text(
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             raise RuntimeError(
                 'access_token=access-secret Authorization: Bearer bearer-secret '
@@ -714,6 +727,7 @@ async def test_execute_tool_records_failed_receipt_before_reraising_provider_err
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             assert tool_name == "search_web"
             raise ToolProviderError("tool provider failed") from ValueError("upstream detail")
@@ -765,6 +779,7 @@ async def test_execute_tool_records_failed_receipt_before_reraising_generic_erro
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             raise ValueError("model openai/gpt-oss-120b is not allowed")
 
@@ -794,6 +809,102 @@ async def test_execute_tool_records_failed_receipt_before_reraising_generic_erro
     assert stored.usage.total_cost_usd == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize(
+    ("exc", "expected_outcome", "expected_error_code", "expected_status_code"),
+    [
+        (
+            PlatformToolProxyProviderError(status_code=400, message="provider failed"),
+            ToolCallOutcome.PROVIDER_ERROR,
+            "provider_failed",
+            "400",
+        ),
+        (
+            PlatformToolProxyInvocationError(
+                status_code=502,
+                error_code="platform_error",
+                message="platform proxy failed",
+            ),
+            ToolCallOutcome.INTERNAL_ERROR,
+            "platform_error",
+            "502",
+        ),
+        (
+            PlatformToolProxyInvocationError(
+                status_code=403,
+                error_code="platform_tool_proxy_denied",
+                message="platform tool proxy denied",
+            ),
+            ToolCallOutcome.INTERNAL_ERROR,
+            "platform_tool_proxy_denied",
+            "403",
+        ),
+        (
+            PlatformToolProxyInvocationError(
+                status_code=400,
+                error_code="platform_tool_proxy_grant_failed",
+                message="platform tool proxy grant failed",
+            ),
+            ToolCallOutcome.INTERNAL_ERROR,
+            "platform_tool_proxy_grant_failed",
+            "400",
+        ),
+        (
+            PlatformToolProxyToolTimeoutError(status_code=408, message="tool timed out"),
+            ToolCallOutcome.TIMEOUT,
+            "tool_timeout",
+            "408",
+        ),
+        (
+            PlatformToolProxyBudgetExceededError(status_code=400, message="budget exhausted"),
+            ToolCallOutcome.BUDGET_EXCEEDED,
+            "budget_exhausted",
+            "400",
+        ),
+    ],
+)
+async def test_execute_tool_records_platform_tool_proxy_category_in_failed_receipt_and_log(
+    caplog: pytest.LogCaptureFixture,
+    exc: Exception,
+    expected_outcome: ToolCallOutcome,
+    expected_error_code: str,
+    expected_status_code: str,
+) -> None:
+    session = make_session()
+    token = generate_token()
+
+    class FailingInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
+        ) -> dict[str, object]:
+            raise exc
+
+    executor, receipt_log, _ = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=FailingInvoker(),
+    )
+
+    with caplog.at_level("INFO", logger="harnyx_commons.tools"):
+        with pytest.raises(type(exc)):
+            await executor.execute(make_request(session, token=token))
+
+    receipts = tuple(receipt_log.for_session(session.session_id))
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert receipt.outcome is expected_outcome
+    assert receipt.details.extra is not None
+    assert receipt.details.extra["platform_tool_proxy_error_code"] == expected_error_code
+    assert receipt.details.extra["platform_tool_proxy_status_code"] == expected_status_code
+    failure_log = require_log_record(caplog, "tool call failed")
+    assert failure_log.platform_tool_proxy_error_code == expected_error_code
+    assert failure_log.platform_tool_proxy_status_code == expected_status_code
+
+
 async def test_execute_tool_records_failed_timeout_receipt_as_timeout() -> None:
     session = make_session()
     token = generate_token()
@@ -805,6 +916,7 @@ async def test_execute_tool_records_failed_timeout_receipt_as_timeout() -> None:
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             raise ToolInvocationTimeoutError("tool timed out")
 
@@ -847,6 +959,7 @@ async def test_execute_tool_records_failed_receipt_for_invalid_invoker_output() 
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> object:
             return object()
 
@@ -880,6 +993,7 @@ async def test_execute_tool_skips_failure_debug_payload_when_debug_disabled(
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             raise RuntimeError("authorization=secret")
 
@@ -913,6 +1027,7 @@ async def test_execute_tool_debug_logs_completion_before_budget_exhausted_failur
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             assert tool_name == "search_web"
             return {"data": [{"link": "https://a.example", "snippet": "A"}]}
@@ -977,6 +1092,7 @@ async def test_execute_tool_enforces_budget() -> None:
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             assert tool_name == "search_web"
             return {
@@ -1044,6 +1160,7 @@ async def test_execute_tool_records_llm_tokens_for_llm_chat(model: str) -> None:
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> ToolInvocationOutput:
             response = LlmResponse(
                 id="offline-chutes",
@@ -1136,6 +1253,7 @@ async def test_execute_tool_records_llm_tokens_for_first_positional_llm_chat_pay
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             response = LlmResponse(
                 id="offline-chutes",
@@ -1190,6 +1308,85 @@ async def test_execute_tool_records_llm_tokens_for_first_positional_llm_chat_pay
     )
 
 
+async def test_execute_tool_records_selected_llm_provider_for_llm_chat_usage() -> None:
+    model = "deepseek/deepseek-v3.2"
+    session = make_session(budget_usd=1.0)
+    token = generate_token()
+    usage = LlmUsage(
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+    )
+
+    class UsageToolInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
+        ) -> dict[str, object]:
+            assert tool_name == "llm_chat"
+            assert kwargs["provider"] == "openrouter"
+            response = LlmResponse(
+                id="offline-openrouter",
+                choices=(
+                    LlmChoice(
+                        index=0,
+                        message=LlmChoiceMessage(
+                            role="assistant",
+                            content=(LlmMessageContentPart(type="text", text="ok"),),
+                        ),
+                    ),
+                ),
+                usage=usage,
+            )
+            return response.to_payload()
+
+    session_registry = FakeSessionRegistry()
+    session_registry.create(session)
+    receipt_log = FakeReceiptLog()
+    usage_tracker = UsageTracker()
+    token_registry = InMemoryTokenRegistry()
+    token_registry.register(session.session_id, token)
+
+    executor = ToolExecutor(
+        session_registry=session_registry,
+        receipt_log=receipt_log,
+        usage_tracker=usage_tracker,
+        tool_invoker=UsageToolInvoker(),
+        token_registry=token_registry,
+        clock=lambda: datetime(2025, 10, 17, 12, 5, tzinfo=UTC),
+    )
+
+    await executor.execute(
+        ToolInvocationRequest(
+            session_id=session.session_id,
+            token=token,
+            tool="llm_chat",
+            args=(),
+            kwargs={
+                "provider": "openrouter",
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+        )
+    )
+
+    stored_session = session_registry.get(session.session_id)
+    assert stored_session is not None
+    assert "chutes" not in stored_session.usage.llm_usage_totals
+    usage_totals = stored_session.usage.llm_usage_totals["openrouter"][model]
+    assert usage_totals.prompt_tokens == 10
+    assert usage_totals.completion_tokens == 5
+    assert usage_totals.total_tokens == 15
+    assert usage_totals.call_count == 1
+    assert stored_session.usage.cost_by_provider == {
+        "openrouter": pytest.approx(price_miner_llm("openrouter", model, usage)),
+    }
+
+
 async def test_execute_tool_counts_reasoning_tokens_in_missing_total_fallback() -> None:
     session = make_session(budget_usd=1.0)
     token = generate_token()
@@ -1207,6 +1404,7 @@ async def test_execute_tool_counts_reasoning_tokens_in_missing_total_fallback() 
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             response = LlmResponse(
                 id="offline-chutes",
@@ -1277,6 +1475,7 @@ async def test_execute_tool_counts_reasoning_only_usage_in_missing_total_fallbac
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             response = LlmResponse(
                 id="offline-chutes",
@@ -1355,6 +1554,7 @@ async def test_execute_tool_ignores_stale_response_model_metadata_for_llm_chat()
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             response = LlmResponse(
                 id="offline-chutes",
@@ -1433,6 +1633,7 @@ async def test_execute_tool_records_llm_elapsed_ms_only_in_receipt_details() -> 
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> ToolInvocationOutput:
             response = LlmResponse(
                 id="offline-chutes",
@@ -1515,6 +1716,7 @@ async def test_execute_tool_allows_settlement_after_sibling_exhausts_session() -
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             stored = self._sessions.get(session.session_id)
             assert stored is not None
@@ -1561,6 +1763,7 @@ async def test_execute_tool_records_receipt_for_search_call_that_exhausts_budget
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             return {
                 "data": [
@@ -1612,6 +1815,7 @@ async def test_execute_tool_budget_exhaustion_records_one_successful_receipt_onl
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             return {"data": [{"link": "https://a.example", "snippet": "A"}]}
 
@@ -1646,6 +1850,7 @@ async def test_execute_tool_attempts_failed_receipt_for_receipt_persistence_fail
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             return {"data": []}
 
@@ -1688,6 +1893,7 @@ async def test_execute_tool_preserves_successful_receipt_for_usage_settlement_fa
             *,
             args: tuple[object, ...],
             kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
         ) -> dict[str, object]:
             stored = self._sessions.get(session.session_id)
             assert stored is not None

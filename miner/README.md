@@ -78,7 +78,7 @@ harnyx-miner-config --wallet-name <wallet> --hotkey-name <hotkey> --delete-provi
 
 Supported providers are `chutes`, `openrouter`, `desearch`, and `parallel`.
 Reads return only whether each provider credential exists and timestamps; raw API keys are never returned.
-Stored provider credentials are pre-registration state. Active miner-task batch execution does not use these credentials until a later release enables provider-access execution.
+Active miner-task batch execution uses these stored credentials through platform tool proxy execution. Validators receive only short-lived platform-tool-proxy tokens for one batch artifact/task/validator execution authority; each token remains bound to the validator execution session while budget and concurrency are not multiplied by changing session IDs. Raw provider API keys stay inside the platform boundary.
 
 ---
 
@@ -153,7 +153,7 @@ from harnyx_miner_sdk.query import CitationRef, CitationSlice, Query, Response
 
 @entrypoint("query")
 async def query(query: Query) -> Response:
-    search = await search_web(query.text, num=5)
+    search = await search_web(query.text, provider="parallel", num=5)
     result = search.results[0]
     return Response(
         text=f"{result.title}: {result.note}",
@@ -210,49 +210,49 @@ Tool calls return a budget snapshot:
 
 For miner-task batch evaluation, the run is strict: if execution hits the hard limit, validators record the run as `session_budget_exhausted` and stop before scoring/finalization. Return a best-effort `Response` before that point if you can.
 
-Tool calls are also concurrency-limited per evaluation session. For one session/token, `deepseek-ai/DeepSeek-V3.2-TEE` and `zai-org/GLM-5-TEE` each allow 1 in-flight `llm_chat` call, other `llm_chat` models allow up to 2 in-flight calls per model, and non-LLM tools allow up to 5 in-flight calls together. If your agent starts another call in a lane that is already full, that extra call waits for a free slot instead of failing immediately.
+Tool calls are also concurrency-limited per evaluation session. For one session/token, validators allow up to 20 in-flight tool calls total across the registered miner tools. The cap is shared across the whole miner script session; it is not split by tool type, provider, or `llm_chat` model. If your agent starts another call after the shared cap is full, that extra call waits for a free slot instead of failing immediately.
 
 Treat that limit as a runtime constraint, not a free queue. Waiting calls still consume wall-clock time, and they can still fail later if the session budget is exhausted or the upstream tool call fails.
 
-You can call `tooling_info` (free) to fetch pricing metadata for available tools/models:
+You can call `tooling_info` (free) to fetch pricing metadata for available tools and provider/model pairs:
 
 ```python
 from harnyx_miner_sdk.api import tooling_info
 
 info = await tooling_info()
 budget = info.budget
-allowed_models = info.response["allowed_tool_models"]
+provider_models = info.response["allowed_llm_provider_models"]
 pricing = info.response["pricing"]
 ```
 
-Treat `allowed_tool_models` as the runtime source of truth for `llm_chat` model ids instead of hardcoding a fixed list in your miner.
+Treat `allowed_llm_provider_models[provider]` as the runtime source of truth for `llm_chat` model ids instead of hardcoding a fixed list in your miner. Model ids are provider-specific: pass the id exactly as listed for the selected provider.
 
-Current allowed `llm_chat` model ids in this repo:
-- `openai/gpt-oss-20b`
-- `openai/gpt-oss-120b`
-- `deepseek-ai/DeepSeek-V3.2-TEE`
-- `zai-org/GLM-5-TEE`
-- `Qwen/Qwen3.6-27B-TEE`
-- `google/gemma-4-31B-turbo-TEE`
+Current allowed `llm_chat` provider/model ids in this repo:
+
+| Provider | Model ids |
+|----------|-----------|
+| `chutes` | `deepseek-ai/DeepSeek-V3.2-TEE`, `zai-org/GLM-5-TEE`, `Qwen/Qwen3.6-27B-TEE`, `google/gemma-4-31B-turbo-TEE` |
+| `openrouter` | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `deepseek/deepseek-v3.2`, `z-ai/glm-5`, `qwen/qwen3.6-27b`, `google/gemma-4-31b-it` |
 
 You can request model thinking/reasoning through the typed `thinking` option on `llm_chat`.
 Omit it when you want the validator/provider default behavior.
 
 Thinking controls are provider/model specific:
 
-| Model | `enabled=True` / `enabled=False` | `effort` | `budget` |
-|-------|----------------------------------|----------|----------|
-| `openai/gpt-oss-20b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` when routed through OpenRouter | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
-| `openai/gpt-oss-120b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` when routed through OpenRouter | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
-| `deepseek-ai/DeepSeek-V3.2-TEE` | Supported via `chat_template_kwargs.thinking` | No verified knob; ignored | No verified knob; ignored |
-| `zai-org/GLM-5-TEE` | Supported via `chat_template_kwargs.enable_thinking` | No verified knob; ignored | No verified knob; ignored |
-| `Qwen/Qwen3.6-27B-TEE` | Custom route: `chat_template_kwargs.enable_thinking`; OpenRouter route: `reasoning.enabled` / `reasoning.effort="none"` | OpenRouter route: `reasoning.effort`; custom route: no verified knob | OpenRouter route: `reasoning.max_tokens`; custom route: no verified knob |
-| `google/gemma-4-31B-turbo-TEE` | Supported via `chat_template_kwargs.enable_thinking` when routed through the custom OpenAI-compatible Gemma endpoint | No verified knob; ignored | No verified knob; ignored |
+| Provider | Model | `enabled=True` / `enabled=False` | `effort` | `budget` |
+|----------|-------|----------------------------------|----------|----------|
+| `openrouter` | `openai/gpt-oss-20b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
+| `openrouter` | `openai/gpt-oss-120b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
+| `openrouter` | `deepseek/deepseek-v3.2`, `z-ai/glm-5`, `qwen/qwen3.6-27b`, `google/gemma-4-31b-it` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
+| `chutes` | `deepseek-ai/DeepSeek-V3.2-TEE` | Supported via `chat_template_kwargs.thinking` | No verified knob; ignored | No verified knob; ignored |
+| `chutes` | `zai-org/GLM-5-TEE` | Supported via `chat_template_kwargs.enable_thinking` | No verified knob; ignored | No verified knob; ignored |
+| `chutes` | `Qwen/Qwen3.6-27B-TEE`, `google/gemma-4-31B-turbo-TEE` | Supported through internal route controls when the selected backend supports them | No verified Chutes knob; ignored | No verified Chutes knob; ignored |
 
 ```python
 from harnyx_miner_sdk.api import llm_chat
 
 response = await llm_chat(
+    provider="chutes",
     model="deepseek-ai/DeepSeek-V3.2-TEE",
     messages=[{"role": "user", "content": "Solve 17 * 23. Return only the answer."}],
     temperature=0.0,
@@ -264,6 +264,7 @@ To explicitly disable thinking where the provider/model supports a disable contr
 
 ```python
 response = await llm_chat(
+    provider="chutes",
     model="zai-org/GLM-5-TEE",
     messages=[{"role": "user", "content": "Reply with only ok."}],
     temperature=0.0,
@@ -271,7 +272,7 @@ response = await llm_chat(
 )
 ```
 
-`effort` (`"low"`, `"medium"`, `"high"`) and `budget` are supported for OpenRouter-backed models through OpenRouter reasoning controls. They cannot be sent together, and invalid scalar values are rejected; for example, `"false"` is not accepted as a boolean. Thinking controls are best effort across providers: if the selected model/provider has no verified control, the request still runs and unsupported hints are ignored rather than translated into guessed provider fields.
+`effort` (`"low"`, `"medium"`, `"high"`) and `budget` are supported when the selected provider/model uses OpenRouter reasoning controls. They cannot be sent together, and invalid scalar values are rejected; for example, `"false"` is not accepted as a boolean. Thinking controls are best effort across providers: if the selected model/provider has no verified control, the request still runs and unsupported hints are ignored rather than translated into guessed provider fields.
 
 Core subnet-facing tools today:
 - `search_web`: web search results; pass `timeout=<seconds>` to bound the full search call
@@ -465,7 +466,7 @@ If your script fails during preload because of your own code, or violates the `q
 
 Tool calls can fail transiently (timeouts / upstream errors). Treat them like external APIs: catch tool errors and still return a valid `Response` so you don’t crash the whole evaluation run.
 
-For slow tools, pass a positive finite timeout such as `await search_web(query.text, num=5, timeout=10.0)`, `await fetch_page(url, timeout=10.0)`, or `await llm_chat(..., timeout=20.0)`, and catch the tool error so a single slow call does not consume the whole evaluation run.
+For slow tools, pass a positive finite timeout such as `await search_web(query.text, provider="parallel", num=5, timeout=10.0)`, `await fetch_page(url, provider="parallel", timeout=10.0)`, or `await llm_chat(provider="chutes", ..., timeout=20.0)`, and catch the tool error so a single slow call does not consume the whole evaluation run.
 
 Validator-side provider attribution is now aggregate and batch-scoped. One failed
 `search_web` / `search_ai` / `fetch_page` / `llm_chat` call does not by itself
@@ -477,7 +478,7 @@ threshold in one batch:
 
 ```python
 try:
-    search = await search_web(query.text, num=5)
+    search = await search_web(query.text, provider="parallel", num=5)
 except Exception:
     search = None
 

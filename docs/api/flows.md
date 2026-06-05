@@ -40,7 +40,7 @@ These flows are the subnet’s core evaluation path.
 | Overview | |
 |---|---|
 | **What’s happening** | Miner manages platform-stored config for a signing hotkey. |
-| **Execution status** | Stored provider credentials are not used by active miner-task batch execution until a later release enables provider-access execution. |
+| **Execution status** | Stored provider credentials are used by active miner-task batch execution through scoped platform tool proxy calls. Raw provider API keys are never returned to validators or sandboxes. |
 | **Actors** | Miner ↔ Platform |
 | **Auth** | `Authorization: Bittensor ss58="...",sig="..."` |
 | **Happy path** | `GET`, `PUT`, or `DELETE /v1/miner-config` returns retry count and redacted provider status. |

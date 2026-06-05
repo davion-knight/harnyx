@@ -148,7 +148,7 @@ async def test_search_web_helper_invokes_tool_proxy() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_web(("harnyx", "subnet"), num=3)
+            result = await search_web(("harnyx", "subnet"), provider="parallel", num=3)
     finally:
         await proxy.aclose()
 
@@ -157,7 +157,7 @@ async def test_search_web_helper_invokes_tool_proxy() -> None:
     assert result.results[0].url == "https://example.com"
     payload = captured["payload"]
     assert payload["tool"] == "search_web"
-    assert payload["kwargs"] == {"search_queries": ["harnyx", "subnet"], "num": 3}
+    assert payload["kwargs"] == {"search_queries": ["harnyx", "subnet"], "provider": "parallel", "num": 3}
 
 
 async def test_search_web_helper_normalizes_plain_string_query() -> None:
@@ -189,14 +189,14 @@ async def test_search_web_helper_normalizes_plain_string_query() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_web("harnyx subnet", num=3)
+            result = await search_web("harnyx subnet", provider="parallel", num=3)
     finally:
         await proxy.aclose()
 
     assert result.receipt_id == "r2"
     payload = captured["payload"]
     assert payload["tool"] == "search_web"
-    assert payload["kwargs"] == {"search_queries": ["harnyx subnet"], "num": 3}
+    assert payload["kwargs"] == {"search_queries": ["harnyx subnet"], "provider": "parallel", "num": 3}
 
 
 async def test_search_ai_helper_invokes_tool_proxy() -> None:
@@ -237,7 +237,7 @@ async def test_search_ai_helper_invokes_tool_proxy() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_ai("harnyx subnet", count=10)
+            result = await search_ai("harnyx subnet", provider="parallel", count=10)
     finally:
         await proxy.aclose()
 
@@ -248,12 +248,13 @@ async def test_search_ai_helper_invokes_tool_proxy() -> None:
     payload = captured["payload"]
     assert payload["tool"] == "search_ai"
     assert payload["kwargs"]["prompt"] == "harnyx subnet"
+    assert payload["kwargs"]["provider"] == "parallel"
     assert payload["kwargs"]["count"] == 10
 
 
 async def test_search_ai_helper_rejects_count_below_provider_minimum() -> None:
     with pytest.raises(ValidationError) as excinfo:
-        await search_ai("harnyx subnet", count=3)
+        await search_ai("harnyx subnet", provider="parallel", count=3)
 
     assert any(
         err.get("type") == "greater_than_equal" and err.get("loc") == ("count",) and err.get("ctx") == {"ge": 10}
@@ -315,6 +316,7 @@ async def test_llm_chat_helper_invokes_tool_proxy() -> None:
     try:
         with bind_tool_invoker(proxy):
             result = await llm_chat(
+                provider="chutes",
                 messages=[{"role": "user", "content": "hi"}],
                 model="demo-model",
                 temperature=0.2,
@@ -331,6 +333,7 @@ async def test_llm_chat_helper_invokes_tool_proxy() -> None:
     assert result.results[0].raw == "hi"
     payload = captured["payload"]
     assert payload["tool"] == "llm_chat"
+    assert payload["kwargs"]["provider"] == "chutes"
     assert payload["kwargs"]["model"] == "demo-model"
     assert payload["kwargs"]["messages"] == [{"role": "user", "content": "hi"}]
     assert payload["kwargs"]["temperature"] == 0.2
@@ -351,6 +354,7 @@ async def test_llm_chat_helper_rejects_thinking_effort_and_budget() -> None:
         with bind_tool_invoker(proxy):
             with pytest.raises(ValidationError):
                 await llm_chat(
+                    provider="chutes",
                     messages=[{"role": "user", "content": "hi"}],
                     model="demo-model",
                     thinking={"enabled": True, "effort": "high", "budget": 1024},
@@ -373,6 +377,7 @@ async def test_llm_chat_helper_rejects_coerced_thinking_scalars() -> None:
         with bind_tool_invoker(proxy):
             with pytest.raises(ValidationError):
                 await llm_chat(
+                    provider="chutes",
                     messages=[{"role": "user", "content": "hi"}],
                     model="demo-model",
                     thinking={"enabled": "false", "budget": True},

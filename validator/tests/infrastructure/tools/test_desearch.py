@@ -41,7 +41,7 @@ async def test_desearch_client_posts_payload() -> None:
         client=client,
     )
 
-    request = SearchWebSearchRequest(search_queries=("harnyx", "subnet"), num=5)
+    request = SearchWebSearchRequest(provider="desearch", search_queries=("harnyx", "subnet"), num=5)
     result = await adapter.search_links_web(request)
 
     assert result.data == []
@@ -60,7 +60,7 @@ async def test_desearch_client_preserves_single_search_term() -> None:
         client=client,
     )
 
-    request = SearchWebSearchRequest(search_queries=("United States",), num=5)
+    request = SearchWebSearchRequest(provider="desearch", search_queries=("United States",), num=5)
     result = await adapter.search_links_web(request)
 
     assert result.data == []
@@ -80,7 +80,9 @@ async def test_desearch_client_raises_on_error_status() -> None:
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="test-key", client=client)
 
     with pytest.raises(RuntimeError):
-        await adapter.search_links_web(SearchWebSearchRequest(search_queries=("harnyx", "subnet")))
+        await adapter.search_links_web(
+            SearchWebSearchRequest(provider="desearch", search_queries=("harnyx", "subnet"))
+        )
 
 
 async def test_desearch_client_twitter_search() -> None:
@@ -189,7 +191,9 @@ async def test_desearch_client_search_ai_clamps_count_and_preserves_retry_metada
     )
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
-    response = await adapter.search_ai(SearchAiSearchRequest(prompt="harnyx subnet", count=10))
+    response = await adapter.search_ai(
+        SearchAiSearchRequest(provider="desearch", prompt="harnyx subnet", count=10)
+    )
 
     assert [item.model_dump(exclude_none=True) for item in response.data] == [
         {
@@ -226,7 +230,7 @@ async def test_desearch_client_search_ai_accepts_summary_and_results_shape() -> 
     )
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
-    response = await adapter.search_ai(SearchAiSearchRequest(prompt="hamlet", count=10))
+    response = await adapter.search_ai(SearchAiSearchRequest(provider="desearch", prompt="hamlet", count=10))
 
     assert [item.model_dump(exclude_none=True) for item in response.data] == [
         {
@@ -262,7 +266,7 @@ async def test_desearch_client_search_ai_accepts_sdk_search_results_shape() -> N
     )
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
-    response = await adapter.search_ai(SearchAiSearchRequest(prompt="hamlet", count=10))
+    response = await adapter.search_ai(SearchAiSearchRequest(provider="desearch", prompt="hamlet", count=10))
 
     assert [item.model_dump(exclude_none=True) for item in response.data] == [
         {
@@ -288,7 +292,7 @@ async def test_desearch_client_search_ai_summary_only_shape_returns_empty_result
     )
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
-    response = await adapter.search_ai(SearchAiSearchRequest(prompt="hamlet", count=10))
+    response = await adapter.search_ai(SearchAiSearchRequest(provider="desearch", prompt="hamlet", count=10))
 
     assert response.data == []
     assert response.attempts == 1
@@ -309,7 +313,7 @@ async def test_desearch_client_fetch_page_text() -> None:
     )
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
-    response = await adapter.fetch_page(FetchPageRequest(url="https://example.com"))
+    response = await adapter.fetch_page(FetchPageRequest(provider="desearch", url="https://example.com"))
 
     assert response.data[0].url == "https://example.com"
     assert response.data[0].content == "example page content"
@@ -330,7 +334,7 @@ async def test_desearch_client_fetch_page_raises_on_error_status() -> None:
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
     with pytest.raises(RuntimeError):
-        await adapter.fetch_page(FetchPageRequest(url="https://example.com"))
+        await adapter.fetch_page(FetchPageRequest(provider="desearch", url="https://example.com"))
 
 
 async def test_desearch_client_fetch_page_rejects_blank_text() -> None:
@@ -344,4 +348,4 @@ async def test_desearch_client_fetch_page_rejects_blank_text() -> None:
     adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
 
     with pytest.raises(ValueError):
-        await adapter.fetch_page(FetchPageRequest(url="https://example.com"))
+        await adapter.fetch_page(FetchPageRequest(provider="desearch", url="https://example.com"))

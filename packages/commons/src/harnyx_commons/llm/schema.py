@@ -39,7 +39,6 @@ ReasoningEffort = Literal["low", "medium", "high"]
 class AbstractLlmRequest(ToolLlmRequest, ABC):
     """Base class for all explicit-provider LLM requests (non-instantiable)."""
 
-    provider: str = ""
     grounded: bool = False
     output_mode: str = "text"
     output_schema: type[BaseModel] | None = None

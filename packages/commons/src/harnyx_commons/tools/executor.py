@@ -25,9 +25,8 @@ from harnyx_commons.domain.tool_call import (
 )
 from harnyx_commons.errors import BudgetExceededError, ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
-from harnyx_commons.llm.pricing import price_llm, price_search
+from harnyx_commons.llm.pricing import price_miner_llm, price_search
 from harnyx_commons.llm.schema import LlmResponse
-from harnyx_commons.llm.tool_models import ToolModelName, parse_tool_model
 from harnyx_commons.tools.dto import (
     ToolBudgetSnapshot,
     ToolInvocationRequest,
@@ -48,6 +47,7 @@ class ToolInvoker(Protocol):
         *,
         args: Sequence[JsonValue],
         kwargs: Mapping[str, JsonValue],
+        context: ToolInvocationContext | None = None,
     ) -> object:
         """Call the tool and return its response payload."""
 
@@ -89,6 +89,16 @@ class ToolInvocationOutput:
     execution: ToolExecutionFacts | None = None
     actual_cost_usd: float | None = None
     actual_cost_provider: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInvocationContext:
+    """Receipt/session metadata available to tool invoker adapters."""
+
+    receipt_id: str
+    session_id: UUID
+    active_attempt: int
+    uid: int
 
 
 class ToolExecutor:
@@ -177,17 +187,20 @@ class ToolExecutor:
         self,
         request: ToolInvocationRequest,
     ) -> JsonObject:
-        return (await self._invoke_tool_output_async(request)).public_payload
+        return (await self._invoke_tool_output_async(request, context=None)).public_payload
 
     async def _invoke_tool_output_async(
         self,
         request: ToolInvocationRequest,
+        *,
+        context: ToolInvocationContext | None,
     ) -> ToolInvocationOutput:
         return _normalize_invocation_output(
             await self._tool_invoker.invoke(
                 request.tool,
                 args=request.args,
                 kwargs=request.kwargs,
+                context=context,
             )
         )
 
@@ -254,6 +267,12 @@ class ToolExecutor:
         self._receipts.start_pending_receipt(
             started_call=started_call,
         )
+        invocation_context = ToolInvocationContext(
+            receipt_id=receipt_id,
+            session_id=session.session_id,
+            active_attempt=session.active_attempt,
+            uid=session.uid,
+        )
         try:
             result = await self._execute_pending_receipt_async(
                 session,
@@ -262,6 +281,7 @@ class ToolExecutor:
                 started_at=started_at,
                 debug_call_id=debug_call_id,
                 request_payload=request_payload,
+                invocation_context=invocation_context,
             )
         except asyncio.CancelledError as exc:
             self._try_materialize_failed_pending_receipt(
@@ -290,8 +310,9 @@ class ToolExecutor:
         started_at: datetime,
         debug_call_id: str,
         request_payload: JsonValue | None,
+        invocation_context: ToolInvocationContext,
     ) -> _ExecutionResult:
-        invocation_output = await self._invoke_tool_output_async(request)
+        invocation_output = await self._invoke_tool_output_async(request, context=invocation_context)
         finished_at = self._clock()
         results, result_policy = self._build_results(request, invocation_output.public_payload)
         llm_tokens, usage_details, call_cost = self._extract_usage(
@@ -457,6 +478,7 @@ class ToolExecutor:
                 "event": "tool_call_error",
                 "error": str(exc),
                 "error_type": exc.__class__.__name__,
+                **_platform_tool_proxy_failure_metadata(exc),
             },
         )
 
@@ -537,6 +559,18 @@ def _failed_receipt_error_extra(exc: BaseException) -> dict[str, str]:
     if exc.__cause__ is not None:
         extra["error_cause_type"] = exc.__cause__.__class__.__name__
         extra["error_cause_message"] = error_message
+    extra.update(_platform_tool_proxy_failure_metadata(exc))
+    return extra
+
+
+def _platform_tool_proxy_failure_metadata(exc: BaseException) -> dict[str, str]:
+    extra: dict[str, str] = {}
+    error_code = getattr(exc, "error_code", None)
+    if isinstance(error_code, str) and error_code:
+        extra["platform_tool_proxy_error_code"] = error_code
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        extra["platform_tool_proxy_status_code"] = str(status_code)
     return extra
 
 
@@ -704,8 +738,9 @@ def _extract_llm_usage(
         raise ValueError(f"expected llm tool request, got {request.tool!r}")
 
     parsed_payload = _parse_llm_usage_payload(payload)
-    provider = "chutes"
-    model = _extract_llm_model(tool_payload_for_invocation(request))
+    request_payload = tool_payload_for_invocation(request)
+    provider = _extract_llm_provider(request_payload)
+    model = _extract_llm_model(request_payload)
 
     usage_obj = parsed_payload.llm_response.usage
     if usage_obj is None:
@@ -737,8 +772,15 @@ def _extract_llm_usage(
         total_tokens=resolved_total,
         reasoning_tokens=reasoning,
     )
-    call_cost = price_llm(model, usage_obj)
+    call_cost = price_miner_llm(provider, model, usage_obj)
     return resolved_total, usage_details, call_cost
+
+
+def _extract_llm_provider(payload: Mapping[str, JsonValue]) -> str:
+    provider = payload.get("provider")
+    if isinstance(provider, str) and provider.strip():
+        return provider.strip()
+    return "chutes"
 
 
 def _resolve_llm_total_tokens(
@@ -758,12 +800,13 @@ class _LlmUsagePayload:
     payload_mapping: dict[str, object]
     llm_response: LlmResponse
 
+
 def _extract_llm_model(
     request_payload: Mapping[str, JsonValue],
-) -> ToolModelName:
+) -> str:
     request_model = request_payload.get("model")
     if isinstance(request_model, str) and request_model.strip():
-        return parse_tool_model(request_model)
+        return request_model.strip()
 
     raise ValueError("llm tool request must include a 'model' payload value")
 
@@ -783,6 +826,8 @@ SENSITIVE_KEY_SUBSTRINGS = (
     "auth",
     "password",
 )
+
+
 def _debug_tool_event(event: str, data_factory: Callable[[], dict[str, JsonValue]]) -> None:
     if not tool_logger.isEnabledFor(logging.DEBUG):
         return

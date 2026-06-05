@@ -389,6 +389,7 @@ async def test_tool_invocation_clients_route_chutes_selected_openrouter_model_to
     await clients.tool_llm_provider.invoke(_openrouter_tool_request(model=model))
 
     assert registry.requests_by_provider["openrouter"][0].provider == "openrouter"
+    assert registry.requests_by_provider["openrouter"][0].model == model
 
 
 @pytest.mark.parametrize(

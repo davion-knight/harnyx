@@ -19,6 +19,7 @@ from harnyx_commons.sandbox.options import SandboxOptions
 from harnyx_commons.sandbox.state import DEFAULT_STATE_DIR, resolve_state_mount_source
 from harnyx_validator.application.dto.evaluation import MinerTaskBatchSpec, ScriptArtifactSpec
 from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
 from harnyx_validator.application.ports.evaluation_record import EvaluationRecordPort
 from harnyx_validator.application.ports.progress import ProgressRecorder
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
@@ -83,6 +84,7 @@ class BatchExecutionPlanner:
         progress: ProgressRecorder,
         config: EvaluationBatchConfig,
         activity: BatchActivityTracker | None = None,
+        platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
     ) -> None:
         self._subtensor = subtensor_client
         self._sandbox_manager = sandbox_manager
@@ -95,6 +97,7 @@ class BatchExecutionPlanner:
         self._agent_resolver = agent_resolver
         self._progress = progress
         self._activity = activity
+        self._platform_tool_proxy_scopes = platform_tool_proxy_scopes
         self._config = config
 
     def build_run_context(self, batch: MinerTaskBatchSpec) -> RunContext:
@@ -143,6 +146,7 @@ class BatchExecutionPlanner:
             ),
             progress=self._progress,
             activity=self._activity,
+            platform_tool_proxy_scopes=self._platform_tool_proxy_scopes,
         )
 
     def _build_sandbox_options_factory(

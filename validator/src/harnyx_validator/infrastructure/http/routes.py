@@ -31,6 +31,8 @@ from harnyx_validator.application.dto.evaluation import (
     MinerTaskRunSubmission,
     TokenUsageSummary,
 )
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
+from harnyx_validator.application.ports.platform import PlatformToolProxyPlatformPort
 from harnyx_validator.application.ports.progress import (
     ProviderFailureEvidence,
     RunProgressPage,
@@ -88,6 +90,8 @@ class ValidatorControlDeps:
     validator_hotkey: StatusSigner
     resource_usage_provider: ResourceUsageProvider
     batch_activity: BatchActivityTracker
+    platform_tool_proxy_platform: PlatformToolProxyPlatformPort | None = None
+    platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None
     similarity_judge: SimilarityJudgePort | None = None
 
 

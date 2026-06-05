@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -16,7 +17,9 @@ from harnyx_commons.config.platform_api import PlatformApiSettings
 from harnyx_commons.config.sandbox import SandboxSettings
 from harnyx_commons.config.subtensor import SubtensorSettings
 from harnyx_commons.config.vertex import VertexSettings
-from harnyx_commons.errors import ConcurrencyLimitError
+from harnyx_commons.domain.session import Session, SessionStatus, SessionUsage
+from harnyx_commons.domain.tool_call import ToolCallOutcome
+from harnyx_commons.errors import BudgetExceededError, ConcurrencyLimitError, ToolProviderError
 from harnyx_commons.llm.routing import ResolvedLlmRoute
 from harnyx_commons.llm.schema import (
     LlmChoice,
@@ -30,9 +33,17 @@ from harnyx_commons.llm.schema import (
 from harnyx_commons.tools import invocation_clients
 from harnyx_commons.tools.dto import ToolInvocationRequest
 from harnyx_commons.tools.invocation_clients import build_web_search_provider
+from harnyx_commons.tools.types import ToolName
+from harnyx_validator.application.ports.platform import PlatformToolProxyGrant
+from harnyx_validator.infrastructure.tools.platform_client import (
+    PlatformToolProxyBudgetExceededError,
+    PlatformToolProxyInvocationError,
+    PlatformToolProxyProviderError,
+)
 from harnyx_validator.runtime import bootstrap
 from harnyx_validator.runtime.bootstrap import (
     _build_llm_clients,
+    _build_tooling,
     _create_scoring_service,
     _create_similarity_judge,
     close_runtime_resources,
@@ -40,7 +51,7 @@ from harnyx_validator.runtime.bootstrap import (
 from harnyx_validator.runtime.settings import Settings
 
 DEFAULT_LIMIT_LLM_MODEL = "openai/gpt-oss-20b"
-DEEPSEEK_V32_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
+TEST_SESSION_TOKEN = "validator-session-token"  # noqa: S105
 
 
 class _FakeLlmProvider:
@@ -83,6 +94,89 @@ class _FakeLlmRegistry:
             provider = _FakeLlmProvider()
             self._providers[name] = provider
         return provider
+
+
+class _ProviderFailingPlatformToolProxyClient:
+    def __init__(self) -> None:
+        self.grants = 0
+        self.calls: list[dict[str, object]] = []
+
+    async def create_platform_tool_proxy_grant(
+        self,
+        *,
+        batch_id,
+        artifact_id,
+        task_id,
+        validator_session_id,
+        attempt_number,
+    ):  # type: ignore[no-untyped-def]
+        _ = batch_id, artifact_id, task_id, validator_session_id, attempt_number
+        self.grants += 1
+        return PlatformToolProxyGrant(
+            token="platform-tool-proxy-token",  # noqa: S106 - fixed test-only proxy token
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+    async def execute_platform_tool_proxy_tool(
+        self,
+        **kwargs: object,
+    ) -> object:
+        self.calls.append(kwargs)
+        raise PlatformToolProxyProviderError(status_code=400, message="provider rejected")
+
+
+class _ProxyPolicyFailingPlatformToolProxyClient(_ProviderFailingPlatformToolProxyClient):
+    async def execute_platform_tool_proxy_tool(
+        self,
+        **kwargs: object,
+    ) -> object:
+        self.calls.append(kwargs)
+        raise PlatformToolProxyInvocationError(
+            status_code=400,
+            error_code="miner_credential_missing",
+            message="miner provider credential was not found",
+        )
+
+
+class _BudgetFailingPlatformToolProxyClient(_ProviderFailingPlatformToolProxyClient):
+    async def execute_platform_tool_proxy_tool(
+        self,
+        **kwargs: object,
+    ) -> object:
+        self.calls.append(kwargs)
+        raise PlatformToolProxyBudgetExceededError(status_code=400, message="platform tool proxy budget exhausted")
+
+
+def _settings_for_tooling(search_provider: str = "desearch") -> Settings:
+    return Settings.model_construct(
+        llm=LlmSettings.model_construct(
+            search_provider=search_provider,
+            tool_llm_provider="chutes",
+        )
+    )
+
+
+def _register_proxy_session(state: bootstrap.InMemoryState, *, batch_id, session_id, artifact_id, task_id) -> None:
+    issued_at = datetime.now(UTC)
+    session = Session(
+        session_id=session_id,
+        uid=7,
+        task_id=task_id,
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(hours=1),
+        budget_usd=1.0,
+        usage=SessionUsage(),
+        status=SessionStatus.ACTIVE,
+    )
+    state.session_registry.create(session)
+    state.token_registry.register(session_id, TEST_SESSION_TOKEN)
+    state.progress_tracker.register_task_session(batch_id=batch_id, session_id=session_id)
+    state.platform_tool_proxy_scopes.register_session(
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
 
 
 def test_llm_settings_default_scoring_timeout_is_300_seconds() -> None:
@@ -249,6 +343,7 @@ def test_build_llm_clients_requires_search_provider() -> None:
     with pytest.raises(RuntimeError, match="SEARCH_PROVIDER must be configured"):
         _build_llm_clients(settings)
 
+
 @pytest.mark.anyio("asyncio")
 async def test_build_llm_clients_routes_gemma_tool_model_to_custom_endpoint(
     monkeypatch: pytest.MonkeyPatch,
@@ -265,6 +360,7 @@ async def test_build_llm_clients_routes_gemma_tool_model_to_custom_endpoint(
     assert registry.requests_by_provider["custom-openai-compatible:gemma4-cloud-run-turbo"][0].provider == (
         "custom-openai-compatible:gemma4-cloud-run-turbo"
     )
+
 
 def test_build_llm_clients_uses_scoring_model_override_for_route_resolution(
     monkeypatch: pytest.MonkeyPatch,
@@ -305,63 +401,318 @@ def test_build_llm_clients_uses_scoring_model_override_for_route_resolution(
     )
 
 
-def test_build_state_uses_separate_tool_concurrency_lanes(tmp_path: Path) -> None:
+def test_build_state_uses_single_tool_concurrency_cap(tmp_path: Path) -> None:
     state = bootstrap._build_state(Settings(), progress_storage_root=tmp_path / "run-progress")
     session_id = uuid4()
     token = "token"  # noqa: S105
-    llm_invocations = [
+    tools: tuple[ToolName, ...] = ("search_web", "search_ai", "fetch_page", "tooling_info", "test_tool", "llm_chat")
+    held = [
         ToolInvocationRequest(
             session_id=session_id,
             token=token,
-            tool="llm_chat",
-            kwargs={"model": DEFAULT_LIMIT_LLM_MODEL},
-        ),
-        ToolInvocationRequest(
-            session_id=session_id,
-            token=token,
-            tool="llm_chat",
-            kwargs={"model": DEFAULT_LIMIT_LLM_MODEL},
-        ),
-    ]
-    search_invocations = [
-        ToolInvocationRequest(session_id=session_id, token=token, tool="search_web"),
-        ToolInvocationRequest(session_id=session_id, token=token, tool="search_ai"),
-        ToolInvocationRequest(session_id=session_id, token=token, tool="fetch_page"),
-        ToolInvocationRequest(session_id=session_id, token=token, tool="tooling_info"),
-        ToolInvocationRequest(session_id=session_id, token=token, tool="test_tool"),
-    ]
-
-    for invocation in llm_invocations:
-        state.tool_concurrency_limiter.acquire(invocation)
-    with pytest.raises(ConcurrencyLimitError):
-        state.tool_concurrency_limiter.acquire(
-            ToolInvocationRequest(
-                session_id=session_id,
-                token=token,
-                tool="llm_chat",
-                kwargs={"model": DEFAULT_LIMIT_LLM_MODEL},
-            )
+            tool=tools[index % len(tools)],
+            kwargs={"model": f"model-{index}"} if tools[index % len(tools)] == "llm_chat" else {},
         )
-    other_model_invocation = ToolInvocationRequest(
-        session_id=session_id,
-        token=token,
-        tool="llm_chat",
-        kwargs={"model": DEEPSEEK_V32_MODEL},
-    )
-    state.tool_concurrency_limiter.acquire(other_model_invocation)
+        for index in range(20)
+    ]
 
-    for invocation in search_invocations:
+    for invocation in held:
         state.tool_concurrency_limiter.acquire(invocation)
     with pytest.raises(ConcurrencyLimitError):
         state.tool_concurrency_limiter.acquire(
             ToolInvocationRequest(session_id=session_id, token=token, tool="search_web")
         )
 
-    for invocation in llm_invocations:
+    for invocation in held:
         state.tool_concurrency_limiter.release(invocation)
-    state.tool_concurrency_limiter.release(other_model_invocation)
-    for invocation in search_invocations:
-        state.tool_concurrency_limiter.release(invocation)
+
+    next_invocation = ToolInvocationRequest(session_id=session_id, token=token, tool="search_web")
+    state.tool_concurrency_limiter.acquire(next_invocation)
+    state.tool_concurrency_limiter.release(next_invocation)
+
+
+def test_build_tooling_uses_plain_executor_with_platform_tool_proxy_client(tmp_path: Path) -> None:
+    state = bootstrap._build_state(_settings_for_tooling(), progress_storage_root=tmp_path / "run-progress")
+
+    tool_invoker, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling(),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=_ProviderFailingPlatformToolProxyClient(),
+    )
+
+    assert isinstance(tool_invoker, bootstrap.PlatformToolProxyProxyToolInvoker)
+    assert isinstance(tool_executor, bootstrap.ToolExecutor)
+    assert not isinstance(tool_executor, bootstrap._ProviderTrackingToolExecutor)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_proxy_enabled_tool_executor_keeps_provider_failure_miner_owned_without_provider_evidence(
+    tmp_path: Path,
+) -> None:
+    state = bootstrap._build_state(_settings_for_tooling(), progress_storage_root=tmp_path / "run-progress")
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    _register_proxy_session(
+        state,
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
+    platform = _ProviderFailingPlatformToolProxyClient()
+    _, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling(),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=platform,
+    )
+    request = ToolInvocationRequest(
+        session_id=session_id,
+        token=TEST_SESSION_TOKEN,
+        tool="search_web",
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+    )
+
+    with pytest.raises(ToolProviderError):
+        await tool_executor.execute(request)
+
+    assert len(platform.calls) == 1
+    receipts = tuple(state.receipt_log.for_session(session_id))
+    assert len(receipts) == 1
+    assert receipts[0].outcome is ToolCallOutcome.PROVIDER_ERROR
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["platform_tool_proxy_error_code"] == "provider_failed"
+    assert state.progress_tracker.consume_provider_failures(session_id) == ()
+    assert state.progress_tracker.provider_evidence(batch_id) == ()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_proxy_enabled_tool_executor_keeps_llm_provider_failure_miner_owned_without_provider_evidence(
+    tmp_path: Path,
+) -> None:
+    state = bootstrap._build_state(_settings_for_tooling(), progress_storage_root=tmp_path / "run-progress")
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    _register_proxy_session(
+        state,
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
+    platform = _ProviderFailingPlatformToolProxyClient()
+    _, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling(),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=platform,
+    )
+    request = ToolInvocationRequest(
+        session_id=session_id,
+        token=TEST_SESSION_TOKEN,
+        tool="llm_chat",
+        kwargs={
+            "provider": "openrouter",
+            "model": DEFAULT_LIMIT_LLM_MODEL,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    with pytest.raises(ToolProviderError):
+        await tool_executor.execute(request)
+
+    assert len(platform.calls) == 1
+    receipts = tuple(state.receipt_log.for_session(session_id))
+    assert len(receipts) == 1
+    assert receipts[0].outcome is ToolCallOutcome.PROVIDER_ERROR
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["platform_tool_proxy_error_code"] == "provider_failed"
+    assert state.progress_tracker.consume_provider_failures(session_id) == ()
+    assert state.progress_tracker.provider_evidence(batch_id) == ()
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize("invalid_provider", [123, "Parallel", " Parallel "])
+async def test_proxy_enabled_tool_executor_does_not_default_attribute_invalid_explicit_provider(
+    tmp_path: Path,
+    invalid_provider: object,
+) -> None:
+    state = bootstrap._build_state(_settings_for_tooling(), progress_storage_root=tmp_path / "run-progress")
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    _register_proxy_session(
+        state,
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
+    platform = _ProviderFailingPlatformToolProxyClient()
+    _, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling(),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=platform,
+    )
+    request = ToolInvocationRequest(
+        session_id=session_id,
+        token=TEST_SESSION_TOKEN,
+        tool="search_web",
+        kwargs={"provider": invalid_provider, "search_queries": ["harnyx"]},
+    )
+
+    with pytest.raises(ToolProviderError):
+        await tool_executor.execute(request)
+
+    assert len(platform.calls) == 1
+    assert state.progress_tracker.consume_provider_failures(session_id) == ()
+    assert state.progress_tracker.provider_evidence(batch_id) == ()
+    receipts = tuple(state.receipt_log.for_session(session_id))
+    assert len(receipts) == 1
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["platform_tool_proxy_error_code"] == "provider_failed"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_proxy_enabled_tool_executor_does_not_record_provider_failure_for_proxy_policy_error(
+    tmp_path: Path,
+) -> None:
+    state = bootstrap._build_state(_settings_for_tooling(), progress_storage_root=tmp_path / "run-progress")
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    _register_proxy_session(
+        state,
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
+    platform = _ProxyPolicyFailingPlatformToolProxyClient()
+    _, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling(),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=platform,
+    )
+    request = ToolInvocationRequest(
+        session_id=session_id,
+        token=TEST_SESSION_TOKEN,
+        tool="search_web",
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError):
+        await tool_executor.execute(request)
+
+    assert len(platform.calls) == 1
+    assert state.progress_tracker.consume_provider_failures(session_id) == ()
+    assert state.progress_tracker.provider_evidence(batch_id) == ()
+    receipts = tuple(state.receipt_log.for_session(session_id))
+    assert len(receipts) == 1
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["platform_tool_proxy_error_code"] == "miner_credential_missing"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_proxy_enabled_tool_executor_records_budget_exceeded_receipt_without_provider_evidence(
+    tmp_path: Path,
+) -> None:
+    state = bootstrap._build_state(_settings_for_tooling(), progress_storage_root=tmp_path / "run-progress")
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    _register_proxy_session(
+        state,
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
+    platform = _BudgetFailingPlatformToolProxyClient()
+    _, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling(),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=platform,
+    )
+    request = ToolInvocationRequest(
+        session_id=session_id,
+        token=TEST_SESSION_TOKEN,
+        tool="search_web",
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+    )
+
+    with pytest.raises(BudgetExceededError):
+        await tool_executor.execute(request)
+
+    assert len(platform.calls) == 1
+    receipts = tuple(state.receipt_log.for_session(session_id))
+    assert len(receipts) == 1
+    assert receipts[0].outcome is ToolCallOutcome.BUDGET_EXCEEDED
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["platform_tool_proxy_error_code"] == "budget_exhausted"
+    assert state.progress_tracker.consume_provider_failures(session_id) == ()
+    assert state.progress_tracker.provider_evidence(batch_id) == ()
+
+
+@pytest.mark.anyio("asyncio")
+async def test_proxy_enabled_tool_executor_keeps_no_provider_payload_failure_miner_owned_without_provider_evidence(
+    tmp_path: Path,
+) -> None:
+    state = bootstrap._build_state(_settings_for_tooling("desearch"), progress_storage_root=tmp_path / "run-progress")
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    _register_proxy_session(
+        state,
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+    )
+    platform = _ProviderFailingPlatformToolProxyClient()
+    _, tool_executor = _build_tooling(
+        state=state,
+        resolved=_settings_for_tooling("desearch"),
+        search_client=None,
+        tool_llm_provider=None,
+        platform_tool_proxy_platform_client=platform,
+    )
+    request = ToolInvocationRequest(
+        session_id=session_id,
+        token=TEST_SESSION_TOKEN,
+        tool="search_web",
+        kwargs={"search_queries": ["harnyx"]},
+    )
+
+    with pytest.raises(ToolProviderError):
+        await tool_executor.execute(request)
+
+    assert len(platform.calls) == 1
+    receipts = tuple(state.receipt_log.for_session(session_id))
+    assert len(receipts) == 1
+    assert receipts[0].outcome is ToolCallOutcome.PROVIDER_ERROR
+    assert receipts[0].details.extra is not None
+    assert receipts[0].details.extra["platform_tool_proxy_error_code"] == "provider_failed"
+    assert state.progress_tracker.consume_provider_failures(session_id) == ()
+    assert state.progress_tracker.provider_evidence(batch_id) == ()
 
 
 def test_build_state_prunes_stale_run_progress_dirs(tmp_path: Path) -> None:
@@ -394,7 +745,9 @@ def test_build_runtime_cleans_stale_sandbox_containers_on_startup(
 
     manager = FakeSandboxManager()
 
-    monkeypatch.setattr(bootstrap, "_build_external_clients", lambda _settings: (object(), object(), object()))
+    monkeypatch.setattr(
+        bootstrap, "_build_external_clients", lambda _settings: (object(), object(), object(), object())
+    )
     monkeypatch.setattr(
         bootstrap,
         "_build_llm_clients",
@@ -585,9 +938,7 @@ def test_build_llm_clients_allows_bedrock_scoring_route(
             parallel_max_concurrent=7,
             tool_llm_provider="chutes",
             scoring_llm_provider="vertex",
-            llm_model_provider_overrides_json=json.dumps(
-                {"scoring": {bootstrap._SCORING_LLM_MODEL: "bedrock"}}
-            ),
+            llm_model_provider_overrides_json=json.dumps({"scoring": {bootstrap._SCORING_LLM_MODEL: "bedrock"}}),
         ),
         vertex=VertexSettings.model_construct(
             gcp_project_id="project",

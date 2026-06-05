@@ -27,6 +27,7 @@ ToolModelThinkingField = Literal[
 ]
 ToolModelThinkingProvider = Literal["chutes", "vertex", "custom-openai-compatible"]
 MinerSelectedLlmProviderName = Literal["chutes", "openrouter"]
+MinerSelectedLlmModelName = str
 
 ALLOWED_TOOL_MODELS: tuple[ToolModelName, ...] = (
     "openai/gpt-oss-20b",
@@ -44,7 +45,7 @@ MINER_SELECTED_LLM_PROVIDERS: tuple[MinerSelectedLlmProviderName, ...] = (
 
 MINER_SELECTED_LLM_PROVIDER_MODELS: Mapping[
     MinerSelectedLlmProviderName,
-    tuple[ToolModelName, ...],
+    tuple[MinerSelectedLlmModelName, ...],
 ] = {
     "chutes": (
         "deepseek-ai/DeepSeek-V3.2-TEE",
@@ -55,23 +56,11 @@ MINER_SELECTED_LLM_PROVIDER_MODELS: Mapping[
     "openrouter": (
         "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
-        "deepseek-ai/DeepSeek-V3.2-TEE",
-        "zai-org/GLM-5-TEE",
-        "Qwen/Qwen3.6-27B-TEE",
-        "google/gemma-4-31B-turbo-TEE",
+        "deepseek/deepseek-v3.2",
+        "z-ai/glm-5",
+        "qwen/qwen3.6-27b",
+        "google/gemma-4-31b-it",
     ),
-}
-
-PROVIDER_NATIVE_TOOL_MODEL_ALIASES: Mapping[
-    MinerSelectedLlmProviderName,
-    Mapping[str, ToolModelName],
-] = {
-    "openrouter": {
-        "deepseek/deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2-TEE",
-        "z-ai/glm-5": "zai-org/GLM-5-TEE",
-        "qwen/qwen3.6-27b": "Qwen/Qwen3.6-27B-TEE",
-        "google/gemma-4-31b-it": "google/gemma-4-31B-turbo-TEE",
-    },
 }
 
 
@@ -91,7 +80,7 @@ class ToolModelThinkingCapability:
 @dataclass(frozen=True, slots=True)
 class MinerSelectedLlmProviderModel:
     provider: MinerSelectedLlmProviderName
-    model: ToolModelName
+    model: MinerSelectedLlmModelName
 
 
 def parse_tool_model(raw: str | None) -> ToolModelName:
@@ -116,36 +105,27 @@ def parse_miner_selected_llm_provider(raw: str | None) -> MinerSelectedLlmProvid
     return cast(MinerSelectedLlmProviderName, value)
 
 
-def provider_native_tool_model_aliases(
-    provider: MinerSelectedLlmProviderName,
-) -> Mapping[str, ToolModelName]:
-    return PROVIDER_NATIVE_TOOL_MODEL_ALIASES.get(provider, {})
-
-
-def resolve_miner_selected_llm_provider_model(
+def parse_miner_selected_llm_provider_model(
     *,
     provider: str | None,
     model: str | None,
 ) -> MinerSelectedLlmProviderModel:
     selected_provider = parse_miner_selected_llm_provider(provider)
-    native_aliases = provider_native_tool_model_aliases(selected_provider)
-    alias_key = model.strip().lower() if model is not None else ""
-    canonical_model = resolve_tool_model(model)
-    if canonical_model is None:
-        canonical_model = native_aliases.get(alias_key)
-    if canonical_model is None:
-        raise ValueError(f"model {model!r} is not allowed for validator tools")
-    if canonical_model not in MINER_SELECTED_LLM_PROVIDER_MODELS[selected_provider]:
+    if model is None:
+        raise ValueError("model must be provided for validator tools")
+    selected_model = model.strip()
+    if not selected_model:
+        raise ValueError("model must be provided for validator tools")
+    if selected_model not in MINER_SELECTED_LLM_PROVIDER_MODELS[selected_provider]:
         raise ValueError(
-            f"model {canonical_model!r} is not supported for miner-selected provider {selected_provider!r}"
+            f"model {selected_model!r} is not supported for miner-selected provider {selected_provider!r}"
         )
-    return MinerSelectedLlmProviderModel(provider=selected_provider, model=canonical_model)
+    return MinerSelectedLlmProviderModel(provider=selected_provider, model=selected_model)
 
 
-# Canonical thinking controls for miner llm_chat tool models. Model validity
-# lives in this contract, while each verified provider route keeps its own field
-# entry. Vertex MaaS serializers resolve native aliases back to canonical ids
-# before lookup.
+# Canonical thinking controls for internal llm_chat routes. Miner-selected
+# OpenRouter-native ids use OpenRouter reasoning controls directly in the
+# OpenRouter provider.
 TOOL_MODEL_THINKING_CAPABILITIES: Mapping[
     ToolModelName,
     Mapping[ToolModelThinkingProvider, ToolModelThinkingCapability],
@@ -212,18 +192,17 @@ __all__ = [
     "ALLOWED_TOOL_MODELS",
     "MINER_SELECTED_LLM_PROVIDERS",
     "MINER_SELECTED_LLM_PROVIDER_MODELS",
+    "MinerSelectedLlmModelName",
     "MinerSelectedLlmProviderModel",
     "MinerSelectedLlmProviderName",
-    "PROVIDER_NATIVE_TOOL_MODEL_ALIASES",
     "TOOL_MODEL_THINKING_CAPABILITIES",
     "ToolModelName",
     "ToolModelThinkingCapability",
     "ToolModelThinkingField",
     "ToolModelThinkingProvider",
     "parse_miner_selected_llm_provider",
+    "parse_miner_selected_llm_provider_model",
     "parse_tool_model",
-    "provider_native_tool_model_aliases",
-    "resolve_miner_selected_llm_provider_model",
     "resolve_tool_model",
     "tool_model_thinking_capability",
 ]

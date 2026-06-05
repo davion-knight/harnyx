@@ -22,7 +22,7 @@ from harnyx_commons.errors import SessionBudgetExhaustedError
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.tools.dto import ToolInvocationRequest
-from harnyx_commons.tools.executor import ToolExecutor
+from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext
 from harnyx_commons.tools.usage_tracker import UsageTracker
 from harnyx_validator.application.dto.evaluation import MinerTaskRunRequest
 from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
@@ -70,6 +70,7 @@ class EchoToolInvoker:
         *,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        context: ToolInvocationContext | None = None,
     ) -> dict[str, object]:
         self.calls.append((tool_name, args, kwargs))
         return {

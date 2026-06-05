@@ -82,6 +82,12 @@ class ScriptArtifactSpec(BaseModel):
     artifact_id: UUID
     content_hash: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
+    miner_hotkey_ss58: str | None = None
+    task_retry_count: int = Field(default=0, ge=0, le=3)
+
+    def require_platform_tool_proxy_scope(self) -> None:
+        if self.miner_hotkey_ss58 is None:
+            raise ValueError("script artifact is missing miner hotkey for platform tool proxy")
 
 
 class MinerTaskBatchSpec(BaseModel):

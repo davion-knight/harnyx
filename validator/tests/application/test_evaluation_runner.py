@@ -35,7 +35,7 @@ from harnyx_commons.domain.tool_call import (
 from harnyx_commons.domain.tool_usage import SearchToolUsageSummary, ToolUsageSummary
 from harnyx_commons.errors import SessionBudgetExhaustedError
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
-from harnyx_commons.llm.pricing import price_llm
+from harnyx_commons.llm.pricing import price_llm, price_miner_llm
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.llm.schema import LlmUsage
 from harnyx_commons.llm.tool_models import parse_tool_model
@@ -121,8 +121,11 @@ def _record_receipt(
     execution: ToolExecutionFacts | None = None,
     request_payload: dict[str, object] | None = None,
     active_attempt: int | None = 1,
+    extra: dict[str, str] | None = None,
 ) -> None:
-    extra = None if active_attempt is None else {"session_active_attempt": str(active_attempt)}
+    receipt_extra = {} if extra is None else dict(extra)
+    if active_attempt is not None:
+        receipt_extra["session_active_attempt"] = str(active_attempt)
     receipt_log.record(
         ToolCall(
             receipt_id=receipt_id,
@@ -138,7 +141,7 @@ def _record_receipt(
                 cost_usd=cost_usd,
                 response_payload=response_payload,
                 execution=execution,
-                extra=extra,
+                extra=receipt_extra or None,
             ),
         )
     )
@@ -424,11 +427,77 @@ def test_usage_summarizer_preserves_reasoning_tokens_in_llm_summary() -> None:
             reasoning_tokens=7,
         ),
     )
-    model_usage = total_tool_usage.llm.providers["deepseek-ai"][model]
+    model_usage = total_tool_usage.llm.providers["chutes"][model]
     assert total_tool_usage.llm.reasoning_tokens == 7
     assert model_usage.usage.reasoning_tokens == 7
     assert model_usage.cost == pytest.approx(expected_cost)
+
+
+def test_usage_summarizer_prices_openrouter_native_llm_summary() -> None:
+    model = "deepseek/deepseek-v3.2"
+    totals = LlmUsageTotals(
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+        call_count=1,
+    )
+    session = Session(
+        session_id=uuid4(),
+        uid=7,
+        task_id=uuid4(),
+        issued_at=datetime(2025, 10, 17, 12, tzinfo=UTC),
+        expires_at=datetime(2025, 10, 17, 13, tzinfo=UTC),
+        budget_usd=1.0,
+        usage=SessionUsage(
+            llm_usage_totals={
+                "openrouter": {
+                    model: totals,
+                },
+            },
+        ),
+    )
+
+    _, total_tool_usage = UsageSummarizer().summarize(session, ())
+
+    expected_cost = price_miner_llm(
+        "openrouter",
+        model,
+        LlmUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    model_usage = total_tool_usage.llm.providers["openrouter"][model]
+    assert total_tool_usage.llm.call_count == 1
     assert total_tool_usage.llm_cost == pytest.approx(expected_cost)
+    assert model_usage.cost == pytest.approx(expected_cost)
+
+
+def test_receipt_usage_uses_actual_llm_provider_from_platform_tool_proxy_receipt() -> None:
+    model = "openai/gpt-oss-120b"
+    receipt = ToolCall(
+        receipt_id="llm-openrouter",
+        session_id=uuid4(),
+        uid=7,
+        tool="llm_chat",
+        issued_at=datetime(2026, 5, 30, 12, tzinfo=UTC),
+        outcome=ToolCallOutcome.OK,
+        details=ToolCallDetails(
+            request_hash="llm-openrouter-req",
+            request_payload={"kwargs": {"provider": "openrouter", "model": model}},
+            response_hash="llm-openrouter-res",
+            response_payload={
+                "message": {"role": "assistant", "content": "ok"},
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            },
+            cost_usd=0.01,
+            actual_cost_usd=0.02,
+            actual_cost_provider="openrouter",
+        ),
+    )
+
+    usage = evaluation_runner_module._usage_from_receipts((receipt,))
+
+    assert set(usage.llm_usage_totals) == {"openrouter"}
+    assert usage.llm_usage_totals["openrouter"][model].total_tokens == 5
+    assert usage.cost_by_provider == {"openrouter": pytest.approx(0.01)}
 
 
 def _sandbox_invocation_error(
@@ -490,6 +559,39 @@ class _ExhaustingOrchestrator:
         raise SessionBudgetExhaustedError("session exhausted during entrypoint invocation")
 
 
+class _ExhaustingAfterPlatformToolProxyControlReceiptOrchestrator:
+    def __init__(
+        self,
+        *,
+        sessions: FakeSessionRegistry,
+        receipt_log: FakeReceiptLog,
+    ) -> None:
+        self._sessions = sessions
+        self._receipt_log = receipt_log
+
+    async def evaluate(self, request: MinerTaskRunRequest) -> None:
+        session = self._sessions.get(request.session_id)
+        assert session is not None
+        _record_receipt(
+            self._receipt_log,
+            session_id=request.session_id,
+            uid=request.uid,
+            receipt_id="platform-tool-proxy-control",
+            issued_at=datetime(2025, 10, 17, 12, 1, tzinfo=UTC),
+            cost_usd=0.0,
+            outcome=ToolCallOutcome.INTERNAL_ERROR,
+            active_attempt=session.active_attempt,
+            extra={
+                "platform_tool_proxy_error_code": "platform_tool_proxy_denied",
+                "platform_tool_proxy_status_code": "403",
+                "error_type": "PlatformToolProxyInvocationError",
+                "error_message": "platform tool proxy denied",
+            },
+        )
+        self._sessions.update(session.mark_exhausted())
+        raise SessionBudgetExhaustedError("session exhausted after proxy control failure")
+
+
 class _RetryThenSuccessOrchestrator:
     def __init__(
         self,
@@ -501,12 +603,14 @@ class _RetryThenSuccessOrchestrator:
         self._receipt_log = receipt_log
         self.calls = 0
         self.session_ids: list = []
+        self.active_attempts: list[int] = []
 
     async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
         self.calls += 1
         self.session_ids.append(request.session_id)
         session = self._sessions.get(request.session_id)
         assert session is not None
+        self.active_attempts.append(session.active_attempt)
         assert session.status is SessionStatus.ACTIVE
         _record_receipt(
             self._receipt_log,
@@ -611,12 +715,14 @@ class _AlwaysMinerTimeoutOrchestrator:
         self._detail_exception = detail_exception
         self.calls = 0
         self.session_ids: list = []
+        self.active_attempts: list[int] = []
 
     async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
         self.calls += 1
         self.session_ids.append(request.session_id)
         session = self._sessions.get(request.session_id)
         assert session is not None
+        self.active_attempts.append(session.active_attempt)
         if self._total_tokens is not None and self._elapsed_ms is not None:
             _record_receipt(
                 self._receipt_log,
@@ -827,6 +933,52 @@ class _ProviderBatchFailureOrchestrator:
         raise _provider_tool_failure_error()
 
 
+class _PlatformToolProxyReceiptOrchestrator:
+    def __init__(
+        self,
+        *,
+        sessions: FakeSessionRegistry,
+        receipt_log: FakeReceiptLog,
+        error_code: str,
+        caught_by_miner: bool,
+    ) -> None:
+        self._sessions = sessions
+        self._receipt_log = receipt_log
+        self._error_code = error_code
+        self._caught_by_miner = caught_by_miner
+        self.calls = 0
+
+    async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+        self.calls += 1
+        session = self._sessions.get(request.session_id)
+        assert session is not None
+        _record_receipt(
+            self._receipt_log,
+            session_id=request.session_id,
+            uid=request.uid,
+            receipt_id=f"platform-tool-proxy-{self.calls}",
+            issued_at=datetime(2025, 10, 17, 12, self.calls, tzinfo=UTC),
+            cost_usd=0.0,
+            outcome=ToolCallOutcome.INTERNAL_ERROR,
+            active_attempt=session.active_attempt,
+            extra={
+                "platform_tool_proxy_error_code": self._error_code,
+                "platform_tool_proxy_status_code": "400",
+                "error_type": "PlatformToolProxyInvocationError",
+                "error_message": f"{self._error_code} message",
+            },
+        )
+        if self._caught_by_miner:
+            return _successful_outcome(request)
+        raise _sandbox_invocation_error(
+            f"{self._error_code} message",
+            status_code=400,
+            detail_code="UnhandledException",
+            detail_exception="ToolInvocationError",
+            detail_error=f"{self._error_code} message",
+        )
+
+
 class _UnhandledMinerCrashOrchestrator:
     async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
         raise _sandbox_invocation_error(
@@ -995,6 +1147,58 @@ async def test_evaluation_runner_records_exhausted_submission(tmp_path: Path) ->
     assert evaluation_store.records == [submission]
 
 
+async def test_evaluation_runner_proxy_control_receipt_overrides_later_budget_exhaustion(
+    tmp_path: Path,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
+    evaluation_store = _RecordingEvaluationStore()
+    receipt_log = FakeReceiptLog()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=session_manager,
+        evaluation_records=evaluation_store,
+        receipt_log=receipt_log,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=_progress(tmp_path),
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="proxy control before budget exhaustion"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+    )
+    orchestrator = _ExhaustingAfterPlatformToolProxyControlReceiptOrchestrator(
+        sessions=session_registry,
+        receipt_log=receipt_log,
+    )
+
+    with pytest.raises(ValidatorBatchFailedError, match="platform tool proxy control failure") as exc_info:
+        await runner.evaluate_artifact_with_state(
+            batch_id=uuid4(),
+            artifact=artifact,
+            tasks=(task,),
+            orchestrator=cast(TaskRunOrchestrator, orchestrator),
+            validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+            timeout_observations_by_pair={},
+        )
+
+    assert exc_info.value.error_code == "unexpected_validator_failure"
+    assert exc_info.value.failure_detail.exception_type == "PlatformToolProxyInvocationError"
+    assert exc_info.value.failure_detail.error_message == (
+        "platform tool proxy control failure: platform_tool_proxy_denied"
+    )
+    assert evaluation_store.records == []
+
+
 async def test_evaluation_runner_retries_transient_invocation_with_same_session_and_accumulated_usage(
     tmp_path: Path,
 ) -> None:
@@ -1023,6 +1227,7 @@ async def test_evaluation_runner_retries_transient_invocation_with_same_session_
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=1,
     )
     orchestrator = _RetryThenSuccessOrchestrator(
         sessions=session_registry,
@@ -1120,6 +1325,7 @@ async def test_evaluation_runner_retries_scoring_timeout_within_same_session_bef
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=1,
     )
     orchestrator = _ScoringTimeoutThenSuccessOrchestrator(
         sessions=session_registry,
@@ -1140,7 +1346,7 @@ async def test_evaluation_runner_retries_scoring_timeout_within_same_session_bef
     assert evaluation_store.records == list(result.submissions)
 
 
-async def test_evaluation_runner_miner_timeout_without_successful_baseline_stays_unresolved_and_retries_later(
+async def test_evaluation_runner_miner_timeout_without_successful_baseline_terminalizes_without_requeue(
     tmp_path: Path,
 ) -> None:
     subtensor = FakeSubtensorClient()
@@ -1185,15 +1391,127 @@ async def test_evaluation_runner_miner_timeout_without_successful_baseline_stays
         timeout_observations_by_pair={},
     )
 
-    pair_key = (artifact.artifact_id, task.task_id)
     assert orchestrator.calls == 1
-    assert result.submissions == ()
-    assert result.unresolved_tasks == (task,)
-    assert len(result.timeout_observations_by_pair[pair_key]) == 1
-    # The runner only reports unresolved timeout evidence; scheduler owns retry timing.
-    assert evaluation_store.records == []
+    assert result.unresolved_tasks == ()
+    assert result.timeout_observations_by_pair == {}
+    assert len(result.submissions) == 1
+    assert result.submissions[0].run.details.error == EvaluationError(
+        code="timeout_miner_owned",
+        message=TERMINAL_TIMEOUT_ERROR_MESSAGE,
+    )
+    assert evaluation_store.records == list(result.submissions)
     assert session_registry.get(orchestrator.session_ids[0]) is None
     assert tuple(receipt_log.for_session(orchestrator.session_ids[0])) == ()
+
+
+async def test_evaluation_runner_timeout_unresolved_uses_configured_attempt_budget_same_session(
+    tmp_path: Path,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
+    evaluation_store = _RecordingEvaluationStore()
+    receipt_log = FakeReceiptLog()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=session_manager,
+        evaluation_records=evaluation_store,
+        receipt_log=receipt_log,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=_progress(tmp_path),
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="timeout retry count three"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+        task_retry_count=3,
+    )
+    orchestrator = _AlwaysMinerTimeoutOrchestrator(
+        sessions=session_registry,
+        receipt_log=receipt_log,
+    )
+
+    result = await runner.evaluate_artifact_with_state(
+        batch_id=uuid4(),
+        artifact=artifact,
+        tasks=(task,),
+        orchestrator=cast(TaskRunOrchestrator, orchestrator),
+        validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+        timeout_observations_by_pair={},
+    )
+
+    assert orchestrator.calls == 4
+    assert len(set(orchestrator.session_ids)) == 1
+    assert orchestrator.active_attempts == [1, 2, 3, 4]
+    assert result.unresolved_tasks == ()
+    assert len(result.submissions) == 1
+    assert result.submissions[0].run.details.error == EvaluationError(
+        code="timeout_miner_owned",
+        message=TERMINAL_TIMEOUT_ERROR_MESSAGE,
+    )
+    assert evaluation_store.records == list(result.submissions)
+
+
+async def test_evaluation_runner_prior_timeout_observations_fail_validator_without_new_execution(
+    tmp_path: Path,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
+    evaluation_store = _RecordingEvaluationStore()
+    receipt_log = FakeReceiptLog()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=session_manager,
+        evaluation_records=evaluation_store,
+        receipt_log=receipt_log,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=_progress(tmp_path),
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="stale timeout state"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+        task_retry_count=1,
+    )
+    orchestrator = _AlwaysMinerTimeoutOrchestrator(
+        sessions=session_registry,
+        receipt_log=receipt_log,
+    )
+
+    with pytest.raises(ValidatorBatchFailedError, match="unexpected prior timeout observations") as exc_info:
+        await runner.evaluate_artifact_with_state(
+            batch_id=uuid4(),
+            artifact=artifact,
+            tasks=(task,),
+            orchestrator=cast(TaskRunOrchestrator, orchestrator),
+            validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+            timeout_observations_by_pair={
+                (artifact.artifact_id, task.task_id): (_timeout_observation(),)
+            },
+        )
+
+    assert exc_info.value.error_code == "unexpected_validator_failure"
+    assert orchestrator.calls == 0
+    assert evaluation_store.records == []
+    assert tuple(receipt_log.values()) == ()
+    assert tuple(session_registry.values()) == ()
 
 
 async def test_evaluation_runner_records_unknown_inflight_timeout_tool_call_at_exhaustion(
@@ -1258,6 +1576,7 @@ async def test_evaluation_runner_records_unknown_inflight_timeout_tool_call_at_e
         ),
         validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
         prior_timeout_observations=(_timeout_observation(), _timeout_observation()),
+        attempt_budget_exhausted=True,
     )
 
     assert decision.kind is evaluation_runner_module.AttemptControlKind.SUBMISSION
@@ -1335,6 +1654,7 @@ async def test_evaluation_runner_carries_prior_unknown_inflight_timeout_tool_cal
         ),
         validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
         prior_timeout_observations=(prior_observation, _timeout_observation()),
+        attempt_budget_exhausted=True,
     )
 
     assert decision.kind is evaluation_runner_module.AttemptControlKind.SUBMISSION
@@ -1375,6 +1695,7 @@ async def test_evaluation_runner_fails_batch_after_scoring_timeout_retry_exhaust
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=1,
     )
     orchestrator = _AlwaysScoringTimeoutOrchestrator(
         sessions=session_registry,
@@ -1523,6 +1844,7 @@ async def test_evaluation_runner_records_miner_timeout_inconclusive_after_exhaus
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=2,
     )
     orchestrator = _AlwaysMinerTimeoutOrchestrator(
         sessions=session_registry,
@@ -1538,9 +1860,7 @@ async def test_evaluation_runner_records_miner_timeout_inconclusive_after_exhaus
             tasks=(task,),
             orchestrator=cast(TaskRunOrchestrator, orchestrator),
             validator_model_llm_baseline=_llm_baseline(60.0),
-            timeout_observations_by_pair={
-                (artifact.artifact_id, task.task_id): (_timeout_observation(), _timeout_observation())
-            },
+            timeout_observations_by_pair={},
         )
 
     exc = exc_info.value
@@ -1599,7 +1919,14 @@ async def test_evaluate_task_with_retry_merges_completed_artifact_baseline_befor
 
     async def resolve_timeout_attempt(**kwargs):
         seen_baselines.append(kwargs["validator_model_llm_baseline"])
-        return evaluation_runner_module._timeout_unresolved_decision(_timeout_observation())
+        return evaluation_runner_module._submission_decision(
+            _submission_for_task(
+                batch_id=kwargs["batch_id"],
+                validator_uid=41,
+                artifact=artifact,
+                task=task,
+            )
+        )
 
     runner._evaluate_task_attempt = evaluate_task_attempt  # type: ignore[method-assign]
     runner._resolve_timeout_attempt = resolve_timeout_attempt  # type: ignore[method-assign]
@@ -1614,7 +1941,7 @@ async def test_evaluate_task_with_retry_merges_completed_artifact_baseline_befor
         prior_timeout_observations=(),
     )
 
-    assert decision.kind is evaluation_runner_module.AttemptControlKind.TIMEOUT_UNRESOLVED
+    assert decision.kind is evaluation_runner_module.AttemptControlKind.SUBMISSION
     assert seen_baselines == [_llm_baseline(40.0)]
 
 
@@ -1714,9 +2041,7 @@ async def test_evaluation_runner_defaults_miner_timeout_to_owned_without_compara
         tasks=(task,),
         orchestrator=cast(TaskRunOrchestrator, orchestrator),
         validator_model_llm_baseline=_llm_baseline(60.0),
-        timeout_observations_by_pair={
-            (artifact.artifact_id, task.task_id): (_timeout_observation(), _timeout_observation())
-        },
+        timeout_observations_by_pair={},
     )
 
     assert result.unresolved_tasks == ()
@@ -1755,6 +2080,7 @@ async def test_evaluation_runner_uses_only_successful_current_session_llm_receip
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=2,
     )
     orchestrator = _MinerTimeoutWithNonQualifyingReceiptsOrchestrator(
         sessions=session_registry,
@@ -1767,9 +2093,7 @@ async def test_evaluation_runner_uses_only_successful_current_session_llm_receip
         tasks=(task,),
         orchestrator=cast(TaskRunOrchestrator, orchestrator),
         validator_model_llm_baseline=_llm_baseline(60.0),
-        timeout_observations_by_pair={
-            (artifact.artifact_id, task.task_id): (_timeout_observation(), _timeout_observation())
-        },
+        timeout_observations_by_pair={},
     )
 
     assert result.unresolved_tasks == ()
@@ -2032,6 +2356,7 @@ async def test_evaluation_runner_logs_session_summary_for_timeout_validator_batc
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=2,
     )
     batch_id = uuid4()
 
@@ -2050,9 +2375,7 @@ async def test_evaluation_runner_logs_session_summary_for_timeout_validator_batc
                 ),
             ),
             validator_model_llm_baseline=_llm_baseline(100.0),
-            timeout_observations_by_pair={
-                (artifact.artifact_id, task.task_id): (_timeout_observation(), _timeout_observation())
-            },
+            timeout_observations_by_pair={},
         )
 
     session_logs = [extra for message, extra in captured_logs if message == "miner-task session finished"]
@@ -2062,7 +2385,7 @@ async def test_evaluation_runner_logs_session_summary_for_timeout_validator_batc
     assert payload["artifact_id"] == str(artifact.artifact_id)
     assert payload["task_id"] == str(task.task_id)
     assert payload["uid"] == artifact.uid
-    assert payload["attempt_count"] == 1
+    assert payload["attempt_count"] == 3
     assert payload["session_ms"] >= 0.0
     assert payload["terminal_outcome"] == "validator_batch_failure"
     assert payload["error_code"] == "timeout_inconclusive"
@@ -2145,6 +2468,7 @@ async def test_evaluation_runner_records_budget_exhausted_when_retry_starts_near
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=1,
     )
     orchestrator = _RetryThenExhaustedOrchestrator(
         sessions=session_registry,
@@ -2228,6 +2552,124 @@ async def test_evaluation_runner_keeps_valid_response_when_provider_failure_stay
             "failure_reason": "http_402: subscription usage cap exceeded",
         },
     )
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "platform_tool_proxy_denied",
+        "platform_tool_proxy_grant_failed",
+        "platform_tool_proxy_execution_failed",
+        "platform_error",
+    ],
+)
+async def test_evaluation_runner_platform_proxy_control_categories_fail_validator(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
+    evaluation_store = _RecordingEvaluationStore()
+    receipt_log = FakeReceiptLog()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=session_manager,
+        evaluation_records=evaluation_store,
+        receipt_log=receipt_log,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=_progress(tmp_path),
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text=f"{error_code} caught"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    artifact = ScriptArtifactSpec(uid=7, artifact_id=uuid4(), content_hash="artifact-hash", size_bytes=128)
+    orchestrator = _PlatformToolProxyReceiptOrchestrator(
+        sessions=session_registry,
+        receipt_log=receipt_log,
+        error_code=error_code,
+        caught_by_miner=True,
+    )
+
+    with pytest.raises(ValidatorBatchFailedError, match="platform tool proxy control failure") as exc_info:
+        await runner.evaluate_artifact_with_state(
+            batch_id=uuid4(),
+            artifact=artifact,
+            tasks=(task,),
+            orchestrator=cast(TaskRunOrchestrator, orchestrator),
+            validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+            timeout_observations_by_pair={},
+        )
+
+    assert exc_info.value.error_code == "unexpected_validator_failure"
+    assert exc_info.value.failure_detail.exception_type == "PlatformToolProxyInvocationError"
+    assert orchestrator.calls == 1
+    assert evaluation_store.records == []
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "provider_failed",
+        "tool_timeout",
+        "budget_exhausted",
+        "concurrency_exhausted",
+        "miner_credential_missing",
+        "unsupported_provider",
+        "unsupported_model",
+        "invalid_request",
+        "duplicate_call",
+    ],
+)
+async def test_evaluation_runner_platform_proxy_miner_owned_categories_do_not_fail_validator(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
+    evaluation_store = _RecordingEvaluationStore()
+    receipt_log = FakeReceiptLog()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=session_manager,
+        evaluation_records=evaluation_store,
+        receipt_log=receipt_log,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=_progress(tmp_path),
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text=f"{error_code} caught"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    artifact = ScriptArtifactSpec(uid=7, artifact_id=uuid4(), content_hash="artifact-hash", size_bytes=128)
+    orchestrator = _PlatformToolProxyReceiptOrchestrator(
+        sessions=session_registry,
+        receipt_log=receipt_log,
+        error_code=error_code,
+        caught_by_miner=True,
+    )
+
+    result = await runner.evaluate_artifact_with_state(
+        batch_id=uuid4(),
+        artifact=artifact,
+        tasks=(task,),
+        orchestrator=cast(TaskRunOrchestrator, orchestrator),
+        validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+        timeout_observations_by_pair={},
+    )
+
+    assert result.unresolved_tasks == ()
+    assert len(result.submissions) == 1
+    assert result.submissions[0].run.details.error is None
+    assert evaluation_store.records == list(result.submissions)
 
 
 async def test_evaluation_runner_fails_batch_when_successful_fallback_crosses_provider_threshold(
@@ -2588,6 +3030,7 @@ async def test_evaluation_runner_does_not_let_stale_provider_marker_poison_later
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=1,
     )
     orchestrator = _ProviderFailureThenSandboxFailureOrchestrator(progress=progress)
 
@@ -2822,6 +3265,7 @@ async def test_evaluation_runner_fails_batch_after_first_conclusive_validator_ow
         artifact_id=uuid4(),
         content_hash="artifact-hash",
         size_bytes=128,
+        task_retry_count=1,
     )
 
     class _FailFastOrchestrator:

@@ -16,7 +16,6 @@ from harnyx_commons.domain.miner_task import (
 from harnyx_commons.domain.tool_call import IN_FLIGHT_LLM_UNKNOWN_EVIDENCE, ToolCall
 from harnyx_commons.domain.tool_usage import ToolUsageSummary
 from harnyx_commons.json_types import JsonValue
-from harnyx_commons.llm.tool_models import ToolModelName, parse_tool_model
 
 PROVIDER_BATCH_MIN_TOTAL_CALLS = 10
 PROVIDER_BATCH_MIN_FAILURE_RATE = 0.95
@@ -45,7 +44,7 @@ class TimeoutAttributionKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SuccessfulLlmSample:
-    model: ToolModelName
+    model: str
     elapsed_ms: float
     total_tokens: int
     ttft_ms: float | None = None
@@ -88,7 +87,7 @@ class ValidatorLlmSpeedBaseline:
 
 @dataclass(frozen=True, slots=True)
 class ValidatorModelLlmBaseline:
-    slowest_speed_by_model: Mapping[ToolModelName, ValidatorLlmSpeedBaseline]
+    slowest_speed_by_model: Mapping[str, ValidatorLlmSpeedBaseline]
 
     @classmethod
     def empty(cls) -> ValidatorModelLlmBaseline:
@@ -96,14 +95,14 @@ class ValidatorModelLlmBaseline:
 
     @classmethod
     def from_samples(cls, samples: Sequence[SuccessfulLlmSample]) -> ValidatorModelLlmBaseline:
-        slowest_by_model: dict[ToolModelName, ValidatorLlmSpeedBaseline] = {}
+        slowest_by_model: dict[str, ValidatorLlmSpeedBaseline] = {}
         for sample in samples:
             sample_baseline = ValidatorLlmSpeedBaseline.from_sample(sample)
             current = slowest_by_model.get(sample.model)
             slowest_by_model[sample.model] = sample_baseline if current is None else current.merge(sample_baseline)
         return cls(slowest_speed_by_model=slowest_by_model)
 
-    def threshold_for(self, model: ToolModelName) -> ValidatorLlmSpeedBaseline | None:
+    def threshold_for(self, model: str) -> ValidatorLlmSpeedBaseline | None:
         baseline = self.slowest_speed_by_model.get(model)
         if baseline is None:
             return None
@@ -280,7 +279,7 @@ def successful_llm_samples(receipts: Sequence[ToolCall]) -> tuple[SuccessfulLlmS
 
 def _successful_llm_sample(
     *,
-    model: ToolModelName,
+    model: str,
     elapsed_ms: float,
     ttft_ms: float | None,
     usage: _ReceiptLlmUsage,
@@ -313,7 +312,7 @@ def _successful_llm_sample(
 
 def _split_llm_speed_sample(
     *,
-    model: ToolModelName,
+    model: str,
     elapsed_ms: float,
     ttft_ms: float | None,
     prompt_tokens: int | None,
@@ -371,6 +370,7 @@ def classify_timeout_attribution(
     observation: TimeoutObservationEvidence,
     validator_model_llm_baseline: ValidatorModelLlmBaseline,
     prior_timeout_observations: tuple[TimeoutObservationEvidence, ...],
+    attempt_budget_exhausted: bool = False,
 ) -> TimeoutAttributionKind | None:
     comparable_samples = tuple(
         sample
@@ -378,18 +378,19 @@ def classify_timeout_attribution(
         for sample in timeout_observation.successful_llm_samples
         if _sample_has_comparable_speed(sample, validator_model_llm_baseline)
     )
-    exhausted = len(prior_timeout_observations) + 1 >= TIMEOUT_REVIEW_MAX_OBSERVATIONS
+    if not attempt_budget_exhausted:
+        return None
     if any(_is_slow_llm_sample(sample, validator_model_llm_baseline) for sample in comparable_samples):
-        return TimeoutAttributionKind.NOT_MINER_OWNED if exhausted else None
+        return TimeoutAttributionKind.NOT_MINER_OWNED
     unknown_inflight_count = sum(
         timeout_observation.unknown_inflight_llm_count
         for timeout_observation in (*prior_timeout_observations, observation)
     )
     if unknown_inflight_count:
-        return TimeoutAttributionKind.MINER_OWNED if exhausted else None
+        return TimeoutAttributionKind.MINER_OWNED
     if any(_is_fast_llm_sample(sample, validator_model_llm_baseline) for sample in comparable_samples):
         return TimeoutAttributionKind.MINER_OWNED
-    return TimeoutAttributionKind.MINER_OWNED if exhausted else None
+    return TimeoutAttributionKind.MINER_OWNED
 
 
 def validator_model_llm_baseline(receipts: Sequence[ToolCall]) -> ValidatorModelLlmBaseline:
@@ -489,12 +490,12 @@ def _optional_int(value: object) -> int | None:
     return value
 
 
-def _receipt_llm_model(receipt: ToolCall) -> ToolModelName | None:
+def _receipt_llm_model(receipt: ToolCall) -> str | None:
     request_payload = receipt.details.request_payload
     raw_model = _raw_model_from_request_payload(request_payload)
     if raw_model is None:
         return None
-    return parse_tool_model(raw_model)
+    return raw_model.strip()
 
 
 def _is_unknown_inflight_llm_receipt(receipt: ToolCall) -> bool:

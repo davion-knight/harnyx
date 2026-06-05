@@ -62,6 +62,7 @@ from harnyx_validator.application.invoke_entrypoint import (
     MinerResponseValidationError,
     SandboxInvocationError,
 )
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
 from harnyx_validator.application.ports.evaluation_record import EvaluationRecordPort
 from harnyx_validator.application.ports.progress import ProgressRecorder
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
@@ -79,6 +80,14 @@ logger = logging.getLogger("harnyx_validator.scheduler")
 measurement_logger = logging.getLogger("harnyx_validator.measurement")
 LOCAL_RETRY_ATTEMPTS = 2
 IN_FLIGHT_LLM_TIMEOUT_REVIEW_WAIT_SECONDS = 300.0
+VALIDATOR_OWNED_PLATFORM_TOOL_PROXY_ERROR_CODES = frozenset(
+    {
+        "platform_tool_proxy_denied",
+        "platform_tool_proxy_grant_failed",
+        "platform_tool_proxy_execution_failed",
+        "platform_error",
+    }
+)
 
 
 @asynccontextmanager
@@ -160,6 +169,14 @@ class ValidatorBatchFailureDetail:
     uid: int | None = None
     exception_type: str | None = None
     traceback: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PlatformToolProxyControlFailure:
+    error_code: str
+    error_message: str
+    occurred_at: datetime
+    exception_type: str | None = None
 
 
 class ValidatorBatchFailedError(RuntimeError):
@@ -259,6 +276,7 @@ class EvaluationRunner:
         clock: Clock,
         progress: ProgressRecorder,
         usage_summarizer: UsageSummarizer | None = None,
+        platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
     ) -> None:
         self._subtensor = subtensor_client
         self._sessions = session_manager
@@ -268,6 +286,7 @@ class EvaluationRunner:
         self._clock = clock
         self._progress = progress
         self._usage = usage_summarizer or UsageSummarizer()
+        self._platform_tool_proxy_scopes = platform_tool_proxy_scopes
         self._validator_uid: int | None = None
 
     async def evaluate_artifact(
@@ -469,6 +488,7 @@ class EvaluationRunner:
             issued = self._issue_session(
                 batch_id=batch_id,
                 uid=artifact.uid,
+                artifact_id=artifact.artifact_id,
                 task=task,
             )
             try:
@@ -481,6 +501,7 @@ class EvaluationRunner:
                 ) from exc
             finally:
                 self._clear_task_session(issued.session.session_id)
+                self._clear_platform_tool_proxy_session(issued.session.session_id)
                 self._sessions.revoke(issued.session.session_id)
                 self._receipts.clear_session(issued.session.session_id)
         return submissions
@@ -496,9 +517,18 @@ class EvaluationRunner:
         completed_artifact_baseline: CompletedArtifactBaseline | None = None,
         prior_timeout_observations: tuple[TimeoutObservationEvidence, ...],
     ) -> TaskAttemptDecision:
+        if prior_timeout_observations:
+            return _validator_batch_failure_decision(
+                _unexpected_prior_timeout_observations_failure(
+                    artifact=artifact,
+                    task=task,
+                    occurred_at=self._clock(),
+                )
+            )
         issued = self._issue_session(
             batch_id=batch_id,
             uid=artifact.uid,
+            artifact_id=artifact.artifact_id,
             task=task,
         )
         session_started_at = time.monotonic()
@@ -506,7 +536,9 @@ class EvaluationRunner:
         terminal_outcome = "unexpected"
         error_code: str | None = None
         try:
-            for attempt_number in range(1, LOCAL_RETRY_ATTEMPTS + 1):
+            max_attempts = 1 + artifact.task_retry_count
+            timeout_observations: list[TimeoutObservationEvidence] = []
+            for attempt_number in range(1, max_attempts + 1):
                 attempt_count = attempt_number
                 issued = self._begin_session_attempt(issued.session.session_id)
                 decision = await self._evaluate_task_attempt(
@@ -515,7 +547,7 @@ class EvaluationRunner:
                     task=task,
                     issued=issued,
                     orchestrator=orchestrator,
-                    final_attempt=attempt_number >= LOCAL_RETRY_ATTEMPTS,
+                    final_attempt=attempt_number >= max_attempts,
                 )
                 if decision.kind is AttemptControlKind.SUBMISSION:
                     terminal_outcome = AttemptControlKind.SUBMISSION.value
@@ -536,7 +568,8 @@ class EvaluationRunner:
                             session_id=issued.session.session_id,
                             exc=_require_timeout_exc(decision),
                             validator_model_llm_baseline=current_validator_model_llm_baseline,
-                            prior_timeout_observations=prior_timeout_observations,
+                            prior_timeout_observations=tuple(timeout_observations),
+                            attempt_budget_exhausted=attempt_number >= max_attempts,
                         )
                     except ValidatorBatchFailedError as exc:
                         terminal_outcome = AttemptControlKind.VALIDATOR_BATCH_FAILURE.value
@@ -549,8 +582,15 @@ class EvaluationRunner:
                         )
                         return timeout_resolution
                     if timeout_resolution.kind is AttemptControlKind.TIMEOUT_UNRESOLVED:
-                        terminal_outcome = AttemptControlKind.TIMEOUT_UNRESOLVED.value
-                        return timeout_resolution
+                        timeout_observations.append(_require_timeout_observation(timeout_resolution))
+                        self._log_retry_attempt(
+                            batch_id=batch_id,
+                            artifact=artifact,
+                            task=task,
+                            attempt_number=attempt_number,
+                            exc=_require_timeout_exc(decision),
+                        )
+                        continue
                     if timeout_resolution.kind is AttemptControlKind.VALIDATOR_BATCH_FAILURE:
                         validator_failure = _require_validator_failure(timeout_resolution)
                         terminal_outcome = AttemptControlKind.VALIDATOR_BATCH_FAILURE.value
@@ -591,6 +631,7 @@ class EvaluationRunner:
                 error_code=error_code,
             )
             self._clear_task_session(issued.session.session_id)
+            self._clear_platform_tool_proxy_session(issued.session.session_id)
             self._sessions.revoke(issued.session.session_id)
             self._receipts.clear_session(issued.session.session_id)
 
@@ -617,6 +658,13 @@ class EvaluationRunner:
         try:
             outcome = await orchestrator.evaluate(request)
         except SessionBudgetExhaustedError as exc:
+            control_failure_decision = self._platform_tool_proxy_control_failure_decision(
+                artifact=artifact,
+                task=task,
+                session_id=issued.session.session_id,
+            )
+            if control_failure_decision is not None:
+                return control_failure_decision
             return _submission_decision(
                 self._record_exhausted(
                     batch_id=batch_id,
@@ -627,6 +675,13 @@ class EvaluationRunner:
                 )
             )
         except SandboxInvocationError as exc:
+            control_failure_decision = self._platform_tool_proxy_control_failure_decision(
+                artifact=artifact,
+                task=task,
+                session_id=issued.session.session_id,
+            )
+            if control_failure_decision is not None:
+                return control_failure_decision
             if is_timeout_sandbox_invocation(
                 status_code=exc.status_code,
                 detail_exception=exc.detail_exception,
@@ -661,6 +716,13 @@ class EvaluationRunner:
                 )
             )
         except Exception as exc:
+            control_failure_decision = self._platform_tool_proxy_control_failure_decision(
+                artifact=artifact,
+                task=task,
+                session_id=issued.session.session_id,
+            )
+            if control_failure_decision is not None:
+                return control_failure_decision
             provider_failures = self._consume_provider_failures(issued.session.session_id)
             return self._non_timeout_failure_decision(
                 batch_id=batch_id,
@@ -672,6 +734,13 @@ class EvaluationRunner:
                 final_attempt=final_attempt,
             )
 
+        control_failure_decision = self._platform_tool_proxy_control_failure_decision(
+            artifact=artifact,
+            task=task,
+            session_id=issued.session.session_id,
+        )
+        if control_failure_decision is not None:
+            return control_failure_decision
         provider_failures = self._consume_provider_failures(issued.session.session_id)
         provider_failure_decision = self._provider_batch_failure_decision(
             artifact=artifact,
@@ -901,6 +970,7 @@ class EvaluationRunner:
         exc: SandboxInvocationError,
         validator_model_llm_baseline: ValidatorModelLlmBaseline,
         prior_timeout_observations: tuple[TimeoutObservationEvidence, ...],
+        attempt_budget_exhausted: bool,
     ) -> TaskAttemptDecision:
         envelope = self._sessions.inspect(session_id)
         active_attempt = envelope.session.active_attempt
@@ -930,6 +1000,7 @@ class EvaluationRunner:
             observation=observation,
             validator_model_llm_baseline=validator_model_llm_baseline,
             prior_timeout_observations=prior_timeout_observations,
+            attempt_budget_exhausted=attempt_budget_exhausted,
         )
         if timeout_attribution is None:
             return _timeout_unresolved_decision(observation)
@@ -1126,6 +1197,54 @@ class EvaluationRunner:
             )
         )
 
+    def _platform_tool_proxy_control_failure_decision(
+        self,
+        *,
+        artifact: ScriptArtifactSpec,
+        task: MinerTask,
+        session_id: UUID,
+    ) -> TaskAttemptDecision | None:
+        failure = self._latest_platform_tool_proxy_control_failure(session_id)
+        if failure is None:
+            return None
+        message = f"platform tool proxy control failure: {failure.error_code}"
+        return _validator_batch_failure_decision(
+            ValidatorBatchFailedError(
+                error_code=MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE,
+                message=message,
+                failure_detail=ValidatorBatchFailureDetail(
+                    error_code=MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE,
+                    error_message=message,
+                    occurred_at=failure.occurred_at,
+                    artifact_id=artifact.artifact_id,
+                    task_id=task.task_id,
+                    uid=artifact.uid,
+                    exception_type=failure.exception_type,
+                ),
+            )
+        )
+
+    def _latest_platform_tool_proxy_control_failure(
+        self,
+        session_id: UUID,
+    ) -> _PlatformToolProxyControlFailure | None:
+        for receipt in reversed(tuple(self._receipts.for_session(session_id))):
+            extra = receipt.details.extra
+            if extra is None:
+                continue
+            error_code = extra.get("platform_tool_proxy_error_code")
+            if error_code not in VALIDATOR_OWNED_PLATFORM_TOOL_PROXY_ERROR_CODES:
+                continue
+            error_message = extra.get("error_message") or f"platform tool proxy error: {error_code}"
+            occurred_at = receipt.details.execution.finished_at if receipt.details.execution is not None else None
+            return _PlatformToolProxyControlFailure(
+                error_code=error_code,
+                error_message=error_message,
+                occurred_at=occurred_at or self._clock(),
+                exception_type=extra.get("error_type"),
+            )
+        return None
+
     def _log_retry_attempt(
         self,
         *,
@@ -1190,6 +1309,7 @@ class EvaluationRunner:
         *,
         batch_id: UUID,
         uid: int,
+        artifact_id: UUID | None = None,
         task: MinerTask,
     ) -> SessionIssued:
         issued_at = self._clock()
@@ -1209,7 +1329,18 @@ class EvaluationRunner:
             batch_id=batch_id,
             session_id=issued.session.session_id,
         )
+        if artifact_id is not None and self._platform_tool_proxy_scopes is not None:
+            self._platform_tool_proxy_scopes.register_session(
+                batch_id=batch_id,
+                session_id=issued.session.session_id,
+                artifact_id=artifact_id,
+                task_id=task.task_id,
+            )
         return issued
+
+    def _clear_platform_tool_proxy_session(self, session_id: UUID) -> None:
+        if self._platform_tool_proxy_scopes is not None:
+            self._platform_tool_proxy_scopes.clear_session(session_id)
 
     def _begin_session_attempt(self, session_id: UUID) -> SessionIssued:
         token = secrets.token_urlsafe(self._config.token_secret_bytes)
@@ -1253,7 +1384,7 @@ def _usage_from_receipts(receipts: tuple[ToolCall, ...]) -> SessionUsage:
         usage = _receipt_llm_usage(receipt)
         if model is None or usage is None:
             continue
-        provider = "chutes"
+        provider = _receipt_llm_provider(receipt)
         provider_totals = llm_usage_totals.setdefault(provider, {})
         existing = provider_totals.get(model, LlmUsageTotals())
         provider_totals[model] = existing.accumulate(
@@ -1341,6 +1472,29 @@ def _receipt_llm_model(receipt: ToolCall) -> str | None:
             if isinstance(arg_model, str):
                 return arg_model
     return None
+
+
+def _receipt_llm_provider(receipt: ToolCall) -> str:
+    if receipt.details.actual_cost_provider is not None:
+        return receipt.details.actual_cost_provider
+    request_payload = receipt.details.request_payload
+    if isinstance(request_payload, dict):
+        direct_provider = request_payload.get("provider")
+        if isinstance(direct_provider, str):
+            return direct_provider
+        kwargs = request_payload.get("kwargs")
+        if isinstance(kwargs, dict):
+            kwargs_provider = kwargs.get("provider")
+            if isinstance(kwargs_provider, str):
+                return kwargs_provider
+        args = request_payload.get("args")
+        if isinstance(args, list) and args:
+            first_arg = args[0]
+            if isinstance(first_arg, dict):
+                arg_provider = first_arg.get("provider")
+                if isinstance(arg_provider, str):
+                    return arg_provider
+    return "chutes"
 
 
 def _non_negative_int(value: object) -> int | None:
@@ -1497,6 +1651,27 @@ def _validator_batch_failed_from_existing_submission(
         ),
         completed_submissions=(submission,),
         remaining_tasks=(),
+    )
+
+
+def _unexpected_prior_timeout_observations_failure(
+    *,
+    artifact: ScriptArtifactSpec,
+    task: MinerTask,
+    occurred_at: datetime,
+) -> ValidatorBatchFailedError:
+    message = "unexpected prior timeout observations for miner-paid task execution"
+    return ValidatorBatchFailedError(
+        error_code=MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE,
+        message=message,
+        failure_detail=ValidatorBatchFailureDetail(
+            error_code=MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE,
+            error_message=message,
+            occurred_at=occurred_at,
+            artifact_id=artifact.artifact_id,
+            task_id=task.task_id,
+            uid=artifact.uid,
+        ),
     )
 
 

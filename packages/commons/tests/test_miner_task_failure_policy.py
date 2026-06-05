@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 from harnyx_commons.domain.miner_task import EvaluationError, MinerTaskErrorCode
 from harnyx_commons.domain.tool_call import ToolCall, ToolCallDetails, ToolCallOutcome, ToolExecutionFacts
 from harnyx_commons.domain.tool_usage import ToolUsageSummary
-from harnyx_commons.llm.tool_models import parse_tool_model
 from harnyx_commons.miner_task_failure_policy import (
     ProviderFailureEvidence,
     SuccessfulLlmSample,
@@ -150,7 +149,7 @@ def test_delivery_exclusion_ignores_miner_owned_pair_failures() -> None:
     assert decision is None
 
 
-def test_timeout_attribution_marks_fast_llm_sample_as_miner_owned() -> None:
+def test_timeout_attribution_marks_fast_llm_sample_as_miner_owned_at_budget_exhaustion() -> None:
     observation = TimeoutObservationEvidence(
         successful_llm_samples=(_llm_sample(model=TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),),
         session_summary=ToolUsageSummary(),
@@ -162,6 +161,7 @@ def test_timeout_attribution_marks_fast_llm_sample_as_miner_owned() -> None:
             observation=observation,
             validator_model_llm_baseline=_baseline(TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),
             prior_timeout_observations=(),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.MINER_OWNED
     )
@@ -204,6 +204,7 @@ def test_timeout_attribution_prior_slow_sample_blocks_current_fast_sample_at_exh
             observation=current_observation,
             validator_model_llm_baseline=_baseline(TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),
             prior_timeout_observations=(prior_observation, prior_observation),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.NOT_MINER_OWNED
     )
@@ -221,6 +222,7 @@ def test_timeout_attribution_uses_model_specific_validator_baseline() -> None:
             observation=observation,
             validator_model_llm_baseline=_baseline(OTHER_MODEL, ingestion_tps=100.0, generation_tps=80.0),
             prior_timeout_observations=(observation, observation),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.MINER_OWNED
     )
@@ -246,8 +248,43 @@ def test_timeout_attribution_waits_until_observations_are_exhausted_without_base
             observation=observation,
             validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
             prior_timeout_observations=(observation, observation),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.MINER_OWNED
+    )
+
+
+def test_timeout_attribution_observation_limit_does_not_terminalize_before_budget_exhaustion() -> None:
+    observation = TimeoutObservationEvidence(
+        successful_llm_samples=(_llm_sample(model=TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),),
+        session_summary=ToolUsageSummary(),
+        session_elapsed_ms=60000.0,
+    )
+
+    assert (
+        classify_timeout_attribution(
+            observation=observation,
+            validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
+            prior_timeout_observations=(observation, observation),
+        )
+        is None
+    )
+
+
+def test_timeout_attribution_fast_sample_does_not_terminalize_before_budget_exhaustion() -> None:
+    observation = TimeoutObservationEvidence(
+        successful_llm_samples=(_llm_sample(model=TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),),
+        session_summary=ToolUsageSummary(),
+        session_elapsed_ms=60000.0,
+    )
+
+    assert (
+        classify_timeout_attribution(
+            observation=observation,
+            validator_model_llm_baseline=_baseline(TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),
+            prior_timeout_observations=(),
+        )
+        is None
     )
 
 
@@ -282,6 +319,7 @@ def test_timeout_attribution_defaults_unknown_inflight_to_miner_owned_at_exhaust
             observation=observation,
             validator_model_llm_baseline=ValidatorModelLlmBaseline.empty(),
             prior_timeout_observations=(observation, observation),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.MINER_OWNED
     )
@@ -300,6 +338,7 @@ def test_timeout_attribution_slow_completed_sample_beats_unknown_at_exhaustion()
             observation=observation,
             validator_model_llm_baseline=_baseline(TEST_MODEL, ingestion_tps=100.0, generation_tps=80.0),
             prior_timeout_observations=(observation, observation),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.NOT_MINER_OWNED
     )
@@ -338,6 +377,37 @@ def test_successful_llm_samples_include_model_identity() -> None:
     assert samples == (
         SuccessfulLlmSample(
             model=TEST_MODEL,
+            elapsed_ms=1000.0,
+            total_tokens=100,
+            ttft_ms=200.0,
+            generation_elapsed_ms=800.0,
+            prompt_tokens=40,
+            output_tokens=60,
+            ingestion_tps=200.0,
+            generation_tps=75.0,
+            legacy_total_tps=100.0,
+        ),
+    )
+
+
+def test_successful_llm_samples_accept_openrouter_native_model_identity() -> None:
+    model = "deepseek/deepseek-v3.2"
+    receipt = _llm_receipt(
+        model=model,
+        response_usage={
+            "prompt_tokens": 40,
+            "completion_tokens": 50,
+            "reasoning_tokens": 10,
+            "total_tokens": 100,
+        },
+        execution=ToolExecutionFacts(elapsed_ms=1000.0, ttft_ms=200.0),
+    )
+
+    samples = successful_llm_samples((receipt,))
+
+    assert samples == (
+        SuccessfulLlmSample(
+            model=model,
             elapsed_ms=1000.0,
             total_tokens=100,
             ttft_ms=200.0,
@@ -406,6 +476,7 @@ def test_timeout_attribution_uses_legacy_total_tps_when_ttft_is_not_comparable()
             observation=observation,
             validator_model_llm_baseline=_baseline(TEST_MODEL, legacy_total_tps=100.0),
             prior_timeout_observations=(observation, observation),
+            attempt_budget_exhausted=True,
         )
         is TimeoutAttributionKind.NOT_MINER_OWNED
     )
@@ -430,7 +501,7 @@ def _llm_sample(
 ) -> SuccessfulLlmSample:
     total_tokens = int(legacy_total_tps or ingestion_tps or generation_tps or 1)
     return SuccessfulLlmSample(
-        model=parse_tool_model(model),
+        model=model,
         elapsed_ms=1000.0,
         total_tokens=total_tokens,
         ttft_ms=100.0 if ingestion_tps is not None else None,
@@ -452,7 +523,7 @@ def _baseline(
 ) -> ValidatorModelLlmBaseline:
     return ValidatorModelLlmBaseline(
         slowest_speed_by_model={
-            parse_tool_model(model): ValidatorLlmSpeedBaseline(
+            model: ValidatorLlmSpeedBaseline(
                 ingestion_tps=ingestion_tps,
                 generation_tps=generation_tps,
                 legacy_total_tps=legacy_total_tps,

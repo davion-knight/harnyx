@@ -62,8 +62,9 @@ class LlmThinkingConfig:
 
 @dataclass(frozen=True)
 class ToolLlmRequest:
-    """Miner-facing LLM invocation payload (provider selected by host)."""
+    """Miner-facing LLM invocation payload."""
 
+    provider: str
     model: str
     messages: Sequence[LlmMessage]
     temperature: float | None

@@ -33,7 +33,9 @@ Body: [MinerTaskBatchRequestModel](#model-minertaskbatchrequestmodel)
 | `artifacts` |  |  | req | array[[ScriptArtifactRequestModel](#model-scriptartifactrequestmodel)] |
 |  | `artifact_id` |  | req | `string` |
 |  | `content_hash` |  | req | `string` |
+|  | `miner_hotkey_ss58` |  | req | `string` |
 |  | `size_bytes` |  | req | `integer` |
+|  | `task_retry_count` |  | req | `integer` |
 |  | `uid` |  | req | `integer` |
 | `batch_id` |  |  | req | `string` |
 | `created_at` |  |  | req | `string` |
@@ -1237,7 +1239,9 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 | `artifacts` |  |  | req | array[[ScriptArtifactRequestModel](#model-scriptartifactrequestmodel)] |
 |  | `artifact_id` |  | req | `string` |
 |  | `content_hash` |  | req | `string` |
+|  | `miner_hotkey_ss58` |  | req | `string` |
 |  | `size_bytes` |  | req | `integer` |
+|  | `task_retry_count` |  | req | `integer` |
 |  | `uid` |  | req | `integer` |
 | `batch_id` |  |  | req | `string` |
 | `created_at` |  |  | req | `string` |
@@ -1909,7 +1913,9 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 | --- | --- | --- | --- | --- |
 | `artifact_id` |  |  | req | `string` |
 | `content_hash` |  |  | req | `string` |
+| `miner_hotkey_ss58` |  |  | req | `string` |
 | `size_bytes` |  |  | req | `integer` |
+| `task_retry_count` |  |  | req | `integer` |
 | `uid` |  |  | req | `integer` |
 
 <details>
@@ -1929,9 +1935,20 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
       "title": "Content Hash",
       "type": "string"
     },
+    "miner_hotkey_ss58": {
+      "minLength": 1,
+      "title": "Miner Hotkey Ss58",
+      "type": "string"
+    },
     "size_bytes": {
       "minimum": 0.0,
       "title": "Size Bytes",
+      "type": "integer"
+    },
+    "task_retry_count": {
+      "maximum": 3.0,
+      "minimum": 0.0,
+      "title": "Task Retry Count",
       "type": "integer"
     },
     "uid": {
@@ -1944,7 +1961,9 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     "uid",
     "artifact_id",
     "content_hash",
-    "size_bytes"
+    "size_bytes",
+    "miner_hotkey_ss58",
+    "task_retry_count"
   ],
   "title": "ScriptArtifactRequestModel",
   "type": "object"

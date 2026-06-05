@@ -30,7 +30,7 @@ from harnyx_commons.llm.schema import (
 )
 from harnyx_commons.protocol_headers import SESSION_ID_HEADER
 from harnyx_commons.tools.dto import ToolInvocationRequest
-from harnyx_commons.tools.executor import ToolExecutor
+from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext
 from harnyx_commons.tools.runtime_invoker import RuntimeToolInvoker
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
@@ -65,6 +65,11 @@ def _invocation(tool: ToolName = "search_web") -> ToolInvocationRequest:
     )
 
 
+def _mixed_invocations(count: int) -> list[ToolInvocationRequest]:
+    tools: tuple[ToolName, ...] = ("search_web", "search_ai", "fetch_page", "tooling_info", "test_tool", "llm_chat")
+    return [_invocation(tools[index % len(tools)]) for index in range(count)]
+
+
 def create_test_app(dependency_provider: DemoDependencyProvider) -> FastAPI:
     """Create a test app with tool routes only."""
     app = FastAPI()
@@ -82,6 +87,7 @@ class RecordingToolInvoker:
         *,
         args: tuple[object, ...],
         kwargs: dict[str, object],
+        context: ToolInvocationContext | None = None,
     ) -> dict[str, object]:
         self.calls.append((tool_name, args, kwargs))
         query = kwargs.get("query", "demo")
@@ -224,7 +230,7 @@ class _ProviderTimeoutSearchProvider:
 
 
 class TrackingDependencyProvider:
-    def __init__(self, *, llm_provider=None, llm_provider_name: str = "openai", web_search_client=None) -> None:
+    def __init__(self, *, llm_provider=None, llm_provider_name: str = "openrouter", web_search_client=None) -> None:
         self.session_registry = FakeSessionRegistry()
         self.receipt_log = FakeReceiptLog()
         self.tokens = InMemoryTokenRegistry()
@@ -256,8 +262,9 @@ class TrackingDependencyProvider:
         tool_invoker = RuntimeToolInvoker(
             FakeReceiptLog(),
             web_search_client=web_search_client,
+            web_search_provider_name="desearch",
             llm_provider=llm_provider or _NoopLlmProvider(),
-            llm_provider_name="openai",
+            llm_provider_name=llm_provider_name,
             allowed_models=ALLOWED_TOOL_MODELS,
         )
 
@@ -401,13 +408,7 @@ def test_execute_tool_endpoint_waits_for_same_token_permit_then_succeeds() -> No
     app = create_test_app(provider)
     response_box: dict[str, Response | Exception] = {}
     done = threading.Event()
-    held = [
-        _invocation("search_web"),
-        _invocation("search_ai"),
-        _invocation("fetch_page"),
-        _invocation("tooling_info"),
-        _invocation("test_tool"),
-    ]
+    held = _mixed_invocations(20)
 
     def issue_request() -> None:
         try:
@@ -435,9 +436,9 @@ def test_execute_tool_endpoint_waits_for_same_token_permit_then_succeeds() -> No
     request_thread.start()
     try:
         deadline = time.monotonic() + 1.0
-        while len(provider.tool_concurrency_limiter.acquire_calls) < 6 and time.monotonic() < deadline:
+        while len(provider.tool_concurrency_limiter.acquire_calls) < 21 and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert len(provider.tool_concurrency_limiter.acquire_calls) == 6
+        assert len(provider.tool_concurrency_limiter.acquire_calls) == 21
         assert not done.is_set()
         provider.tool_concurrency_limiter.release(held.pop())
     finally:
@@ -520,6 +521,7 @@ def test_execute_tool_endpoint_records_openrouter_missing_key_as_failed_receipt(
             "tool": "llm_chat",
             "args": [],
             "kwargs": {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": "openai/gpt-oss-120b",
             },
@@ -570,6 +572,7 @@ def test_execute_tool_endpoint_records_provider_call_on_live_llm_success() -> No
             "tool": "llm_chat",
             "args": [],
             "kwargs": {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": ALLOWED_TOOL_MODELS[0],
             },
@@ -583,7 +586,7 @@ def test_execute_tool_endpoint_records_provider_call_on_live_llm_success() -> No
     assert response.status_code == 200
     assert provider.progress_tracker.provider_evidence(provider.batch_id) == (
         {
-            "provider": "openai",
+            "provider": "openrouter",
             "model": ALLOWED_TOOL_MODELS[0],
             "total_calls": 1,
             "failed_calls": 0,
@@ -591,10 +594,10 @@ def test_execute_tool_endpoint_records_provider_call_on_live_llm_success() -> No
     )
 
 
-def test_execute_tool_endpoint_records_custom_openai_compatible_provider_call() -> None:
+def test_execute_tool_endpoint_records_openrouter_provider_call_for_non_default_model() -> None:
     provider = TrackingDependencyProvider(
         llm_provider=_SuccessfulLlmProvider(),
-        llm_provider_name="custom-openai-compatible:gemma4-cloud-run-turbo",
+        llm_provider_name="openrouter",
     )
     app = create_test_app(provider)
     client = TestClient(app)
@@ -605,8 +608,9 @@ def test_execute_tool_endpoint_records_custom_openai_compatible_provider_call() 
             "tool": "llm_chat",
             "args": [],
             "kwargs": {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": "google/gemma-4-31B-turbo-TEE",
+                "model": "google/gemma-4-31b-it",
             },
         },
         headers={
@@ -618,8 +622,8 @@ def test_execute_tool_endpoint_records_custom_openai_compatible_provider_call() 
     assert response.status_code == 200
     assert provider.progress_tracker.provider_evidence(provider.batch_id) == (
         {
-            "provider": "custom-openai-compatible:gemma4-cloud-run-turbo",
-            "model": "google/gemma-4-31B-turbo-TEE",
+            "provider": "openrouter",
+            "model": "google/gemma-4-31b-it",
             "total_calls": 1,
             "failed_calls": 0,
         },
@@ -637,6 +641,7 @@ def test_execute_tool_endpoint_records_provider_failure_on_live_llm_provider_err
             "tool": "llm_chat",
             "args": [],
             "kwargs": {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": ALLOWED_TOOL_MODELS[0],
             },
@@ -651,7 +656,7 @@ def test_execute_tool_endpoint_records_provider_failure_on_live_llm_provider_err
     assert response.json() == {"detail": "tool execution failed"}
     assert provider.progress_tracker.provider_evidence(provider.batch_id) == (
         {
-            "provider": "openai",
+            "provider": "openrouter",
             "model": ALLOWED_TOOL_MODELS[0],
             "total_calls": 1,
             "failed_calls": 1,
@@ -671,6 +676,7 @@ def test_execute_tool_endpoint_records_provider_failure_reason_from_cause() -> N
             "tool": "llm_chat",
             "args": [],
             "kwargs": {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": ALLOWED_TOOL_MODELS[0],
             },
@@ -684,7 +690,7 @@ def test_execute_tool_endpoint_records_provider_failure_reason_from_cause() -> N
     assert response.status_code == 400
     assert provider.progress_tracker.consume_provider_failures(provider.session.session_id) == (
         {
-            "provider": "openai",
+            "provider": "openrouter",
             "model": ALLOWED_TOOL_MODELS[0],
             "total_calls": 1,
             "failed_calls": 1,
@@ -703,7 +709,7 @@ def test_execute_tool_endpoint_does_not_record_provider_failure_for_fetch_page_t
         json={
             "tool": "fetch_page",
             "args": [],
-            "kwargs": {"url": "https://example.com", "timeout": 0.01},
+            "kwargs": {"provider": "desearch", "url": "https://example.com", "timeout": 0.01},
         },
         headers={
             "x-platform-token": DEMO_SESSION_TOKEN,
@@ -720,11 +726,12 @@ def test_execute_tool_endpoint_does_not_record_provider_failure_for_fetch_page_t
 @pytest.mark.parametrize(
     ("tool", "kwargs"),
     [
-        ("search_web", {"search_queries": ["harnyx"], "timeout": 0.01}),
-        ("search_ai", {"prompt": "harnyx", "count": 10, "timeout": 0.01}),
+        ("search_web", {"provider": "desearch", "search_queries": ["harnyx"], "timeout": 0.01}),
+        ("search_ai", {"provider": "desearch", "prompt": "harnyx", "count": 10, "timeout": 0.01}),
         (
             "llm_chat",
             {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": ALLOWED_TOOL_MODELS[0],
                 "timeout": 0.01,
@@ -765,17 +772,18 @@ def test_execute_tool_endpoint_does_not_record_provider_failure_for_tool_timeout
 @pytest.mark.parametrize(
     ("tool", "kwargs", "expected_provider", "expected_model"),
     [
-        ("search_web", {"search_queries": ["harnyx"], "timeout": 5}, "desearch", "search_web"),
-        ("search_ai", {"prompt": "harnyx", "count": 10, "timeout": 5}, "desearch", "search_ai"),
-        ("fetch_page", {"url": "https://example.com", "timeout": 5}, "desearch", "fetch_page"),
+        ("search_web", {"provider": "desearch", "search_queries": ["harnyx"], "timeout": 5}, "desearch", "search_web"),
+        ("search_ai", {"provider": "desearch", "prompt": "harnyx", "count": 10, "timeout": 5}, "desearch", "search_ai"),
+        ("fetch_page", {"provider": "desearch", "url": "https://example.com", "timeout": 5}, "desearch", "fetch_page"),
         (
             "llm_chat",
             {
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": ALLOWED_TOOL_MODELS[0],
                 "timeout": 5,
             },
-            "openai",
+            "openrouter",
             ALLOWED_TOOL_MODELS[0],
         ),
     ],

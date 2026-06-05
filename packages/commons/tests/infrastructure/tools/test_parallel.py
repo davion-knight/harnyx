@@ -42,7 +42,9 @@ async def test_parallel_client_search_web_posts_keyword_list() -> None:
     )
     adapter = ParallelClient(base_url="https://api.parallel.ai", api_key="parallel-key", client=client)
 
-    response = await adapter.search_web(SearchWebSearchRequest(search_queries=("alpha", "beta"), num=3))
+    response = await adapter.search_web(
+        SearchWebSearchRequest(provider="parallel", search_queries=("alpha", "beta"), num=3)
+    )
 
     assert response.data[0].link == "https://example.com/a"
     assert response.data[0].snippet == "alpha snippet"
@@ -82,7 +84,7 @@ async def test_parallel_client_search_ai_uses_objective() -> None:
     )
     adapter = ParallelClient(base_url="https://api.parallel.ai", api_key="parallel-key", client=client)
 
-    response = await adapter.search_ai(SearchAiSearchRequest(prompt="find beta", count=10))
+    response = await adapter.search_ai(SearchAiSearchRequest(provider="parallel", prompt="find beta", count=10))
 
     assert response.data[0].url == "https://example.com/b"
     assert response.data[0].note == "beta summary"
@@ -117,7 +119,7 @@ async def test_parallel_client_fetch_page_uses_extract() -> None:
     )
     adapter = ParallelClient(base_url="https://api.parallel.ai", api_key="parallel-key", client=client)
 
-    response = await adapter.fetch_page(FetchPageRequest(url="https://example.com"))
+    response = await adapter.fetch_page(FetchPageRequest(provider="parallel", url="https://example.com"))
 
     assert response.data[0].url == "https://example.com"
     assert response.data[0].content == "full page text"
@@ -141,7 +143,7 @@ async def test_parallel_client_raises_on_error_status() -> None:
     adapter = ParallelClient(base_url="https://api.parallel.ai", api_key="parallel-key", client=client)
 
     with pytest.raises(ToolProviderError):
-        await adapter.fetch_page(FetchPageRequest(url="https://example.com"))
+        await adapter.fetch_page(FetchPageRequest(provider="parallel", url="https://example.com"))
 
 
 async def test_parallel_client_fetch_page_raises_on_empty_extract_results() -> None:
@@ -155,4 +157,4 @@ async def test_parallel_client_fetch_page_raises_on_empty_extract_results() -> N
     adapter = ParallelClient(base_url="https://api.parallel.ai", api_key="parallel-key", client=client)
 
     with pytest.raises(ToolProviderError):
-        await adapter.fetch_page(FetchPageRequest(url="https://example.com"))
+        await adapter.fetch_page(FetchPageRequest(provider="parallel", url="https://example.com"))

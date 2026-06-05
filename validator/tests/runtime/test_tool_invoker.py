@@ -19,6 +19,11 @@ from harnyx_commons.llm.schema import (
     LlmUsage,
 )
 from harnyx_commons.tools.executor import ToolInvocationOutput
+from harnyx_commons.tools.runtime_invoker import (
+    DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS,
+    DEFAULT_TOOL_LLM_TIMEOUT_SECONDS,
+    effective_tool_timeout_seconds,
+)
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
     FetchPageResponse,
@@ -31,6 +36,65 @@ from harnyx_validator.runtime.bootstrap import ALLOWED_TOOL_MODELS, RuntimeToolI
 from validator.tests.fixtures.fakes import FakeReceiptLog
 
 pytestmark = pytest.mark.anyio("asyncio")
+CHUTES_TOOL_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
+OPENROUTER_NATIVE_TOOL_MODEL = "deepseek/deepseek-v3.2"
+OPENROUTER_TOOL_MODELS = (
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    OPENROUTER_NATIVE_TOOL_MODEL,
+    "z-ai/glm-5",
+    "qwen/qwen3.6-27b",
+    "google/gemma-4-31b-it",
+)
+
+
+def test_effective_tool_timeout_uses_request_timeout_then_runtime_default() -> None:
+    assert effective_tool_timeout_seconds(
+        "search_web",
+        args=(),
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+    ) == pytest.approx(DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS)
+    assert effective_tool_timeout_seconds(
+        "search_web",
+        args=(),
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"], "timeout": 5},
+    ) == pytest.approx(5.0)
+    llm_kwargs = {
+        "provider": "chutes",
+        "model": CHUTES_TOOL_MODEL,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    assert effective_tool_timeout_seconds("llm_chat", args=(), kwargs=llm_kwargs) == pytest.approx(
+        DEFAULT_TOOL_LLM_TIMEOUT_SECONDS
+    )
+    assert effective_tool_timeout_seconds(
+        "llm_chat",
+        args=(),
+        kwargs={**llm_kwargs, "timeout": 7},
+    ) == pytest.approx(7.0)
+
+
+def test_effective_tool_timeout_does_not_validate_provider_selection() -> None:
+    assert effective_tool_timeout_seconds(
+        "search_web",
+        args=(),
+        kwargs={"provider": "chutes", "search_queries": ["harnyx"], "timeout": 5},
+    ) == pytest.approx(5.0)
+    assert effective_tool_timeout_seconds(
+        "search_web",
+        args=(),
+        kwargs={"provider": "chutes", "search_queries": ["harnyx"]},
+    ) == pytest.approx(DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS)
+    assert effective_tool_timeout_seconds(
+        "llm_chat",
+        args=(),
+        kwargs={
+            "provider": "desearch",
+            "model": CHUTES_TOOL_MODEL,
+            "messages": [{"role": "user", "content": "hi"}],
+            "timeout": 7,
+        },
+    ) == pytest.approx(7.0)
 
 
 class StubDeSearchClient:
@@ -50,17 +114,17 @@ class StubDeSearchClient:
         )
 
     async def search_web(self, request: SearchWebSearchRequest) -> SearchWebSearchResponse:
-        data = request.model_dump(exclude_none=True)
+        data = request.model_dump(exclude_none=True, exclude={"provider"})
         self.calls.append(("web", data))
         return SearchWebSearchResponse(data=[])
 
     async def search_ai(self, request: SearchAiSearchRequest) -> SearchAiSearchResponse:
-        data = request.model_dump(exclude_none=True)
+        data = request.model_dump(exclude_none=True, exclude={"provider"})
         self.calls.append(("search_ai", data))
         return self.search_ai_response
 
     async def fetch_page(self, request: FetchPageRequest) -> FetchPageResponse:
-        data = request.model_dump(exclude_none=True)
+        data = request.model_dump(exclude_none=True, exclude={"provider"})
         self.calls.append(("fetch_page", data))
         return self.fetch_page_response
 
@@ -243,7 +307,11 @@ async def test_runtime_invoker_routes_search_payload() -> None:
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
-    result = await _invoke(invoker, "search_web", kwargs={"search_queries": ["harnyx", "subnet"]})
+    result = await _invoke(
+        invoker,
+        "search_web",
+        kwargs={"provider": "parallel", "search_queries": ["harnyx", "subnet"]},
+    )
 
     assert isinstance(result, ToolInvocationOutput)
     assert result.public_payload == {"data": []}
@@ -257,10 +325,15 @@ async def test_runtime_invoker_routes_search_web_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
-    result = await _invoke(invoker, "search_web", kwargs={"search_queries": ["harnyx"], "timeout": 5})
+    result = await _invoke(
+        invoker,
+        "search_web",
+        kwargs={"provider": "desearch", "search_queries": ["harnyx"], "timeout": 5},
+    )
 
     assert isinstance(result, ToolInvocationOutput)
     assert result.public_payload == {"data": []}
@@ -271,11 +344,16 @@ async def test_runtime_invoker_enforces_search_web_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=SlowSearchWebClient(),
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ToolInvocationTimeoutError, match="search_web timed out after 0.01 seconds"):
-        await _invoke(invoker, "search_web", kwargs={"search_queries": ["harnyx"], "timeout": 0.01})
+        await _invoke(
+            invoker,
+            "search_web",
+            kwargs={"provider": "desearch", "search_queries": ["harnyx"], "timeout": 0.01},
+        )
 
 
 async def test_runtime_invoker_cancels_timed_search_web_provider_when_parent_cancelled() -> None:
@@ -283,11 +361,16 @@ async def test_runtime_invoker_cancels_timed_search_web_provider_when_parent_can
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     invocation = asyncio.create_task(
-        _invoke(invoker, "search_web", kwargs={"search_queries": ["harnyx"], "timeout": 30.0})
+        _invoke(
+            invoker,
+            "search_web",
+            kwargs={"provider": "desearch", "search_queries": ["harnyx"], "timeout": 30.0},
+        )
     )
     await stub_desearch.started.wait()
 
@@ -302,11 +385,16 @@ async def test_runtime_invoker_preserves_search_web_provider_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=ProviderTimeoutSearchWebClient(),
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ToolProviderError) as excinfo:
-        await _invoke(invoker, "search_web", kwargs={"search_queries": ["harnyx"], "timeout": 5})
+        await _invoke(
+            invoker,
+            "search_web",
+            kwargs={"provider": "desearch", "search_queries": ["harnyx"], "timeout": 5},
+        )
     assert isinstance(excinfo.value.__cause__, TimeoutError)
     assert str(excinfo.value.__cause__) == "provider timed out"
 
@@ -316,15 +404,13 @@ async def test_runtime_invoker_rejects_prompt_for_search_web() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ValidationError) as excinfo:
-        await _invoke(invoker, "search_web", kwargs={"prompt": "harnyx subnet"})
-    assert any(
-        err.get("type") == "extra_forbidden" and err.get("loc") == ("prompt",)
-        for err in excinfo.value.errors()
-    )
+        await _invoke(invoker, "search_web", kwargs={"provider": "desearch", "prompt": "harnyx subnet"})
+    assert any(err.get("type") == "extra_forbidden" and err.get("loc") == ("prompt",) for err in excinfo.value.errors())
 
 
 async def test_runtime_invoker_rejects_negative_search_web_num_before_parallel_pricing() -> None:
@@ -332,17 +418,18 @@ async def test_runtime_invoker_rejects_negative_search_web_num_before_parallel_p
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
-        web_search_provider_name="parallel",
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ValidationError) as excinfo:
-        await _invoke(invoker, "search_web", kwargs={"search_queries": ["harnyx"], "num": -1})
+        await _invoke(
+            invoker,
+            "search_web",
+            kwargs={"provider": "desearch", "search_queries": ["harnyx"], "num": -1},
+        )
 
-    assert any(
-        err.get("type") == "greater_than_equal" and err.get("loc") == ("num",)
-        for err in excinfo.value.errors()
-    )
+    assert any(err.get("type") == "greater_than_equal" and err.get("loc") == ("num",) for err in excinfo.value.errors())
     assert stub_desearch.calls == []
 
 
@@ -351,10 +438,15 @@ async def test_runtime_invoker_routes_fetch_page() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
-    result = await _invoke(invoker, "fetch_page", kwargs={"url": "https://example.com"})
+    result = await _invoke(
+        invoker,
+        "fetch_page",
+        kwargs={"provider": "desearch", "url": "https://example.com"},
+    )
 
     assert isinstance(result, ToolInvocationOutput)
     assert result.public_payload["data"][0]["content"] == "page text"
@@ -366,10 +458,15 @@ async def test_runtime_invoker_routes_fetch_page_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
-    result = await _invoke(invoker, "fetch_page", kwargs={"url": "https://example.com", "timeout": 5})
+    result = await _invoke(
+        invoker,
+        "fetch_page",
+        kwargs={"provider": "desearch", "url": "https://example.com", "timeout": 5},
+    )
 
     assert isinstance(result, ToolInvocationOutput)
     assert result.public_payload["data"][0]["content"] == "page text"
@@ -380,11 +477,16 @@ async def test_runtime_invoker_enforces_fetch_page_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=SlowFetchPageClient(),
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ToolInvocationTimeoutError, match="fetch_page timed out after 0.01 seconds"):
-        await _invoke(invoker, "fetch_page", kwargs={"url": "https://example.com", "timeout": 0.01})
+        await _invoke(
+            invoker,
+            "fetch_page",
+            kwargs={"provider": "desearch", "url": "https://example.com", "timeout": 0.01},
+        )
 
 
 async def test_runtime_invoker_rejects_prompt_for_fetch_page() -> None:
@@ -392,15 +494,13 @@ async def test_runtime_invoker_rejects_prompt_for_fetch_page() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ValidationError) as excinfo:
-        await _invoke(invoker, "fetch_page", kwargs={"prompt": "#harnyx"})
-    assert any(
-        err.get("type") == "extra_forbidden" and err.get("loc") == ("prompt",)
-        for err in excinfo.value.errors()
-    )
+        await _invoke(invoker, "fetch_page", kwargs={"provider": "desearch", "prompt": "#harnyx"})
+    assert any(err.get("type") == "extra_forbidden" and err.get("loc") == ("prompt",) for err in excinfo.value.errors())
 
 
 async def test_runtime_invoker_routes_search_ai() -> None:
@@ -408,13 +508,14 @@ async def test_runtime_invoker_routes_search_ai() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     result = await _invoke(
         invoker,
         "search_ai",
-        kwargs={"prompt": "harnyx subnet", "count": 10},
+        kwargs={"provider": "desearch", "prompt": "harnyx subnet", "count": 10},
     )
 
     assert isinstance(result, ToolInvocationOutput)
@@ -430,13 +531,14 @@ async def test_runtime_invoker_routes_search_ai_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     result = await _invoke(
         invoker,
         "search_ai",
-        kwargs={"prompt": "harnyx subnet", "count": 10, "timeout": 5},
+        kwargs={"provider": "desearch", "prompt": "harnyx subnet", "count": 10, "timeout": 5},
     )
 
     assert isinstance(result, ToolInvocationOutput)
@@ -448,11 +550,16 @@ async def test_runtime_invoker_enforces_search_ai_timeout() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=SlowSearchAiClient(),
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
     with pytest.raises(ToolInvocationTimeoutError, match="search_ai timed out after 0.01 seconds"):
-        await _invoke(invoker, "search_ai", kwargs={"prompt": "harnyx", "count": 10, "timeout": 0.01})
+        await _invoke(
+            invoker,
+            "search_ai",
+            kwargs={"provider": "desearch", "prompt": "harnyx", "count": 10, "timeout": 0.01},
+        )
 
 
 async def test_runtime_invoker_rejects_repo_tools_as_unregistered() -> None:
@@ -484,13 +591,13 @@ async def test_runtime_invoker_rejects_repo_tools_as_unregistered() -> None:
         )
 
 
-@pytest.mark.parametrize("model", ALLOWED_TOOL_MODELS)
+@pytest.mark.parametrize("model", OPENROUTER_TOOL_MODELS)
 async def test_runtime_invoker_routes_llm_chat(model: str) -> None:
     stub_chutes = StubChutesProvider()
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         llm_provider=stub_chutes,
-        llm_provider_name="chutes",
+        llm_provider_name="openrouter",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
@@ -498,6 +605,7 @@ async def test_runtime_invoker_routes_llm_chat(model: str) -> None:
         invoker,
         "llm_chat",
         kwargs={
+            "provider": "openrouter",
             "messages": [{"role": "user", "content": "hi"}],
             "model": model,
             "temperature": 0.1,
@@ -524,7 +632,7 @@ async def test_runtime_invoker_routes_llm_chat(model: str) -> None:
     assert recorded.temperature == 0.1
     assert recorded.messages[0].content[0].type == "input_text"
     assert recorded.messages[0].content[0].text == "hi"
-    assert recorded.provider == "chutes"
+    assert recorded.provider == "openrouter"
     assert recorded.timeout_seconds == pytest.approx(120.0)
 
 
@@ -536,7 +644,7 @@ async def test_runtime_invoker_routes_llm_chat_from_first_positional_payload() -
         llm_provider_name="chutes",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
-    model = ALLOWED_TOOL_MODELS[0]
+    model = CHUTES_TOOL_MODEL
 
     invocation_output = await _invoke(
         invoker,
@@ -544,6 +652,7 @@ async def test_runtime_invoker_routes_llm_chat_from_first_positional_payload() -
         args=(
             {
                 "messages": [{"role": "user", "content": "hi"}],
+                "provider": "chutes",
                 "model": model,
                 "temperature": 0.2,
             },
@@ -565,12 +674,13 @@ async def test_runtime_invoker_routes_llm_chat_timeout_without_changing_provider
         llm_provider_name="chutes",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
-    model = ALLOWED_TOOL_MODELS[0]
+    model = CHUTES_TOOL_MODEL
 
     invocation_output = await _invoke(
         invoker,
         "llm_chat",
         kwargs={
+            "provider": "chutes",
             "messages": [{"role": "user", "content": "hi"}],
             "model": model,
             "timeout": 5,
@@ -595,8 +705,9 @@ async def test_runtime_invoker_enforces_llm_chat_timeout() -> None:
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": CHUTES_TOOL_MODEL,
                 "timeout": 0.01,
             },
         )
@@ -615,8 +726,9 @@ async def test_runtime_invoker_preserves_llm_chat_provider_timeout() -> None:
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": CHUTES_TOOL_MODEL,
                 "timeout": 5,
             },
         )
@@ -638,8 +750,9 @@ async def test_runtime_invoker_maps_llm_provider_error_to_tool_provider_error() 
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "openrouter",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": OPENROUTER_NATIVE_TOOL_MODEL,
                 "timeout": 5,
             },
         )
@@ -662,8 +775,9 @@ async def test_runtime_invoker_preserves_llm_chat_provider_capability_value_erro
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": CHUTES_TOOL_MODEL,
                 "timeout": 5,
             },
         )
@@ -691,7 +805,7 @@ async def test_runtime_invoker_prefers_kwargs_over_first_positional_payload() ->
         llm_provider_name="chutes",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
-    model = ALLOWED_TOOL_MODELS[0]
+    model = CHUTES_TOOL_MODEL
 
     invocation_output = await _invoke(
         invoker,
@@ -702,7 +816,7 @@ async def test_runtime_invoker_prefers_kwargs_over_first_positional_payload() ->
                 "model": "unauthorized/model",
             },
         ),
-        kwargs={"messages": [{"role": "user", "content": "from kwargs"}], "model": model},
+        kwargs={"provider": "chutes", "messages": [{"role": "user", "content": "from kwargs"}], "model": model},
     )
 
     assert isinstance(invocation_output, ToolInvocationOutput)
@@ -716,7 +830,7 @@ async def test_runtime_invoker_does_not_expose_internal_provider_metadata_for_ll
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         llm_provider=stub_provider,
-        llm_provider_name="vertex",
+        llm_provider_name="chutes",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
@@ -724,16 +838,17 @@ async def test_runtime_invoker_does_not_expose_internal_provider_metadata_for_ll
         invoker,
         "llm_chat",
         kwargs={
+            "provider": "chutes",
             "messages": [{"role": "user", "content": "hi"}],
-            "model": ALLOWED_TOOL_MODELS[0],
+            "model": CHUTES_TOOL_MODEL,
         },
     )
 
     assert isinstance(invocation_output, ToolInvocationOutput)
     assert "harnyx_provider" not in invocation_output.public_payload
     assert "harnyx_model" not in invocation_output.public_payload
-    assert stub_provider.calls[0].provider == "vertex"
-    assert stub_provider.calls[0].model == ALLOWED_TOOL_MODELS[0]
+    assert stub_provider.calls[0].provider == "chutes"
+    assert stub_provider.calls[0].model == CHUTES_TOOL_MODEL
 
 
 async def test_runtime_invoker_returns_llm_chat_ttft_execution_fact() -> None:
@@ -749,8 +864,9 @@ async def test_runtime_invoker_returns_llm_chat_ttft_execution_fact() -> None:
         invoker,
         "llm_chat",
         kwargs={
+            "provider": "chutes",
             "messages": [{"role": "user", "content": "hi"}],
-            "model": ALLOWED_TOOL_MODELS[0],
+            "model": CHUTES_TOOL_MODEL,
         },
     )
 
@@ -773,8 +889,9 @@ async def test_runtime_invoker_forwards_llm_chat_thinking_config() -> None:
         invoker,
         "llm_chat",
         kwargs={
+            "provider": "chutes",
             "messages": [{"role": "user", "content": "hi"}],
-            "model": ALLOWED_TOOL_MODELS[0],
+            "model": CHUTES_TOOL_MODEL,
             "thinking": {"enabled": True, "effort": "high"},
         },
     )
@@ -799,8 +916,9 @@ async def test_runtime_invoker_rejects_llm_chat_thinking_effort_and_budget() -> 
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": CHUTES_TOOL_MODEL,
                 "thinking": {"enabled": True, "effort": "high", "budget": 1024},
             },
         )
@@ -819,8 +937,9 @@ async def test_runtime_invoker_rejects_coerced_llm_chat_thinking_scalars() -> No
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": CHUTES_TOOL_MODEL,
                 "thinking": {"enabled": "false", "budget": True},
             },
         )
@@ -839,8 +958,9 @@ async def test_runtime_invoker_rejects_raw_llm_chat_provider_body_kwargs() -> No
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
-                "model": ALLOWED_TOOL_MODELS[0],
+                "model": CHUTES_TOOL_MODEL,
                 "chat_template_kwargs": {"thinking": True},
             },
         )
@@ -868,6 +988,7 @@ async def test_runtime_invoker_returns_public_payload_plus_execution_facts(
         invoker,
         "llm_chat",
         kwargs={
+            "provider": "openrouter",
             "messages": [{"role": "user", "content": "hi"}],
             "model": ALLOWED_TOOL_MODELS[0],
         },
@@ -887,6 +1008,7 @@ async def test_runtime_invoker_rejects_blank_search_ai_prompt() -> None:
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         web_search_client=stub_desearch,
+        web_search_provider_name="desearch",
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
@@ -894,11 +1016,10 @@ async def test_runtime_invoker_rejects_blank_search_ai_prompt() -> None:
         await _invoke(
             invoker,
             "search_ai",
-            kwargs={"prompt": "   ", "count": 10},
+            kwargs={"provider": "desearch", "prompt": "   ", "count": 10},
         )
     assert any(
-        err.get("type") == "string_too_short" and err.get("loc") == ("prompt",)
-        for err in excinfo.value.errors()
+        err.get("type") == "string_too_short" and err.get("loc") == ("prompt",) for err in excinfo.value.errors()
     )
 
 
@@ -912,7 +1033,7 @@ async def test_runtime_invoker_rejects_missing_clients() -> None:
         await _invoke(
             invoker,
             "llm_chat",
-            kwargs={"messages": [{"role": "user", "content": "hi"}], "model": "demo"},
+            kwargs={"provider": "chutes", "messages": [{"role": "user", "content": "hi"}], "model": "demo"},
         )
 
 
@@ -925,11 +1046,12 @@ async def test_runtime_invoker_blocks_disallowed_models() -> None:
         allowed_models=ALLOWED_TOOL_MODELS,
     )
 
-    with pytest.raises(ValueError, match="not allowed"):
+    with pytest.raises(ValueError, match="not supported for miner-selected provider"):
         await _invoke(
             invoker,
             "llm_chat",
             kwargs={
+                "provider": "chutes",
                 "messages": [{"role": "user", "content": "hi"}],
                 "model": "unauthorized/model",
             },

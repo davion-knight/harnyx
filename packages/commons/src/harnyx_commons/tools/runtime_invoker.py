@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -14,11 +15,12 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validat
 from pydantic import JsonValue as PydanticJsonValue
 
 from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
+from harnyx_commons.clients import DESEARCH, PARALLEL
 from harnyx_commons.domain.tool_call import ToolExecutionFacts
 from harnyx_commons.errors import ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
 from harnyx_commons.llm.pricing import (
-    MODEL_PRICING,
+    MINER_TOOL_LLM_PRICING,
     SEARCH_PRICING_PER_REFERENCEABLE_RESULT,
     price_parallel_extract,
     price_parallel_search,
@@ -36,13 +38,19 @@ from harnyx_commons.llm.schema import (
     LlmThinkingConfig,
     LlmTool,
 )
-from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, ToolModelName, parse_tool_model
+from harnyx_commons.llm.tool_models import (
+    ALLOWED_TOOL_MODELS,
+    MINER_SELECTED_LLM_PROVIDER_MODELS,
+    ToolModelName,
+    parse_miner_selected_llm_provider_model,
+)
 from harnyx_commons.tools.dto import tool_payload_from_args_kwargs
-from harnyx_commons.tools.executor import ToolInvocationOutput, ToolInvoker
+from harnyx_commons.tools.executor import ToolInvocationContext, ToolInvocationOutput, ToolInvoker
 from harnyx_commons.tools.ports import WebSearchProviderPort
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
     SearchAiSearchRequest,
+    SearchProviderName,
     SearchWebSearchRequest,
 )
 from harnyx_commons.tools.types import TOOL_NAMES, SearchToolName, ToolInvocationTimeout, ToolName, is_search_tool
@@ -50,6 +58,7 @@ from harnyx_commons.tools.usage_tracker import ToolCallUsage  # noqa: F401 - com
 
 MINER_SANDBOX_TOOL_NAMES: tuple[ToolName, ...] = tuple(sorted(TOOL_NAMES))
 DEFAULT_TOOL_LLM_TIMEOUT_SECONDS = 120.0
+DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS = max(DESEARCH.timeout_seconds, PARALLEL.timeout_seconds)
 TInvocationResult = TypeVar("TInvocationResult")
 
 
@@ -110,6 +119,7 @@ class LlmThinkingConfigPayload(BaseModel):
 class LlmToolInvocation(BaseModel):
     """Request payload for llm_chat tool calls."""
 
+    provider: Literal["chutes", "openrouter"]
     model: str
     messages: tuple[LlmToolMessage, ...]
     timeout: ToolInvocationTimeout | None = None
@@ -145,6 +155,30 @@ def build_miner_sandbox_tool_invoker(
     )
 
 
+def effective_tool_timeout_seconds(
+    tool_name: ToolName,
+    *,
+    args: Sequence[JsonValue],
+    kwargs: Mapping[str, JsonValue],
+) -> float:
+    payload = tool_payload_from_args_kwargs(args, kwargs)
+    if tool_name == "llm_chat":
+        return _effective_timeout_from_payload(payload, default=DEFAULT_TOOL_LLM_TIMEOUT_SECONDS)
+    if tool_name in {"search_web", "search_ai", "fetch_page"}:
+        return _effective_timeout_from_payload(payload, default=DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS)
+    raise LookupError(f"tool {tool_name!r} does not have a provider timeout")
+
+
+def _effective_timeout_from_payload(payload: JsonObject, *, default: float) -> float:
+    raw_timeout = payload.get("timeout")
+    if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int | float):
+        return default
+    timeout = float(raw_timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        return default
+    return timeout
+
+
 class RuntimeToolInvoker(ToolInvoker):
     """Dispatches sandbox tool invocations."""
 
@@ -164,9 +198,9 @@ class RuntimeToolInvoker(ToolInvoker):
         self._web_search = web_search_client
         self._web_search_provider_name = web_search_provider_name
         self._llm_provider = llm_provider
-        self._llm_provider_name = llm_provider_name or "llm"
+        self._llm_provider_name = llm_provider_name
         self._advertised_tool_names = tuple(sorted(advertised_tool_names or TOOL_NAMES))
-        self._allowed_models: set[ToolModelName] = set(allowed_models)
+        _ = allowed_models
 
     async def invoke(
         self,
@@ -174,7 +208,9 @@ class RuntimeToolInvoker(ToolInvoker):
         *,
         args: Sequence[JsonValue],
         kwargs: Mapping[str, JsonValue],
+        context: ToolInvocationContext | None = None,
     ) -> JsonObject | ToolInvocationOutput:
+        _ = context
         if tool_name == "test_tool":
             return self._invoke_test_tool(args, kwargs)
         if tool_name == "tooling_info":
@@ -234,21 +270,27 @@ class RuntimeToolInvoker(ToolInvoker):
         if "llm_chat" in visible_tool_names:
             pricing["llm_chat"] = {
                 "kind": "per_million_tokens",
-                "models": {
-                    model: {
-                        "input_per_million": rates.input_per_million,
-                        "output_per_million": rates.output_per_million,
-                        "reasoning_per_million": rates.billable_reasoning_per_million,
+                "provider_models": {
+                    provider: {
+                        model: {
+                            "input_per_million": rates.input_per_million,
+                            "output_per_million": rates.output_per_million,
+                            "reasoning_per_million": rates.billable_reasoning_per_million,
+                        }
+                        for model, rates in model_pricing.items()
                     }
-                    for model, rates in MODEL_PRICING.items()
+                    for provider, model_pricing in MINER_TOOL_LLM_PRICING.items()
                 },
             }
 
         tool_names: list[JsonValue] = [str(name) for name in self._advertised_tool_names]
-        allowed_models: list[JsonValue] = [str(model) for model in ALLOWED_TOOL_MODELS]
+        allowed_provider_models: dict[str, JsonValue] = {
+            provider: [str(model) for model in models]
+            for provider, models in MINER_SELECTED_LLM_PROVIDER_MODELS.items()
+        }
         return {
             "tool_names": tool_names,
-            "allowed_tool_models": allowed_models,
+            "allowed_llm_provider_models": allowed_provider_models,
             "pricing": pricing,
         }
 
@@ -279,6 +321,7 @@ class RuntimeToolInvoker(ToolInvoker):
         payload = tool_payload_from_args_kwargs(args, kwargs)
         if tool_name == "search_web":
             request_model_web = SearchWebSearchRequest.model_validate(payload)
+            provider_name = self._require_search_provider(request_model_web.provider)
             response_web = await _invoke_with_optional_timeout(
                 "search_web",
                 request_model_web.timeout,
@@ -287,12 +330,13 @@ class RuntimeToolInvoker(ToolInvoker):
             as_mapping = response_web.model_dump(exclude_none=True, mode="json")
             return _search_invocation_output(
                 cast(JsonObject, as_mapping),
-                provider_name=self._web_search_provider_name,
+                provider_name=provider_name,
                 tool_name=tool_name,
                 request=request_model_web,
             )
         elif tool_name == "search_ai":
             request_ai = SearchAiSearchRequest.model_validate(payload)
+            provider_name = self._require_search_provider(request_ai.provider)
             response = await _invoke_with_optional_timeout(
                 "search_ai",
                 request_ai.timeout,
@@ -301,12 +345,13 @@ class RuntimeToolInvoker(ToolInvoker):
             as_mapping = response.model_dump(exclude_none=True, mode="json")
             return _search_invocation_output(
                 cast(JsonObject, as_mapping),
-                provider_name=self._web_search_provider_name,
+                provider_name=provider_name,
                 tool_name=tool_name,
                 request=request_ai,
             )
         elif tool_name == "fetch_page":
             request_page = FetchPageRequest.model_validate(payload)
+            provider_name = self._require_search_provider(request_page.provider)
             response_page = await _invoke_with_optional_timeout(
                 "fetch_page",
                 request_page.timeout,
@@ -315,7 +360,7 @@ class RuntimeToolInvoker(ToolInvoker):
             as_mapping = response_page.model_dump(exclude_none=True, mode="json")
             return _search_invocation_output(
                 cast(JsonObject, as_mapping),
-                provider_name=self._web_search_provider_name,
+                provider_name=provider_name,
                 tool_name=tool_name,
                 request=request_page,
             )
@@ -368,13 +413,38 @@ class RuntimeToolInvoker(ToolInvoker):
     ) -> LlmToolInvocation:
         payload = tool_payload_from_args_kwargs(args, kwargs)
         invocation = LlmToolInvocation.model_validate(payload)
-        self._assert_allowed_model(invocation.model)
-        return invocation
+        selection = parse_miner_selected_llm_provider_model(
+            provider=invocation.provider,
+            model=invocation.model,
+        )
+        return invocation.model_copy(
+            update={
+                "provider": selection.provider,
+                "model": selection.model,
+            }
+        )
 
-    def _assert_allowed_model(self, model: str | None) -> None:
-        parsed = parse_tool_model(model)
-        if parsed not in self._allowed_models:
-            raise ValueError(f"model {parsed!r} is not allowed for validator tools")
+    def _require_search_provider(self, requested_provider: SearchProviderName) -> str:
+        configured_provider = self._web_search_provider_name
+        if configured_provider is None:
+            raise LookupError("search provider name is not configured")
+        if requested_provider != configured_provider:
+            raise ValueError(
+                f"requested search provider {requested_provider!r} does not match configured provider "
+                f"{configured_provider!r}"
+            )
+        return requested_provider
+
+    def _require_llm_provider(self, requested_provider: str) -> str:
+        configured_provider = self._llm_provider_name
+        if configured_provider is None:
+            raise LookupError("llm provider name is not configured")
+        if requested_provider != configured_provider:
+            raise ValueError(
+                f"requested llm provider {requested_provider!r} does not match configured provider "
+                f"{configured_provider!r}"
+            )
+        return requested_provider
 
     @staticmethod
     def _normalize_messages(invocation: LlmToolInvocation) -> tuple[LlmMessage, ...]:
@@ -406,8 +476,9 @@ class RuntimeToolInvoker(ToolInvoker):
         tools: tuple[LlmTool, ...] | None,
         max_output_tokens: int | None,
     ) -> LlmRequest:
+        provider = self._require_llm_provider(invocation.provider)
         return LlmRequest(
-            provider=self._llm_provider_name,
+            provider=provider,
             model=invocation.model,
             messages=messages,
             temperature=invocation.temperature,
@@ -608,8 +679,10 @@ def _openrouter_actual_cost_provider(response: LlmResponse) -> str | None:
         return OPENROUTER_PROVIDER
     return None
 
+
 __all__ = [
     "ALLOWED_TOOL_MODELS",
+    "DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS",
     "DEFAULT_TOOL_LLM_TIMEOUT_SECONDS",
     "LlmToolInvocation",
     "LlmToolMessage",
@@ -617,4 +690,5 @@ __all__ = [
     "RuntimeToolInvoker",
     "MINER_SANDBOX_TOOL_NAMES",
     "build_miner_sandbox_tool_invoker",
+    "effective_tool_timeout_seconds",
 ]

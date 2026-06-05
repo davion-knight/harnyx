@@ -32,6 +32,7 @@ from harnyx_validator.application.dto.evaluation import (
     ScriptArtifactSpec,
 )
 from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
 from harnyx_validator.application.ports.evaluation_record import EvaluationRecordPort
 from harnyx_validator.application.ports.progress import ProgressRecorder
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
@@ -385,6 +386,7 @@ class EvaluationScheduler:
         config: SchedulerConfig,
         progress: ProgressRecorder,
         activity: BatchActivityTracker | None = None,
+        platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
     ) -> None:
         self._tasks = tuple(tasks)
         self._sandboxes = sandbox_manager
@@ -403,6 +405,7 @@ class EvaluationScheduler:
             config=config,
             clock=clock,
             progress=progress,
+            platform_tool_proxy_scopes=platform_tool_proxy_scopes,
         )
 
     async def run(
@@ -581,19 +584,18 @@ class EvaluationScheduler:
                     should_stop_coordinator = True
                     retry_work_item = None
                 elif artifact_result.unresolved_tasks:
-                    retry_work_item = _ArtifactWorkItem(
-                        artifact_index=work_item.artifact_index,
+                    failure = _unexpected_unresolved_timeout_failure(
                         artifact=work_item.artifact,
-                        tasks=artifact_result.unresolved_tasks,
-                        earlier_submissions=artifact_result.submissions,
-                        timeout_retry_state_by_pair={
-                            pair_key: state
-                            for pair_key, state in artifact_result.timeout_retry_state_by_pair.items()
-                            if pair_key in work_item.owned_pair_keys
-                        },
-                        retry_round=work_item.retry_round + 1,
+                        unresolved_tasks=artifact_result.unresolved_tasks,
+                        completed_submissions=artifact_result.submissions,
+                        occurred_at=self._clock(),
                     )
-                    should_stop_coordinator = False
+                    dispatch.validator_batch_failures_by_artifact_index[work_item.artifact_index] = failure
+                    if dispatch.published_batch_failure is None:
+                        dispatch.published_batch_failure = failure
+                    dispatch.stop_dequeuing = True
+                    should_stop_coordinator = True
+                    retry_work_item = None
                 else:
                     should_stop_coordinator = False
                     retry_work_item = None
@@ -1210,6 +1212,32 @@ class EvaluationScheduler:
             if pair not in recorded_pairs:
                 completed_by_pair.setdefault(pair, submission)
         return tuple(completed_by_pair.values())
+
+
+def _unexpected_unresolved_timeout_failure(
+    *,
+    artifact: ScriptArtifactSpec,
+    unresolved_tasks: tuple[MinerTask, ...],
+    completed_submissions: tuple[MinerTaskRunSubmission, ...],
+    occurred_at: datetime,
+) -> ValidatorBatchFailedError:
+    task = unresolved_tasks[0] if unresolved_tasks else None
+    message = "unexpected unresolved timeout escaped runner attempt budget"
+    return ValidatorBatchFailedError(
+        error_code=MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE,
+        message=message,
+        failure_detail=ValidatorBatchFailureDetail(
+            error_code=MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE,
+            error_message=message,
+            occurred_at=occurred_at,
+            artifact_id=artifact.artifact_id,
+            task_id=None if task is None else task.task_id,
+            uid=artifact.uid,
+        ),
+        completed_submissions=completed_submissions,
+        remaining_tasks=unresolved_tasks,
+    )
+
 
 async def _run_blocking_call(
     executor: Executor,

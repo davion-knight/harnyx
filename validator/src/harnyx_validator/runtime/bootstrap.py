@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, cast, get_args
 
 import bittensor as bt
 
@@ -23,7 +23,7 @@ from harnyx_commons.llm.provider import LlmProviderPort
 from harnyx_commons.llm.provider_factory import CachedLlmProviderRegistry
 from harnyx_commons.llm.provider_types import BEDROCK_PROVIDER, parse_builtin_provider_name
 from harnyx_commons.llm.routing import ResolvedLlmRoute, resolve_llm_route
-from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS
+from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, parse_miner_selected_llm_provider_model
 from harnyx_commons.miner_task_scoring import (
     EvaluationScoringConfig,
     EvaluationScoringService,
@@ -31,21 +31,26 @@ from harnyx_commons.miner_task_scoring import (
 from harnyx_commons.sandbox.docker import DockerSandboxManager
 from harnyx_commons.sandbox.options import SandboxOptions
 from harnyx_commons.sandbox.runtime import build_sandbox_options, create_sandbox_manager
-from harnyx_commons.tools.dto import ToolInvocationRequest
-from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationOutput
+from harnyx_commons.tools.dto import ToolInvocationRequest, tool_payload_for_invocation
+from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext, ToolInvocationOutput, ToolInvoker
 from harnyx_commons.tools.invocation_clients import build_tool_invocation_clients
 from harnyx_commons.tools.ports import WebSearchProviderPort
 from harnyx_commons.tools.runtime_invoker import (
     RuntimeToolInvoker,
     build_miner_sandbox_tool_invoker,
 )
+from harnyx_commons.tools.search_models import SearchProviderName
 from harnyx_commons.tools.token_semaphore import DEFAULT_TOOL_CONCURRENCY_LIMITS, ToolConcurrencyLimiter
 from harnyx_commons.tools.usage_tracker import UsageTracker
 from harnyx_validator.application.accept_batch import AcceptEvaluationBatch
 from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
 from harnyx_validator.application.invoke_entrypoint import EntrypointInvoker, SandboxClient
+from harnyx_validator.application.platform_tool_proxy import (
+    PlatformToolProxyProxyToolInvoker,
+    PlatformToolProxyScopeRegistry,
+)
 from harnyx_validator.application.ports.evaluation_record import EvaluationRecordPort
-from harnyx_validator.application.ports.platform import PlatformPort
+from harnyx_validator.application.ports.platform import PlatformPort, PlatformToolProxyPlatformPort
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
 from harnyx_validator.application.restore_batch import RestoreEvaluationBatch
 from harnyx_validator.application.services.evaluation_batch_prep import (
@@ -71,7 +76,10 @@ from harnyx_validator.infrastructure.state.restore_inbox import InMemoryRestoreI
 from harnyx_validator.infrastructure.state.run_progress import FileBackedRunProgress
 from harnyx_validator.infrastructure.subtensor.client import RuntimeSubtensorClient
 from harnyx_validator.infrastructure.subtensor.hotkey import create_wallet
-from harnyx_validator.infrastructure.tools.platform_client import HttpPlatformClient
+from harnyx_validator.infrastructure.tools.platform_client import (
+    AsyncPlatformToolProxyPlatformClient,
+    HttpPlatformClient,
+)
 from harnyx_validator.runtime.registration_metadata import resolve_validator_registration_metadata
 from harnyx_validator.runtime.resource_usage import ValidatorResourceUsageProvider
 from harnyx_validator.runtime.restore_worker import RestoreWorker
@@ -83,6 +91,7 @@ _SCORING_LLM_MODEL = "moonshotai/Kimi-K2.5-TEE"
 _SCORING_LLM_REASONING_EFFORT = "high"
 _DUPLICATION_DETECTION_LLM_MODEL = "moonshotai/Kimi-K2.5-TEE"
 _SEARCH_PROVIDER_TOOLS = frozenset(("search_web", "search_ai", "fetch_page"))
+_MINER_SELECTED_SEARCH_PROVIDERS = frozenset(get_args(SearchProviderName))
 _BATCH_BLOCKING_LANE_NAME = "validator-batch-blocking"
 
 
@@ -93,7 +102,7 @@ class _ProviderTrackingToolExecutor(ToolExecutor):
         session_registry: InMemorySessionRegistry,
         receipt_log: InMemoryReceiptLog,
         usage_tracker: UsageTracker,
-        tool_invoker: RuntimeToolInvoker,
+        tool_invoker: ToolInvoker,
         token_registry: InMemoryTokenRegistry,
         clock: Callable[[], datetime],
         progress: FileBackedRunProgress,
@@ -112,14 +121,19 @@ class _ProviderTrackingToolExecutor(ToolExecutor):
         self._search_provider_name = search_provider_name
         self._llm_route_resolver = llm_route_resolver
 
-    async def _invoke_tool_output_async(self, request: ToolInvocationRequest) -> ToolInvocationOutput:
+    async def _invoke_tool_output_async(
+        self,
+        request: ToolInvocationRequest,
+        *,
+        context: ToolInvocationContext | None,
+    ) -> ToolInvocationOutput:
         provider_key = _provider_key_from_request(
             request=request,
             search_provider_name=self._search_provider_name,
             llm_route_resolver=self._llm_route_resolver,
         )
         try:
-            response = await super()._invoke_tool_output_async(request)
+            response = await super()._invoke_tool_output_async(request, context=context)
         except ToolProviderError as exc:
             self._record_provider_call(request=request, provider_key=provider_key)
             if provider_key is not None:
@@ -176,7 +190,7 @@ class RuntimeContext:
     tool_llm_provider: LlmProviderPort | None
     scoring_llm_provider: LlmProviderPort | None
     similarity_llm_provider: LlmProviderPort | None
-    tool_invoker: RuntimeToolInvoker
+    tool_invoker: ToolInvoker
     tool_executor: ToolExecutor
     tool_concurrency_limiter: ToolConcurrencyLimiter
     subtensor_client: SubtensorClientPort
@@ -187,6 +201,8 @@ class RuntimeContext:
     create_evaluation_orchestrator: Callable[[SandboxClient], TaskRunOrchestrator]
     build_sandbox_options: Callable[[], SandboxOptions]
     platform_client: PlatformPort | None
+    platform_tool_proxy_platform_client: PlatformToolProxyPlatformPort | None
+    platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry
     batch_inbox: InMemoryBatchInbox
     restore_worker: RestoreWorker
     status_provider: StatusProvider
@@ -216,6 +232,7 @@ class InMemoryState:
     usage_tracker: UsageTracker
     tool_concurrency_limiter: ToolConcurrencyLimiter
     session_manager: SessionManager
+    platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry
 
 
 def build_runtime(settings: Settings | None = None) -> RuntimeContext:
@@ -224,7 +241,12 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
     logger.info("loading validator runtime configuration", extra={"settings": resolved})
 
     state = _build_state(resolved)
-    platform_client, platform_hotkey, subtensor_client = _build_external_clients(resolved)
+    (
+        platform_client,
+        platform_tool_proxy_platform_client,
+        platform_hotkey,
+        subtensor_client,
+    ) = _build_external_clients(resolved)
 
     (
         search_client,
@@ -240,6 +262,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         resolved=resolved,
         search_client=search_client,
         tool_llm_provider=tool_llm_provider,
+        platform_tool_proxy_platform_client=platform_tool_proxy_platform_client,
     )
 
     scoring_service, similarity_judge, weight_submission_service = _build_services(
@@ -272,6 +295,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         similarity_judge=similarity_judge,
         validator_hotkey=platform_hotkey,
         platform_client=platform_client,
+        platform_tool_proxy_platform_client=platform_tool_proxy_platform_client,
     )
 
     batch_blocking_executor = ThreadPoolExecutor(
@@ -307,6 +331,8 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         create_evaluation_orchestrator=orchestrator_factory,
         build_sandbox_options=options_factory,
         platform_client=platform_client,
+        platform_tool_proxy_platform_client=platform_tool_proxy_platform_client,
+        platform_tool_proxy_scopes=state.platform_tool_proxy_scopes,
         batch_inbox=state.batch_inbox,
         restore_worker=restore_worker,
         status_provider=status_provider,
@@ -345,6 +371,7 @@ def _build_state(
     tool_concurrency_limiter = ToolConcurrencyLimiter(DEFAULT_TOOL_CONCURRENCY_LIMITS)
     usage_tracker = UsageTracker()
     session_manager = SessionManager(session_registry, token_registry)
+    platform_tool_proxy_scopes = PlatformToolProxyScopeRegistry()
     return InMemoryState(
         session_registry=session_registry,
         token_registry=token_registry,
@@ -357,13 +384,16 @@ def _build_state(
         usage_tracker=usage_tracker,
         tool_concurrency_limiter=tool_concurrency_limiter,
         session_manager=session_manager,
+        platform_tool_proxy_scopes=platform_tool_proxy_scopes,
     )
 
 
-def _build_external_clients(settings: Settings) -> tuple[PlatformPort, bt.Keypair, SubtensorClientPort]:
-    platform_client, platform_hotkey = _create_platform_client(settings)
+def _build_external_clients(
+    settings: Settings,
+) -> tuple[PlatformPort, PlatformToolProxyPlatformPort, bt.Keypair, SubtensorClientPort]:
+    platform_client, platform_tool_proxy_client, platform_hotkey = _create_platform_client(settings)
     subtensor_client = _build_subtensor_client(settings)
-    return platform_client, platform_hotkey, subtensor_client
+    return platform_client, platform_tool_proxy_client, platform_hotkey, subtensor_client
 
 
 def _build_llm_clients(
@@ -434,8 +464,9 @@ def _build_tooling(
     resolved: Settings,
     search_client: WebSearchProviderPort | None,
     tool_llm_provider: LlmProviderPort | None,
-) -> tuple[RuntimeToolInvoker, ToolExecutor]:
-    tool_invoker = build_miner_sandbox_tool_invoker(
+    platform_tool_proxy_platform_client: PlatformToolProxyPlatformPort | None = None,
+) -> tuple[ToolInvoker, ToolExecutor]:
+    local_invoker = build_miner_sandbox_tool_invoker(
         state.receipt_log,
         web_search_client=search_client,
         web_search_provider_name=resolved.llm.search_provider,
@@ -443,17 +474,33 @@ def _build_tooling(
         llm_provider_name=resolved.llm.tool_llm_provider,
         allowed_models=ALLOWED_TOOL_MODELS,
     )
-    tool_executor = _ProviderTrackingToolExecutor(
-        session_registry=state.session_registry,
-        receipt_log=state.receipt_log,
-        usage_tracker=state.usage_tracker,
-        tool_invoker=tool_invoker,
-        token_registry=state.token_registry,
-        clock=_clock,
-        progress=state.progress_tracker,
-        search_provider_name=resolved.llm.search_provider,
-        llm_route_resolver=_build_tool_route_resolver(resolved),
-    )
+    tool_invoker: ToolInvoker = local_invoker
+    if platform_tool_proxy_platform_client is not None:
+        tool_invoker = PlatformToolProxyProxyToolInvoker(
+            local_invoker=local_invoker,
+            platform_tool_proxy_platform=platform_tool_proxy_platform_client,
+            scopes=state.platform_tool_proxy_scopes,
+        )
+        tool_executor: ToolExecutor = ToolExecutor(
+            session_registry=state.session_registry,
+            receipt_log=state.receipt_log,
+            usage_tracker=state.usage_tracker,
+            tool_invoker=tool_invoker,
+            token_registry=state.token_registry,
+            clock=_clock,
+        )
+    else:
+        tool_executor = _ProviderTrackingToolExecutor(
+            session_registry=state.session_registry,
+            receipt_log=state.receipt_log,
+            usage_tracker=state.usage_tracker,
+            tool_invoker=tool_invoker,
+            token_registry=state.token_registry,
+            clock=_clock,
+            progress=state.progress_tracker,
+            search_provider_name=resolved.llm.search_provider,
+            llm_route_resolver=_build_tool_route_resolver(resolved),
+        )
     return tool_invoker, tool_executor
 
 
@@ -514,6 +561,7 @@ def _build_http_dependencies(
     similarity_judge: SimilarityJudge,
     validator_hotkey: bt.Keypair,
     platform_client: PlatformPort,
+    platform_tool_proxy_platform_client: PlatformToolProxyPlatformPort,
 ) -> tuple[
     Callable[[], ToolRouteDeps],
     Callable[[], ValidatorControlDeps],
@@ -549,11 +597,13 @@ def _build_http_dependencies(
         resource_usage_provider,
         state.batch_activity,
         similarity_judge,
+        platform_tool_proxy_platform_client,
+        state.platform_tool_proxy_scopes,
     )
     return tool_route_provider, control_provider, status_provider, inbound_auth, restore_worker
 
 
-def _create_platform_client(settings: Settings) -> tuple[PlatformPort, bt.Keypair]:
+def _create_platform_client(settings: Settings) -> tuple[PlatformPort, PlatformToolProxyPlatformPort, bt.Keypair]:
     base_url = settings.platform_api.platform_base_url
     if not base_url:
         raise RuntimeError("PLATFORM_BASE_URL must be configured")
@@ -568,7 +618,12 @@ def _create_platform_client(settings: Settings) -> tuple[PlatformPort, bt.Keypai
         hotkey=hotkey,
         timeout_seconds=PLATFORM.timeout_seconds,
     )
-    return client, hotkey
+    platform_tool_proxy_client = AsyncPlatformToolProxyPlatformClient(
+        base_url=normalized_base,
+        hotkey=hotkey,
+        timeout_seconds=PLATFORM.timeout_seconds,
+    )
+    return client, platform_tool_proxy_client, hotkey
 
 
 def _register_with_platform(settings: Settings, hotkey: bt.Keypair, public_url: str | None) -> None:
@@ -611,13 +666,25 @@ def _provider_key_from_request(
     search_provider_name: str | None,
     llm_route_resolver: Callable[[str], ResolvedLlmRoute],
 ) -> tuple[str, str] | None:
+    payload = _payload_for_evidence(request)
+    has_explicit_provider = "provider" in payload
     if request.tool in _SEARCH_PROVIDER_TOOLS:
+        selected_provider = _explicit_search_provider(payload)
+        if selected_provider is not None:
+            return selected_provider, request.tool
+        if has_explicit_provider:
+            return None
         if search_provider_name is None:
             return None
         return search_provider_name, request.tool
     if request.tool != "llm_chat":
         return None
-    model = _model_name_from_request(request)
+    selected_llm = _explicit_llm_provider_model(payload)
+    if selected_llm is not None:
+        return selected_llm
+    if has_explicit_provider:
+        return None
+    model = _model_name_from_payload(payload)
     if model is None:
         return None
     route = llm_route_resolver(model)
@@ -638,12 +705,36 @@ def _build_tool_route_resolver(settings: Settings) -> Callable[[str], ResolvedLl
     return resolve
 
 
-def _model_name_from_request(request: ToolInvocationRequest) -> str | None:
-    payload = dict(request.kwargs)
-    if not payload and request.args:
-        first_arg = request.args[0]
-        if isinstance(first_arg, dict):
-            payload = {key: value for key, value in first_arg.items() if isinstance(key, str)}
+def _payload_for_evidence(request: ToolInvocationRequest) -> Mapping[str, object]:
+    try:
+        return tool_payload_for_invocation(request)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _explicit_search_provider(payload: Mapping[str, object]) -> SearchProviderName | None:
+    raw_provider = payload.get("provider")
+    if not isinstance(raw_provider, str):
+        return None
+    if raw_provider not in _MINER_SELECTED_SEARCH_PROVIDERS:
+        return None
+    return cast(SearchProviderName, raw_provider)
+
+
+def _explicit_llm_provider_model(payload: Mapping[str, object]) -> tuple[str, str] | None:
+    raw_provider = payload.get("provider")
+    if not isinstance(raw_provider, str):
+        return None
+    raw_model = payload.get("model")
+    model = raw_model if isinstance(raw_model, str) else None
+    try:
+        selected = parse_miner_selected_llm_provider_model(provider=raw_provider, model=model)
+    except ValueError:
+        return None
+    return selected.provider, selected.model
+
+
+def _model_name_from_payload(payload: Mapping[str, object]) -> str | None:
     model_raw = payload.get("model")
     if not isinstance(model_raw, str):
         return None
@@ -677,6 +768,8 @@ def _make_control_provider(
     resource_usage_provider: ValidatorResourceUsageProvider | None = None,
     batch_activity: BatchActivityTracker | None = None,
     similarity_judge: SimilarityJudge | None = None,
+    platform_tool_proxy_platform_client: PlatformToolProxyPlatformPort | None = None,
+    platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
 ) -> Callable[[], ValidatorControlDeps]:
     effective_resource_usage_provider = resource_usage_provider or ValidatorResourceUsageProvider()
 
@@ -706,6 +799,8 @@ def _make_control_provider(
             validator_hotkey=cast(StatusSigner, validator_hotkey),
             resource_usage_provider=effective_resource_usage_provider,
             batch_activity=batch_activity or BatchActivityTracker(),
+            platform_tool_proxy_platform=platform_tool_proxy_platform_client,
+            platform_tool_proxy_scopes=platform_tool_proxy_scopes,
             similarity_judge=similarity_judge,
         )
 
@@ -911,7 +1006,7 @@ def _clock() -> datetime:
     return datetime.now(UTC)
 
 
-__all__ = ["RuntimeContext", "build_runtime", "close_runtime_resources"]
+__all__ = ["RuntimeContext", "RuntimeToolInvoker", "build_runtime", "close_runtime_resources"]
 
 
 class _SupportsAclose(Protocol):

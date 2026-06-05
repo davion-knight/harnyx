@@ -163,7 +163,7 @@ async def test_iter_search_links_web_pages_increments_start_and_stops_on_repeat_
     try:
         pages = []
         async for page in client.iter_search_links_web_pages(
-            SearchWebSearchRequest(search_queries=("alpha phrase", "beta"), num=100)
+            SearchWebSearchRequest(provider="desearch", search_queries=("alpha phrase", "beta"), num=100)
         ):
             pages.append(page)
         assert len(pages) == 1

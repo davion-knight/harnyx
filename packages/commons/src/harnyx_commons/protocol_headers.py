@@ -14,6 +14,7 @@ from harnyx_miner_sdk.sandbox_headers import (
 )
 
 INTERNAL_SECRET_HEADER = "x-internal-secret"  # noqa: S105
+PLATFORM_TOOL_PROXY_TOKEN_HEADER = "x-platform-tool-proxy-token"  # noqa: S105
 
 
 def read_internal_secret_header(headers: Mapping[str, str]) -> str:
@@ -24,6 +25,7 @@ __all__ = [
     "HOST_CONTAINER_URL_HEADER",
     "INTERNAL_SECRET_HEADER",
     "PLATFORM_TOKEN_HEADER",
+    "PLATFORM_TOOL_PROXY_TOKEN_HEADER",
     "SESSION_ID_HEADER",
     "read_host_container_url_header",
     "read_internal_secret_header",

@@ -16,6 +16,7 @@ from harnyx_miner_sdk.tools.search_models import (
     SearchAiSearchRequest,
     SearchAiSearchResponse,
     SearchAiTool,
+    SearchProviderName,
     SearchWebResult,
     SearchWebSearchRequest,
     SearchWebSearchResponse,
@@ -29,6 +30,7 @@ from harnyx_miner_sdk.tools.search_models import (
 
 __all__ = [
     "SearchAiTool",
+    "SearchProviderName",
     "SearchAiDateFilter",
     "SearchAiResultType",
     "SearchAiSearchRequest",

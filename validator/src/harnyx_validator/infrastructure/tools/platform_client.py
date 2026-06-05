@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -12,10 +13,18 @@ import bittensor as bt
 import httpx
 
 from harnyx_commons.bittensor import build_canonical_request
+from harnyx_commons.domain.tool_call import ToolExecutionFacts
+from harnyx_commons.errors import BudgetExceededError, ToolInvocationTimeoutError, ToolProviderError
+from harnyx_commons.json_types import JsonObject, JsonValue
+from harnyx_commons.protocol_headers import PLATFORM_TOOL_PROXY_TOKEN_HEADER
+from harnyx_commons.tools.types import ToolName
 from harnyx_validator.application.dto.evaluation import MinerTaskBatchSpec
 from harnyx_validator.application.ports.platform import (
     ChampionWeights,
     PlatformPort,
+    PlatformToolProxyGrant,
+    PlatformToolProxyPlatformPort,
+    PlatformToolProxyToolResult,
     RestoreMetadata,
     RestoreRunsPage,
 )
@@ -34,6 +43,45 @@ class PlatformClientError(RuntimeError):
     """Raised when the platform responds with an unexpected status."""
 
     def __init__(self, *, status_code: int | None, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PlatformToolProxyInvocationError(RuntimeError):
+    """Raised when platform-tool-proxy rejects a tool invocation for non-provider reasons."""
+
+    def __init__(self, *, status_code: int, error_code: str | None, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+
+
+class PlatformToolProxyProviderError(ToolProviderError):
+    """Raised when platform-tool-proxy reports an upstream provider failure."""
+
+    error_code = "provider_failed"
+
+    def __init__(self, *, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PlatformToolProxyToolTimeoutError(ToolInvocationTimeoutError):
+    """Raised when platform-tool-proxy reports a tool timeout."""
+
+    error_code = "tool_timeout"
+
+    def __init__(self, *, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class PlatformToolProxyBudgetExceededError(BudgetExceededError):
+    """Raised when platform-tool-proxy reports grant budget exhaustion."""
+
+    error_code = "budget_exhausted"
+
+    def __init__(self, *, status_code: int, message: str) -> None:
         super().__init__(message)
         self.status_code = status_code
 
@@ -61,9 +109,7 @@ class HttpPlatformClient(PlatformPort):
     def _signed_header(self, method: str, path_qs: str, body: bytes) -> str:
         canonical = build_canonical_request(method, path_qs, body)
         signature = self.hotkey.sign(canonical)
-        return (
-            f'Bittensor ss58="{self.hotkey.ss58_address}",' f'sig="{signature.hex()}"'
-        )
+        return f'Bittensor ss58="{self.hotkey.ss58_address}",sig="{signature.hex()}"'
 
     def _request_headers(self, method: str, path_qs: str, body: bytes) -> dict[str, str]:
         headers = {
@@ -183,4 +229,314 @@ class HttpPlatformClient(PlatformPort):
         )
 
 
-__all__ = ["HttpPlatformClient", "PlatformClientError"]
+@dataclass
+class AsyncPlatformToolProxyPlatformClient(PlatformToolProxyPlatformPort):
+    """Async HTTP client for platform tool proxy endpoints."""
+
+    base_url: str
+    hotkey: bt.Keypair
+    timeout_seconds: float = 10.0
+    transport: httpx.AsyncBaseTransport | None = None
+
+    def __post_init__(self) -> None:
+        if not self.base_url:
+            raise ValueError("platform base_url must not be empty")
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=self.timeout_seconds,
+            transport=self.transport,
+        )
+
+    def _signed_header(self, method: str, path_qs: str, body: bytes) -> str:
+        canonical = build_canonical_request(method, path_qs, body)
+        signature = self.hotkey.sign(canonical)
+        return f'Bittensor ss58="{self.hotkey.ss58_address}",sig="{signature.hex()}"'
+
+    async def create_platform_tool_proxy_grant(
+        self,
+        *,
+        batch_id: UUID,
+        artifact_id: UUID,
+        task_id: UUID,
+        validator_session_id: UUID,
+        attempt_number: int,
+    ) -> PlatformToolProxyGrant:
+        path = "/v1/platform-tool-proxy/grants"
+        body = _json_body(
+            {
+                "batch_id": str(batch_id),
+                "artifact_id": str(artifact_id),
+                "task_id": str(task_id),
+                "validator_session_id": str(validator_session_id),
+                "attempt_number": attempt_number,
+            }
+        )
+        headers = {
+            "Authorization": self._signed_header("POST", path, body),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            async with self._client() as client:
+                response = await client.post(path, content=body, headers=headers)
+        except httpx.HTTPError as exc:
+            raise PlatformToolProxyInvocationError(
+                status_code=0,
+                error_code="platform_tool_proxy_grant_failed",
+                message="platform tool proxy grant request failed",
+            ) from exc
+        if response.status_code != httpx.codes.OK:
+            error_code = _platform_error_code(response)
+            if error_code == "platform_tool_proxy_denied":
+                raise PlatformToolProxyInvocationError(
+                    status_code=response.status_code,
+                    error_code=error_code,
+                    message=_platform_error_message(response) or "platform tool proxy grant denied",
+                )
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_tool_proxy_grant_failed",
+                message=_platform_error_message(response) or "platform tool proxy grant failed",
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_tool_proxy_grant_failed",
+                message="platform tool proxy grant response is invalid",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_tool_proxy_grant_failed",
+                message="platform tool proxy grant response is invalid",
+            )
+        token = payload.get("token")
+        expires_at = payload.get("expires_at")
+        if not isinstance(token, str) or not isinstance(expires_at, str):
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_tool_proxy_grant_failed",
+                message="platform tool proxy grant response is invalid",
+            )
+        try:
+            parsed_expires_at = datetime.fromisoformat(expires_at)
+        except ValueError as exc:
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_tool_proxy_grant_failed",
+                message="platform tool proxy grant response is invalid",
+            ) from exc
+        return PlatformToolProxyGrant(
+            token=token,
+            expires_at=parsed_expires_at,
+        )
+
+    async def execute_platform_tool_proxy_tool(
+        self,
+        *,
+        token: str,
+        uid: int,
+        artifact_id: UUID,
+        task_id: UUID,
+        validator_session_id: UUID,
+        attempt_number: int,
+        receipt_id: str,
+        tool: ToolName,
+        args: tuple[JsonValue, ...],
+        kwargs: dict[str, JsonValue],
+        transport_timeout_seconds: float,
+    ) -> PlatformToolProxyToolResult:
+        path = "/v1/platform-tool-proxy/tools/execute"
+        body = _json_body(
+            {
+                "uid": uid,
+                "artifact_id": str(artifact_id),
+                "task_id": str(task_id),
+                "validator_session_id": str(validator_session_id),
+                "attempt_number": attempt_number,
+                "receipt_id": receipt_id,
+                "tool": tool,
+                "args": list(args),
+                "kwargs": kwargs,
+            }
+        )
+        headers = {
+            PLATFORM_TOOL_PROXY_TOKEN_HEADER: token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            async with self._client() as client:
+                response = await client.post(
+                    path,
+                    content=body,
+                    headers=headers,
+                    timeout=transport_timeout_seconds,
+                )
+        except httpx.HTTPError as exc:
+            raise PlatformToolProxyInvocationError(
+                status_code=0,
+                error_code="platform_tool_proxy_execution_failed",
+                message="platform tool proxy transport failed",
+            ) from exc
+        if response.status_code != httpx.codes.OK:
+            error_code = _platform_error_code(response)
+            if error_code == "tool_timeout":
+                raise PlatformToolProxyToolTimeoutError(
+                    status_code=response.status_code,
+                    message=_platform_error_message(response) or "tool timed out",
+                )
+            if error_code == "provider_failed":
+                raise PlatformToolProxyProviderError(
+                    status_code=response.status_code,
+                    message=_platform_error_message(response) or "tool provider failed",
+                )
+            if error_code == "budget_exhausted":
+                raise PlatformToolProxyBudgetExceededError(
+                    status_code=response.status_code,
+                    message=_platform_error_message(response) or "platform tool proxy budget exhausted",
+                )
+            if error_code in _SELECTED_PROVIDER_OR_TOOL_REQUEST_MINER_OWNED_PROXY_ERROR_CODES:
+                raise PlatformToolProxyInvocationError(
+                    status_code=response.status_code,
+                    error_code=error_code,
+                    message=(
+                        _platform_error_message(response)
+                        or "platform tool proxy selected-provider/tool request failed"
+                    ),
+                )
+            if error_code in _VALIDATOR_OWNED_PLATFORM_TOOL_PROXY_ERROR_CODES:
+                raise PlatformToolProxyInvocationError(
+                    status_code=response.status_code,
+                    error_code=error_code,
+                    message=_platform_error_message(response) or "platform tool proxy control failure",
+                )
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_error",
+                message=(
+                    _platform_error_message(response)
+                    or f"platform returned {response.status_code} for POST {path}"
+                ),
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_error",
+                message="platform tool proxy response is invalid",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_error",
+                message="platform tool proxy response is invalid",
+            )
+        response_payload = payload.get("response")
+        if not isinstance(response_payload, dict):
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_error",
+                message="platform tool proxy response is invalid",
+            )
+        execution_payload = payload.get("execution")
+        execution = None
+        if isinstance(execution_payload, dict):
+            try:
+                execution = ToolExecutionFacts(
+                    elapsed_ms=_optional_float(execution_payload.get("elapsed_ms")),
+                    ttft_ms=_optional_float(execution_payload.get("ttft_ms")),
+                )
+            except PlatformClientError as exc:
+                raise PlatformToolProxyInvocationError(
+                    status_code=response.status_code,
+                    error_code="platform_error",
+                    message=str(exc),
+                ) from exc
+        try:
+            actual_cost_usd = _optional_float(payload.get("actual_cost_usd"))
+        except PlatformClientError as exc:
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_error",
+                message=str(exc),
+            ) from exc
+        return PlatformToolProxyToolResult(
+            response=cast(JsonObject, response_payload),
+            execution=execution,
+            actual_cost_usd=actual_cost_usd,
+            actual_cost_provider=(
+                str(payload["actual_cost_provider"]) if payload.get("actual_cost_provider") is not None else None
+            ),
+        )
+
+
+def _json_body(payload: JsonObject) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode()
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PlatformClientError(status_code=None, message="platform tool proxy numeric field is invalid")
+    return float(value)
+
+
+_SELECTED_PROVIDER_OR_TOOL_REQUEST_MINER_OWNED_PROXY_ERROR_CODES = frozenset(
+    {
+        "miner_credential_missing",
+        "duplicate_call",
+        "concurrency_exhausted",
+        "unsupported_provider",
+        "unsupported_model",
+        "invalid_request",
+    }
+)
+
+_VALIDATOR_OWNED_PLATFORM_TOOL_PROXY_ERROR_CODES = frozenset(
+    {
+        "platform_tool_proxy_denied",
+        "platform_error",
+        "platform_tool_proxy_grant_failed",
+        "platform_tool_proxy_execution_failed",
+    }
+)
+
+
+def _platform_error_code(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code = payload.get("error_code")
+    return code if isinstance(code, str) else None
+
+
+def _platform_error_message(response: httpx.Response) -> str | None:
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    message = payload.get("message")
+    return message if isinstance(message, str) and message.strip() else None
+
+
+__all__ = [
+    "AsyncPlatformToolProxyPlatformClient",
+    "HttpPlatformClient",
+    "PlatformClientError",
+    "PlatformToolProxyBudgetExceededError",
+    "PlatformToolProxyInvocationError",
+    "PlatformToolProxyProviderError",
+    "PlatformToolProxyToolTimeoutError",
+]

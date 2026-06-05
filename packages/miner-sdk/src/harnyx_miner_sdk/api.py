@@ -19,6 +19,7 @@ from harnyx_miner_sdk.tools.search_models import (
     FetchPageResponse,
     SearchAiSearchRequest,
     SearchAiSearchResponse,
+    SearchProviderName,
     SearchWebSearchRequest,
     SearchWebSearchResponse,
 )
@@ -96,6 +97,7 @@ class _LlmChatThinkingPayload(BaseModel):
 class _LlmChatInvocationPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    provider: Literal["chutes", "openrouter"]
     model: str
     messages: list[dict[str, Any]]
     timeout: ToolInvocationTimeout | None = None
@@ -174,12 +176,13 @@ async def search_web(
     search_queries: str | Sequence[str],
     /,
     *,
+    provider: SearchProviderName,
     timeout: float | None = None,
     **kwargs: Any,
 ) -> ToolCallResponse[SearchWebSearchResponse]:
     """Execute the validator-hosted search tool and return its response payload."""
 
-    raw_payload = {"search_queries": search_queries, **kwargs}
+    raw_payload = {"provider": provider, "search_queries": search_queries, **kwargs}
     if timeout is not None:
         raw_payload["timeout"] = timeout
     payload = SearchWebSearchRequest.model_validate(raw_payload).model_dump(exclude_none=True, mode="json")
@@ -202,12 +205,13 @@ async def search_ai(
     prompt: str,
     /,
     *,
+    provider: SearchProviderName,
     timeout: float | None = None,
     **kwargs: Any,
 ) -> ToolCallResponse[SearchAiSearchResponse]:
     """Execute the validator-hosted AI search tool and return its response payload."""
 
-    raw_payload = {"prompt": prompt, **kwargs}
+    raw_payload = {"provider": provider, "prompt": prompt, **kwargs}
     if timeout is not None:
         raw_payload["timeout"] = timeout
     payload = SearchAiSearchRequest.model_validate(raw_payload).model_dump(exclude_none=True, mode="json")
@@ -230,12 +234,13 @@ async def fetch_page(
     url: str,
     /,
     *,
+    provider: SearchProviderName,
     timeout: float | None = None,
     **kwargs: Any,
 ) -> ToolCallResponse[FetchPageResponse]:
     """Execute the validator-hosted page fetch tool and return its response payload."""
 
-    raw_payload = {"url": url, **kwargs}
+    raw_payload = {"provider": provider, "url": url, **kwargs}
     if timeout is not None:
         raw_payload["timeout"] = timeout
     payload = FetchPageRequest.model_validate(raw_payload).model_dump(exclude_none=True, mode="json")
@@ -256,6 +261,7 @@ async def fetch_page(
 
 async def llm_chat(
     *,
+    provider: Literal["chutes", "openrouter"],
     messages: Sequence[Mapping[str, Any]],
     model: str,
     thinking: Mapping[str, Any] | LlmThinkingConfig | None = None,
@@ -264,13 +270,11 @@ async def llm_chat(
 ) -> LlmChatResult:
     """Invoke the validator-hosted LLM chat tool and return its response payload."""
 
-    payload_raw = {"model": model, "messages": [dict(message) for message in messages]}
+    payload_raw = {"provider": provider, "model": model, "messages": [dict(message) for message in messages]}
     if thinking is not None:
         payload_raw["thinking"] = asdict(thinking) if isinstance(thinking, LlmThinkingConfig) else thinking
     if timeout is not None:
         payload_raw["timeout"] = timeout
-    if "provider" in params:
-        params = {k: v for k, v in params.items() if k != "provider"}
     if params:
         payload_raw.update(params)
     payload = _LlmChatInvocationPayload.model_validate(payload_raw).model_dump(

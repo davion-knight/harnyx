@@ -25,7 +25,7 @@ def _build_parallel_client(settings: LlmSettings) -> ParallelClient:
 async def test_parallel_search_web_live() -> None:
     settings = LlmSettings()
     client = _build_parallel_client(settings)
-    request = SearchWebSearchRequest(search_queries=("python", "documentation"), num=3)
+    request = SearchWebSearchRequest(provider="parallel", search_queries=("python", "documentation"), num=3)
     try:
         response = await client.search_web(request)
         assert isinstance(response.data, list)
@@ -39,6 +39,7 @@ async def test_parallel_search_ai_live() -> None:
     client = _build_parallel_client(settings)
     try:
         request = SearchAiSearchRequest(
+            provider="parallel",
             prompt="Find the official Python documentation homepage",
             count=10,
         )
@@ -53,7 +54,7 @@ async def test_parallel_fetch_page_live() -> None:
     settings = LlmSettings()
     client = _build_parallel_client(settings)
     try:
-        response = await client.fetch_page(FetchPageRequest(url="https://example.com"))
+        response = await client.fetch_page(FetchPageRequest(provider="parallel", url="https://example.com"))
         assert len(response.data) == 1
         assert response.data[0].url == "https://example.com"
         assert response.data[0].content
@@ -73,6 +74,7 @@ async def test_miner_paid_parallel_helper_search_ai_live() -> None:
     )
     try:
         request = SearchAiSearchRequest(
+            provider="parallel",
             prompt="Find the official Python documentation homepage",
             count=10,
         )

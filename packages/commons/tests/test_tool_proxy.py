@@ -145,7 +145,7 @@ async def test_search_web_helper_invokes_tool_proxy() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_web(("harnyx", "subnet"), num=3)
+            result = await search_web(("harnyx", "subnet"), provider="parallel", num=3)
     finally:
         await proxy.aclose()
 
@@ -154,7 +154,7 @@ async def test_search_web_helper_invokes_tool_proxy() -> None:
     assert result.results[0].url == "https://example.com"
     payload = captured["payload"]
     assert payload["tool"] == "search_web"
-    assert payload["kwargs"] == {"search_queries": ["harnyx", "subnet"], "num": 3}
+    assert payload["kwargs"] == {"provider": "parallel", "search_queries": ["harnyx", "subnet"], "num": 3}
 
 
 async def test_search_web_helper_normalizes_plain_string_query() -> None:
@@ -186,14 +186,14 @@ async def test_search_web_helper_normalizes_plain_string_query() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_web("harnyx subnet", num=3)
+            result = await search_web("harnyx subnet", provider="parallel", num=3)
     finally:
         await proxy.aclose()
 
     assert result.receipt_id == "r2"
     payload = captured["payload"]
     assert payload["tool"] == "search_web"
-    assert payload["kwargs"] == {"search_queries": ["harnyx subnet"], "num": 3}
+    assert payload["kwargs"] == {"provider": "parallel", "search_queries": ["harnyx subnet"], "num": 3}
 
 
 async def test_search_web_helper_invokes_tool_proxy_with_timeout() -> None:
@@ -218,14 +218,19 @@ async def test_search_web_helper_invokes_tool_proxy_with_timeout() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_web("harnyx subnet", num=3, timeout=5)
+            result = await search_web("harnyx subnet", provider="parallel", num=3, timeout=5)
     finally:
         await proxy.aclose()
 
     assert result.receipt_id == "r3"
     payload = captured["payload"]
     assert payload["tool"] == "search_web"
-    assert payload["kwargs"] == {"search_queries": ["harnyx subnet"], "num": 3, "timeout": 5.0}
+    assert payload["kwargs"] == {
+        "provider": "parallel",
+        "search_queries": ["harnyx subnet"],
+        "num": 3,
+        "timeout": 5.0,
+    }
 
 
 async def test_search_web_helper_rejects_removed_start_pagination() -> None:
@@ -241,7 +246,7 @@ async def test_search_web_helper_rejects_removed_start_pagination() -> None:
     try:
         with bind_tool_invoker(proxy):
             with pytest.raises(ValidationError):
-                await search_web("harnyx subnet", start=10)
+                await search_web("harnyx subnet", provider="parallel", start=10)
     finally:
         await proxy.aclose()
 
@@ -435,7 +440,7 @@ async def test_fetch_page_helper_invokes_tool_proxy() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await fetch_page("https://example.com")
+            result = await fetch_page("https://example.com", provider="parallel")
     finally:
         await proxy.aclose()
 
@@ -444,7 +449,7 @@ async def test_fetch_page_helper_invokes_tool_proxy() -> None:
     assert result.response.data[0].content == "page body"
     payload = captured["payload"]
     assert payload["tool"] == "fetch_page"
-    assert payload["kwargs"] == {"url": "https://example.com"}
+    assert payload["kwargs"] == {"provider": "parallel", "url": "https://example.com"}
 
 
 async def test_fetch_page_helper_invokes_tool_proxy_with_timeout() -> None:
@@ -486,14 +491,14 @@ async def test_fetch_page_helper_invokes_tool_proxy_with_timeout() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await fetch_page("https://example.com", timeout=5)
+            result = await fetch_page("https://example.com", provider="parallel", timeout=5)
     finally:
         await proxy.aclose()
 
     assert result.receipt_id == "page-1"
     payload = captured["payload"]
     assert payload["tool"] == "fetch_page"
-    assert payload["kwargs"] == {"url": "https://example.com", "timeout": 5.0}
+    assert payload["kwargs"] == {"provider": "parallel", "url": "https://example.com", "timeout": 5.0}
 
 
 async def test_search_ai_helper_invokes_tool_proxy_with_timeout() -> None:
@@ -518,30 +523,40 @@ async def test_search_ai_helper_invokes_tool_proxy_with_timeout() -> None:
     )
     try:
         with bind_tool_invoker(proxy):
-            result = await search_ai("harnyx subnet", count=10, timeout=5)
+            result = await search_ai("harnyx subnet", provider="parallel", count=10, timeout=5)
     finally:
         await proxy.aclose()
 
     assert result.receipt_id == "ai-1"
     payload = captured["payload"]
     assert payload["tool"] == "search_ai"
-    assert payload["kwargs"] == {"prompt": "harnyx subnet", "count": 10, "timeout": 5.0}
+    assert payload["kwargs"] == {
+        "provider": "parallel",
+        "prompt": "harnyx subnet",
+        "count": 10,
+        "timeout": 5.0,
+    }
 
 
 async def _call_search_web_with_timeout(timeout: object) -> object:
-    return await search_web("harnyx subnet", timeout=timeout)
+    return await search_web("harnyx subnet", provider="parallel", timeout=timeout)
 
 
 async def _call_search_ai_with_timeout(timeout: object) -> object:
-    return await search_ai("harnyx subnet", timeout=timeout)
+    return await search_ai("harnyx subnet", provider="parallel", timeout=timeout)
 
 
 async def _call_fetch_page_with_timeout(timeout: object) -> object:
-    return await fetch_page("https://example.com", timeout=timeout)
+    return await fetch_page("https://example.com", provider="parallel", timeout=timeout)
 
 
 async def _call_llm_chat_with_timeout(timeout: object) -> object:
-    return await llm_chat(messages=[{"role": "user", "content": "hi"}], model="demo-model", timeout=timeout)
+    return await llm_chat(
+        provider="chutes",
+        messages=[{"role": "user", "content": "hi"}],
+        model="demo-model",
+        timeout=timeout,
+    )
 
 
 async def _call_tooling_info_with_timeout(timeout: object) -> object:
@@ -639,6 +654,7 @@ async def test_llm_chat_helper_invokes_tool_proxy() -> None:
     try:
         with bind_tool_invoker(proxy):
             result = await llm_chat(
+                provider="chutes",
                 messages=[{"role": "user", "content": "hi"}],
                 model="demo-model",
                 temperature=0.2,
@@ -655,6 +671,7 @@ async def test_llm_chat_helper_invokes_tool_proxy() -> None:
     assert result.results[0].raw == "hi"
     payload = captured["payload"]
     assert payload["tool"] == "llm_chat"
+    assert payload["kwargs"]["provider"] == "chutes"
     assert payload["kwargs"]["model"] == "demo-model"
     assert payload["kwargs"]["messages"] == [{"role": "user", "content": "hi"}]
     assert payload["kwargs"]["temperature"] == 0.2
@@ -695,6 +712,7 @@ async def test_llm_chat_helper_invokes_tool_proxy_with_timeout() -> None:
     try:
         with bind_tool_invoker(proxy):
             result = await llm_chat(
+                provider="chutes",
                 messages=[{"role": "user", "content": "hi"}],
                 model="demo-model",
                 timeout=5,
@@ -705,6 +723,7 @@ async def test_llm_chat_helper_invokes_tool_proxy_with_timeout() -> None:
     assert result.receipt_id == "chat-2"
     payload = captured["payload"]
     assert payload["tool"] == "llm_chat"
+    assert payload["kwargs"]["provider"] == "chutes"
     assert payload["kwargs"]["model"] == "demo-model"
     assert payload["kwargs"]["messages"] == [{"role": "user", "content": "hi"}]
     assert payload["kwargs"]["timeout"] == 5.0
@@ -724,6 +743,7 @@ async def test_llm_chat_helper_rejects_thinking_effort_and_budget() -> None:
         with bind_tool_invoker(proxy):
             with pytest.raises(ValidationError):
                 await llm_chat(
+                    provider="chutes",
                     messages=[{"role": "user", "content": "hi"}],
                     model="demo-model",
                     thinking={"enabled": True, "effort": "high", "budget": 1024},
@@ -746,6 +766,7 @@ async def test_llm_chat_helper_rejects_coerced_thinking_scalars() -> None:
         with bind_tool_invoker(proxy):
             with pytest.raises(ValidationError):
                 await llm_chat(
+                    provider="chutes",
                     messages=[{"role": "user", "content": "hi"}],
                     model="demo-model",
                     thinking={"enabled": "false", "budget": True},

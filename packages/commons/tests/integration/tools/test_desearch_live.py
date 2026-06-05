@@ -20,7 +20,7 @@ async def test_search_web_live() -> None:
         api_key=settings.desearch_api_key_value,
         timeout=DESEARCH.timeout_seconds,
     )
-    request = SearchWebSearchRequest(search_queries=("United States", "latest news"), num=5)
+    request = SearchWebSearchRequest(provider="desearch", search_queries=("United States", "latest news"), num=5)
 
     result = await client.search_links_web(request)
     await client.aclose()
@@ -36,7 +36,7 @@ async def test_fetch_page_live() -> None:
         api_key=settings.desearch_api_key_value,
         timeout=DESEARCH.timeout_seconds,
     )
-    request = FetchPageRequest(url="https://example.com")
+    request = FetchPageRequest(provider="desearch", url="https://example.com")
 
     result = await client.fetch_page(request)
     await client.aclose()

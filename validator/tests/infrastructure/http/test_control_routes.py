@@ -333,7 +333,7 @@ def test_status_endpoint_awaits_auth_with_request_primitives() -> None:
 
     response = client.get(
         "/validator/status?verbose=1",
-        headers={"Authorization": "Bittensor ss58=\"5demo\",sig=\"00\""},
+        headers={"Authorization": 'Bittensor ss58="5demo",sig="00"'},
     )
 
     assert response.status_code == 200
@@ -350,12 +350,14 @@ def test_status_endpoint_awaits_auth_with_request_primitives() -> None:
         "disk_total_bytes": 8192,
         "disk_percent": 50.0,
     }
-    assert auth_calls == [(
-        "GET",
-        "/validator/status?verbose=1",
-        b"",
-        'Bittensor ss58="5demo",sig="00"',
-    )]
+    assert auth_calls == [
+        (
+            "GET",
+            "/validator/status?verbose=1",
+            b"",
+            'Bittensor ss58="5demo",sig="00"',
+        )
+    ]
 
 
 def test_status_endpoint_returns_signed_ownership_proof_when_timestamp_header_is_present() -> None:
@@ -633,6 +635,8 @@ def _make_batch_payload(
             {
                 "uid": 7,
                 "artifact_id": str(artifact_id or uuid4()),
+                "miner_hotkey_ss58": "miner-hotkey",
+                "task_retry_count": 0,
                 "content_hash": "hash-123",
                 "size_bytes": 42,
             }
@@ -773,9 +777,7 @@ def test_status_and_runs_endpoints_split_summary_from_detail_page() -> None:
         }
     ]
 
-    runs_response = client.get(
-        f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10"
-    )
+    runs_response = client.get(f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10")
     assert runs_response.status_code == 200
     runs_body = runs_response.json()
     assert runs_body["batch_id"] == str(batch_id)
@@ -873,9 +875,7 @@ def test_failed_status_keeps_failure_detail_and_runs_page_keeps_sequence() -> No
     assert body["total"] == 2
     assert body["completed"] == 2
     assert body["remaining"] == 0
-    runs_response = client.get(
-        f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10"
-    )
+    runs_response = client.get(f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10")
     assert runs_response.status_code == 200
     runs_body = runs_response.json()
     assert [item["submission"]["run"]["task_id"] for item in runs_body["items"]] == [
@@ -1055,14 +1055,9 @@ def test_runs_endpoint_includes_timeout_inconclusive_pair_result_when_batch_fail
     body = response.json()
     assert body["status"] == "failed"
     assert body["failure_detail"]["error_code"] == "timeout_inconclusive"
-    runs_response = client.get(
-        f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10"
-    )
+    runs_response = client.get(f"/validator/miner-task-batches/{batch_id}/runs?after_sequence=0&limit=10")
     assert runs_response.status_code == 200
-    assert (
-        runs_response.json()["items"][0]["submission"]["specifics"]["error"]["code"]
-        == "timeout_inconclusive"
-    )
+    assert runs_response.json()["items"][0]["submission"]["specifics"]["error"]["code"] == "timeout_inconclusive"
 
 
 def test_status_endpoint_replaces_blank_failure_message_at_transport_boundary() -> None:
@@ -1284,6 +1279,8 @@ def test_accept_batch_endpoint_accepts_platform_json_payload() -> None:
                     "artifact_id": str(artifact_id),
                     "content_hash": "hash-123",
                     "size_bytes": 42,
+                    "miner_hotkey_ss58": "miner-hotkey",
+                    "task_retry_count": 0,
                 }
             ],
         },
@@ -1547,6 +1544,8 @@ def test_accept_batch_endpoint_rejects_legacy_iso_keys() -> None:
                     "artifact_id": str(artifact_id),
                     "content_hash": "hash-123",
                     "size_bytes": 42,
+                    "miner_hotkey_ss58": "miner-hotkey",
+                    "task_retry_count": 0,
                 }
             ],
         },
@@ -1593,6 +1592,8 @@ def test_accept_batch_endpoint_rejects_non_strict_artifact_uid_payload() -> None
                     "artifact_id": str(artifact_id),
                     "content_hash": "hash-123",
                     "size_bytes": 42,
+                    "miner_hotkey_ss58": "miner-hotkey",
+                    "task_retry_count": 0,
                 }
             ],
         },

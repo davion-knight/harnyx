@@ -19,10 +19,9 @@ from harnyx_commons.domain.tool_usage import (
     SearchToolUsageSummary,
     ToolUsageSummary,
 )
-from harnyx_commons.llm.pricing import price_llm, price_search
+from harnyx_commons.llm.pricing import price_miner_llm, price_search
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.llm.schema import LlmUsage
-from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, parse_tool_model
 from harnyx_commons.miner_task_scoring import EvaluationScoringService
 from harnyx_commons.tools.types import SearchToolName, is_search_tool
 from harnyx_validator.application.dto.evaluation import (
@@ -168,25 +167,22 @@ class UsageSummarizer:
         providers: dict[str, dict[str, LlmModelUsageCost]] = {}
         actual_cost_by_model = _actual_llm_cost_by_model(receipts)
 
-        for _, models in budget.llm_usage_totals.items():
+        for provider, models in budget.llm_usage_totals.items():
             for model, totals in models.items():
                 try:
-                    tool_model = parse_tool_model(model)
-                except ValueError:
+                    cost = price_miner_llm(
+                        provider,
+                        model,
+                        self._llm_usage_totals_to_usage(totals),
+                    )
+                except KeyError:
                     continue
-                if tool_model not in ALLOWED_TOOL_MODELS:
-                    continue
-                cost = price_llm(
-                    tool_model,
-                    self._llm_usage_totals_to_usage(totals),
-                )
-                model_provider = tool_model.split("/", 1)[0]
-                provider_models = providers.setdefault(model_provider, {})
-                provider_models[str(tool_model)] = LlmModelUsageCost(
+                provider_models = providers.setdefault(provider, {})
+                provider_models[model] = LlmModelUsageCost(
                     usage=totals,
                     cost=cost,
                     reference_cost=cost,
-                    actual_cost=actual_cost_by_model.get(str(tool_model)),
+                    actual_cost=actual_cost_by_model.get(model),
                 )
                 call_count += totals.call_count
                 prompt_tokens += totals.prompt_tokens

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import socket
 from datetime import datetime
@@ -10,14 +11,18 @@ import httpx
 import pytest
 
 from harnyx_commons.bittensor import build_canonical_request
+from harnyx_commons.errors import BudgetExceededError, ToolInvocationTimeoutError, ToolProviderError
 from harnyx_validator.infrastructure.tools.platform_client import (
+    AsyncPlatformToolProxyPlatformClient,
     HttpPlatformClient,
     PlatformClientError,
+    PlatformToolProxyBudgetExceededError,
+    PlatformToolProxyInvocationError,
+    PlatformToolProxyProviderError,
+    PlatformToolProxyToolTimeoutError,
 )
 
-_HEADER_PATTERN = re.compile(
-    r'^Bittensor\s+ss58="(?P<ss58>[^"]+)",\s*sig="(?P<sig>[0-9a-f]+)"$'
-)
+_HEADER_PATTERN = re.compile(r'^Bittensor\s+ss58="(?P<ss58>[^"]+)",\s*sig="(?P<sig>[0-9a-f]+)"$')
 
 
 def _keypair() -> bt.Keypair:
@@ -58,6 +63,8 @@ def _batch_response(
                 "artifact_id": str(artifact_id),
                 "content_hash": "abc",
                 "size_bytes": 1,
+                "miner_hotkey_ss58": "miner-hotkey",
+                "task_retry_count": 2,
             }
         ],
         "champion_artifact_id": str(champion_artifact_id),
@@ -200,7 +207,471 @@ def test_get_miner_task_batch_accepts_bri_494_deployment_safe_response_shape() -
     batch = client.get_miner_task_batch(batch_id)
 
     assert batch.artifacts[0].artifact_id == artifact_id
-    assert not hasattr(batch.artifacts[0], "task_retry_count")
+    assert batch.artifacts[0].miner_hotkey_ss58 == "miner-hotkey"
+    assert batch.artifacts[0].task_retry_count == 2
+
+
+def test_get_miner_task_batch_accepts_submitted_at_on_platform_read_artifacts() -> None:
+    batch_id = uuid4()
+    task_id = uuid4()
+    artifact_id = uuid4()
+    champion_artifact_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _assert_signed(request, keypair)
+        if request.method == "GET" and request.url.path == f"/v1/miner-task-batches/batch/{batch_id}":
+            response = _batch_response(
+                batch_id=batch_id,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                champion_artifact_id=champion_artifact_id,
+                budget_usd=0.1,
+            )
+            payload = response.json()
+            payload["artifacts"][0]["submitted_at"] = "2026-05-30T12:00:00Z"
+            return httpx.Response(status_code=200, json=payload)
+        return httpx.Response(status_code=404)
+
+    keypair = _keypair()
+    client = HttpPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+
+    batch = client.get_miner_task_batch(batch_id)
+
+    assert batch.artifacts[0].artifact_id == artifact_id
+
+
+def test_get_miner_task_batch_rejects_unknown_artifact_extra_after_submitted_at_strip() -> None:
+    batch_id = uuid4()
+    task_id = uuid4()
+    artifact_id = uuid4()
+    champion_artifact_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _assert_signed(request, keypair)
+        if request.method == "GET" and request.url.path == f"/v1/miner-task-batches/batch/{batch_id}":
+            response = _batch_response(
+                batch_id=batch_id,
+                task_id=task_id,
+                artifact_id=artifact_id,
+                champion_artifact_id=champion_artifact_id,
+                budget_usd=0.1,
+            )
+            payload = response.json()
+            payload["artifacts"][0]["submitted_at"] = "2026-05-30T12:00:00Z"
+            payload["artifacts"][0]["unexpected_extra"] = True
+            return httpx.Response(status_code=200, json=payload)
+        return httpx.Response(status_code=404)
+
+    keypair = _keypair()
+    client = HttpPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ValueError):
+        client.get_miner_task_batch(batch_id)
+
+
+@pytest.mark.anyio("asyncio")
+async def test_platform_tool_proxy_grant_posts_attempt_number() -> None:
+    batch_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    validator_session_id = uuid4()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        _assert_signed(request, keypair)
+        assert request.method == "POST"
+        assert request.url.path == "/v1/platform-tool-proxy/grants"
+        assert json.loads(request.content) == {
+            "batch_id": str(batch_id),
+            "artifact_id": str(artifact_id),
+            "task_id": str(task_id),
+            "validator_session_id": str(validator_session_id),
+            "attempt_number": 2,
+        }
+        return httpx.Response(
+            status_code=200,
+            json={"token": "platform-tool-proxy-token", "expires_at": "2026-05-30T12:15:00+00:00"},
+        )
+
+    keypair = _keypair()
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+
+    grant = await client.create_platform_tool_proxy_grant(
+        batch_id=batch_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+        validator_session_id=validator_session_id,
+        attempt_number=2,
+    )
+
+    assert grant.token == "platform-tool-proxy-token"  # noqa: S105 - fixed test-only proxy token
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    ("error_code", "status_code"),
+    [
+        ("platform_tool_proxy_denied", 403),
+        ("platform_tool_proxy_grant_failed", 400),
+    ],
+)
+async def test_platform_tool_proxy_grant_preserves_proxy_error_code(
+    error_code: str,
+    status_code: int,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/grants":
+            return httpx.Response(
+                status_code=status_code,
+                json={"error_code": error_code, "message": f"{error_code} message"},
+            )
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError) as exc_info:
+        await client.create_platform_tool_proxy_grant(
+            batch_id=uuid4(),
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+        )
+
+    assert exc_info.value.status_code == status_code
+    assert exc_info.value.error_code == error_code
+    assert str(exc_info.value) == f"{error_code} message"
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(status_code=500, text="not json"),
+        httpx.Response(status_code=500, json={"error_code": "unknown_platform_error"}),
+    ],
+)
+async def test_platform_tool_proxy_grant_unknown_error_response_preserves_grant_failed_metadata(
+    response: httpx.Response,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/grants":
+            return response
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError) as exc_info:
+        await client.create_platform_tool_proxy_grant(
+            batch_id=uuid4(),
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.error_code == "platform_tool_proxy_grant_failed"
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(status_code=200, text="not json"),
+        httpx.Response(status_code=200, json={"token": "grant"}),
+    ],
+)
+async def test_platform_tool_proxy_grant_invalid_success_response_preserves_grant_failed_metadata(
+    response: httpx.Response,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/grants":
+            return response
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError) as exc_info:
+        await client.create_platform_tool_proxy_grant(
+            batch_id=uuid4(),
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+        )
+
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.error_code == "platform_tool_proxy_grant_failed"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_platform_tool_proxy_execute_maps_tool_timeout_error_code_to_timeout_exception() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return httpx.Response(
+                status_code=408,
+                json={"error_code": "tool_timeout", "message": "search_web timed out after 1 second"},
+            )
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyToolTimeoutError, match="search_web timed out") as exc_info:
+        await client.execute_platform_tool_proxy_tool(
+            token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+            uid=7,
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+            receipt_id=str(uuid4()),
+            tool="search_web",
+            args=(),
+            kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+            transport_timeout_seconds=11.0,
+        )
+
+    assert isinstance(exc_info.value, ToolInvocationTimeoutError)
+    assert exc_info.value.status_code == 408
+    assert exc_info.value.error_code == "tool_timeout"
+    assert requests[0].headers["x-platform-tool-proxy-token"] == "proxy-token"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_platform_tool_proxy_execute_maps_provider_failed_to_tool_provider_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return httpx.Response(
+                status_code=502,
+                json={"error_code": "provider_failed", "message": "provider rejected"},
+            )
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyProviderError, match="provider rejected") as exc_info:
+        await client.execute_platform_tool_proxy_tool(
+            token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+            uid=7,
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+            receipt_id=str(uuid4()),
+            tool="search_web",
+            args=(),
+            kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+            transport_timeout_seconds=11.0,
+        )
+
+    assert isinstance(exc_info.value, ToolProviderError)
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.error_code == "provider_failed"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_platform_tool_proxy_execute_maps_budget_exhausted_to_budget_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return httpx.Response(
+                status_code=400,
+                json={"error_code": "budget_exhausted", "message": "grant budget exhausted"},
+            )
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyBudgetExceededError, match="grant budget exhausted") as exc_info:
+        await client.execute_platform_tool_proxy_tool(
+            token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+            uid=7,
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+            receipt_id=str(uuid4()),
+            tool="search_web",
+            args=(),
+            kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+            transport_timeout_seconds=11.0,
+        )
+
+    assert isinstance(exc_info.value, BudgetExceededError)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.error_code == "budget_exhausted"
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "platform_tool_proxy_denied",
+        "miner_credential_missing",
+        "concurrency_exhausted",
+        "unsupported_provider",
+        "unsupported_model",
+        "invalid_request",
+        "platform_error",
+        "platform_tool_proxy_execution_failed",
+        "duplicate_call",
+    ],
+)
+async def test_platform_tool_proxy_execute_maps_proxy_policy_errors_to_non_provider_error(
+    error_code: str,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return httpx.Response(
+                status_code=400,
+                json={"error_code": error_code, "message": f"{error_code} message"},
+            )
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError) as exc_info:
+        await client.execute_platform_tool_proxy_tool(
+            token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+            uid=7,
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+            receipt_id=str(uuid4()),
+            tool="search_web",
+            args=(),
+            kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+            transport_timeout_seconds=11.0,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.error_code == error_code
+    assert str(exc_info.value) == f"{error_code} message"
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(status_code=500, text="not json"),
+        httpx.Response(status_code=500, json={"error_code": "unknown_platform_error"}),
+    ],
+)
+async def test_platform_tool_proxy_execute_unknown_error_response_preserves_platform_error_metadata(
+    response: httpx.Response,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return response
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError) as exc_info:
+        await client.execute_platform_tool_proxy_tool(
+            token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+            uid=7,
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+            receipt_id=str(uuid4()),
+            tool="search_web",
+            args=(),
+            kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+            transport_timeout_seconds=11.0,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.error_code == "platform_error"
+
+
+@pytest.mark.anyio("asyncio")
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(status_code=200, text="not json"),
+        httpx.Response(status_code=200, json={"execution": {"elapsed_ms": 1.0}}),
+    ],
+)
+async def test_platform_tool_proxy_execute_invalid_success_response_preserves_platform_error_metadata(
+    response: httpx.Response,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return response
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(PlatformToolProxyInvocationError) as exc_info:
+        await client.execute_platform_tool_proxy_tool(
+            token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+            uid=7,
+            artifact_id=uuid4(),
+            task_id=uuid4(),
+            validator_session_id=uuid4(),
+            attempt_number=1,
+            receipt_id=str(uuid4()),
+            tool="search_web",
+            args=(),
+            kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+            transport_timeout_seconds=11.0,
+        )
+
+    assert exc_info.value.status_code == 200
+    assert exc_info.value.error_code == "platform_error"
 
 
 def test_get_champion_weights_retries_transient_connect_timeout() -> None:

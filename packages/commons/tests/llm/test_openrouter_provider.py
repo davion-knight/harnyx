@@ -14,7 +14,9 @@ from harnyx_commons.llm.providers.openai_compatible import OpenAiCompatibleLlmPr
 from harnyx_commons.llm.providers.openrouter import (
     OPENROUTER_BASE_URL,
     OPENROUTER_ENDPOINT_ID,
-    OPENROUTER_MODEL_ALIASES,
+    OPENROUTER_INTERNAL_SUPPORTED_MODELS,
+    OPENROUTER_INTERNAL_TO_NATIVE_MODEL,
+    OPENROUTER_NATIVE_SUPPORTED_MODELS,
     OPENROUTER_SUPPORTED_MODELS,
     OpenRouterLlmProvider,
     build_openrouter_chat_provider,
@@ -31,7 +33,6 @@ from harnyx_commons.llm.schema import (
 )
 from harnyx_commons.llm.tool_models import (
     MINER_SELECTED_LLM_PROVIDER_MODELS,
-    provider_native_tool_model_aliases,
 )
 
 pytestmark = pytest.mark.anyio("asyncio")
@@ -74,13 +75,18 @@ class _FakeClient:
 
 
 def test_openrouter_supported_models_come_from_miner_selected_provider_contract() -> None:
-    assert OPENROUTER_SUPPORTED_MODELS == MINER_SELECTED_LLM_PROVIDER_MODELS[OPENROUTER_PROVIDER]
+    assert OPENROUTER_NATIVE_SUPPORTED_MODELS == MINER_SELECTED_LLM_PROVIDER_MODELS[OPENROUTER_PROVIDER]
+    assert set(OPENROUTER_INTERNAL_SUPPORTED_MODELS) == set(OPENROUTER_INTERNAL_TO_NATIVE_MODEL)
+    assert set(OPENROUTER_NATIVE_SUPPORTED_MODELS) <= set(OPENROUTER_SUPPORTED_MODELS)
+    assert set(OPENROUTER_INTERNAL_SUPPORTED_MODELS) <= set(OPENROUTER_SUPPORTED_MODELS)
 
 
-def test_openrouter_payload_aliases_are_inverse_of_miner_selected_provider_aliases() -> None:
-    assert OPENROUTER_MODEL_ALIASES == {
-        canonical: native
-        for native, canonical in provider_native_tool_model_aliases(OPENROUTER_PROVIDER).items()
+def test_openrouter_internal_routes_rewrite_only_internal_canonical_models() -> None:
+    assert OPENROUTER_INTERNAL_TO_NATIVE_MODEL == {
+        "deepseek-ai/DeepSeek-V3.2-TEE": "deepseek/deepseek-v3.2",
+        "zai-org/GLM-5-TEE": "z-ai/glm-5",
+        "Qwen/Qwen3.6-27B-TEE": "qwen/qwen3.6-27b",
+        "google/gemma-4-31B-turbo-TEE": "google/gemma-4-31b-it",
     }
 
 
@@ -238,7 +244,7 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     response = await provider.invoke(_request(model=model))
     await provider.aclose()
 
-    expected_payload_model = OPENROUTER_MODEL_ALIASES.get(model, model)
+    expected_payload_model = OPENROUTER_INTERNAL_TO_NATIVE_MODEL.get(model, model)
     assert captured["url"] == f"{OPENROUTER_BASE_URL}/chat/completions"
     assert captured["authorization"] == "Bearer test-openrouter-key"
     assert captured["json"]["model"] == expected_payload_model

@@ -86,7 +86,7 @@ from harnyx_miner_sdk.query import CitationRef, Query, Response
 
 
 async def query(query: Query) -> Response:
-    search = await search_web(query.text, num=5)
+    search = await search_web(query.text, provider="parallel", num=5)
     top_result = search.results[0]
     return Response(
         text="...",
@@ -135,28 +135,30 @@ Use the citation only when that result actually supports a material claim in you
 ## Tool helpers
 
 These helpers call validator-hosted tools when running inside the sandbox:
-- `search_web(query, timeout=..., **kwargs)`
-- `search_ai(query, timeout=..., **kwargs)`
-- `fetch_page(url, timeout=...)`
-- `llm_chat(messages=[...], model="...", timeout=..., temperature=0.0, thinking={"enabled": True})`
+- `search_web(query, provider="parallel" | "desearch", timeout=..., **kwargs)`
+- `search_ai(query, provider="parallel" | "desearch", timeout=..., **kwargs)`
+- `fetch_page(url, provider="parallel" | "desearch", timeout=...)`
+- `llm_chat(provider="chutes" | "openrouter", messages=[...], model="<provider-specific model id>", timeout=..., temperature=0.0, thinking={"enabled": True})`
 - `tooling_info(timeout=...)`
 - `test_tool(message, timeout=...)`
 
 Every hosted tool helper accepts an optional positive finite `timeout` in seconds. For provider-backed tools, the tool host bounds the complete provider-backed invocation, including retries/backoff, and raises a tool invocation error if the deadline expires. `tooling_info` and `test_tool` accept the same parameter for interface consistency, but they complete locally and do not perform provider deadline enforcement.
 
+`llm_chat` model ids are provider-specific. Use `tooling_info().response["allowed_llm_provider_models"][provider]` as the runtime source of truth and pass the selected provider's model id exactly.
+
 `llm_chat` accepts a typed `thinking` option:
 
-| Model | `enabled=True` / `enabled=False` | `effort` | `budget` |
-|-------|----------------------------------|----------|----------|
-| `openai/gpt-oss-20b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` when routed through OpenRouter | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
-| `openai/gpt-oss-120b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` when routed through OpenRouter | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
-| `deepseek-ai/DeepSeek-V3.2-TEE` | Supported via `chat_template_kwargs.thinking` | No verified knob; ignored | No verified knob; ignored |
-| `zai-org/GLM-5-TEE` | Supported via `chat_template_kwargs.enable_thinking` | No verified knob; ignored | No verified knob; ignored |
-| `Qwen/Qwen3.6-27B-TEE` | Custom route: `chat_template_kwargs.enable_thinking`; OpenRouter route: `reasoning.enabled` / `reasoning.effort="none"` | OpenRouter route: `reasoning.effort`; custom route: no verified knob | OpenRouter route: `reasoning.max_tokens`; custom route: no verified knob |
-| `google/gemma-4-31B-turbo-TEE` | Supported via `chat_template_kwargs.enable_thinking` when routed through the custom OpenAI-compatible Gemma endpoint | No verified knob; ignored | No verified knob; ignored |
+| Provider | Model | `enabled=True` / `enabled=False` | `effort` | `budget` |
+|----------|-------|----------------------------------|----------|----------|
+| `openrouter` | `openai/gpt-oss-20b`, `openai/gpt-oss-120b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
+| `openrouter` | `deepseek/deepseek-v3.2`, `z-ai/glm-5`, `qwen/qwen3.6-27b`, `google/gemma-4-31b-it` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
+| `chutes` | `deepseek-ai/DeepSeek-V3.2-TEE` | Supported via `chat_template_kwargs.thinking` | No verified knob; ignored | No verified knob; ignored |
+| `chutes` | `zai-org/GLM-5-TEE` | Supported via `chat_template_kwargs.enable_thinking` | No verified knob; ignored | No verified knob; ignored |
+| `chutes` | `Qwen/Qwen3.6-27B-TEE`, `google/gemma-4-31B-turbo-TEE` | Supported through internal route controls when the selected backend supports them | No verified Chutes knob; ignored | No verified Chutes knob; ignored |
 
 ```python
 await llm_chat(
+    provider="chutes",
     model="deepseek-ai/DeepSeek-V3.2-TEE",
     messages=[{"role": "user", "content": "Solve 17 * 23."}],
     temperature=0.0,
@@ -164,13 +166,22 @@ await llm_chat(
 )
 
 await llm_chat(
+    provider="chutes",
     model="zai-org/GLM-5-TEE",
     messages=[{"role": "user", "content": "Reply with only ok."}],
     temperature=0.0,
     thinking={"enabled": False},
 )
+
+await llm_chat(
+    provider="openrouter",
+    model="deepseek/deepseek-v3.2",
+    messages=[{"role": "user", "content": "Reply with only ok."}],
+    temperature=0.0,
+    thinking={"effort": "low"},
+)
 ```
 
-Omit `thinking` to use provider defaults. `effort` accepts `"low"`, `"medium"`, or `"high"` and `budget` must be a positive integer. OpenRouter-backed models honor those fields through OpenRouter reasoning controls. Do not send `effort` and `budget` together; that is a validation error. Provider support is best effort, so unsupported level/budget hints are ignored instead of becoming raw provider-body fields.
+Omit `thinking` to use provider defaults. `effort` accepts `"low"`, `"medium"`, or `"high"` and `budget` must be a positive integer. OpenRouter-selected models honor those fields through OpenRouter reasoning controls. Do not send `effort` and `budget` together; that is a validation error. Provider support is best effort, so unsupported level/budget hints are ignored instead of becoming raw provider-body fields.
 
 See [`../../miner/README.md`](../../miner/README.md) for the end-to-end miner workflow (Write -> Test -> Submit).

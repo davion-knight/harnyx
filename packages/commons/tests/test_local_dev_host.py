@@ -73,6 +73,9 @@ async def test_create_local_tool_host_tooling_info_matches_miner_contract(
     assert "search_repo" not in payload["response"]["pricing"]
     assert "get_repo_file" not in payload["response"]["pricing"]
     assert "search_items" not in payload["response"]["pricing"]
+    assert "allowed_tool_models" not in payload["response"]
+    assert "deepseek/deepseek-v3.2" in payload["response"]["allowed_llm_provider_models"]["openrouter"]
+    assert "provider_models" in payload["response"]["pricing"]["llm_chat"]
     assert registry.closed is True
 
 

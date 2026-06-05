@@ -22,6 +22,7 @@ from harnyx_validator.application.dto.evaluation import (
     ScriptArtifactSpec,
 )
 from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
 from harnyx_validator.application.ports.evaluation_record import EvaluationRecordPort
 from harnyx_validator.application.ports.platform import PlatformPort
 from harnyx_validator.application.ports.progress import ProgressRecorder
@@ -63,6 +64,7 @@ class MinerTaskBatchService:
         status_provider: StatusProvider | None = None,
         activity: BatchActivityTracker | None = None,
         config: EvaluationBatchConfig | None = None,
+        platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
     ) -> None:
         self._platform = platform_client
         self._status = status_provider
@@ -80,6 +82,7 @@ class MinerTaskBatchService:
             ),
             clock=lambda: datetime.now(UTC),
             progress=progress,
+            platform_tool_proxy_scopes=platform_tool_proxy_scopes,
         )
         self._planner = BatchExecutionPlanner(
             subtensor_client=subtensor_client,
@@ -94,6 +97,7 @@ class MinerTaskBatchService:
             progress=progress,
             activity=activity,
             config=self._config,
+            platform_tool_proxy_scopes=platform_tool_proxy_scopes,
         )
 
     async def process_async(self, batch: MinerTaskBatchSpec) -> None:

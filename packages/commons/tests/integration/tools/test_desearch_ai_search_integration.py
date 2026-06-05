@@ -46,6 +46,7 @@ async def test_desearch_search_ai_live() -> None:
     try:
         response = await desearch.search_ai(
             SearchAiSearchRequest(
+                provider="desearch",
                 prompt="Find the official Python documentation homepage",
                 count=10,
             )
@@ -68,6 +69,7 @@ async def test_miner_paid_desearch_helper_search_ai_live() -> None:
     try:
         response = await desearch.search_ai(
             SearchAiSearchRequest(
+                provider="desearch",
                 prompt="Find the official Python documentation homepage",
                 count=10,
             )

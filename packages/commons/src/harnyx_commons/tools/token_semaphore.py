@@ -8,9 +8,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from harnyx_commons.errors import ConcurrencyLimitError
-from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, ToolModelName, parse_tool_model
-from harnyx_commons.tools.dto import ToolInvocationRequest, tool_payload_for_invocation
-from harnyx_commons.tools.types import LLM_TOOLS, ToolName
+from harnyx_commons.tools.dto import ToolInvocationRequest
 
 
 @dataclass(slots=True)
@@ -120,51 +118,28 @@ class TokenSemaphore:
 
 @dataclass(frozen=True, slots=True)
 class ToolConcurrencyLimits:
-    llm_max_parallel_calls: int
-    search_max_parallel_calls: int
+    max_parallel_calls: int
 
     def __post_init__(self) -> None:
-        if self.llm_max_parallel_calls <= 0:
-            raise ValueError("llm_max_parallel_calls must be positive")
-        if self.search_max_parallel_calls <= 0:
-            raise ValueError("search_max_parallel_calls must be positive")
+        if self.max_parallel_calls <= 0:
+            raise ValueError("max_parallel_calls must be positive")
 
 
-DEFAULT_TOOL_CONCURRENCY_LIMITS = ToolConcurrencyLimits(
-    llm_max_parallel_calls=2,
-    search_max_parallel_calls=5,
-)
+DEFAULT_TOOL_CONCURRENCY_LIMITS = ToolConcurrencyLimits(max_parallel_calls=20)
 
-_MODEL_LLM_MAX_PARALLEL_CALL_OVERRIDES: dict[ToolModelName, int] = {
-    "deepseek-ai/DeepSeek-V3.2-TEE": 1,
-    "zai-org/GLM-5-TEE": 1,
-}
 
-SEARCH_LANE_TOOLS: frozenset[ToolName] = frozenset(
-    (
-        "search_web",
-        "search_ai",
-        "fetch_page",
-        "tooling_info",
-        "test_tool",
-    )
-)
+def max_parallel_provider_tool_calls(
+    limits: ToolConcurrencyLimits = DEFAULT_TOOL_CONCURRENCY_LIMITS,
+) -> int:
+    """Return the scalar upper bound for a miner script tool session."""
+    return limits.max_parallel_calls
 
 
 class ToolConcurrencyLimiter:
-    """Per-token tool concurrency split by non-LLM lane and LLM model lane."""
+    """Per-token tool concurrency for a miner script session."""
 
     def __init__(self, limits: ToolConcurrencyLimits = DEFAULT_TOOL_CONCURRENCY_LIMITS) -> None:
-        self._llm_by_model = {
-            model: TokenSemaphore(
-                max_parallel_calls=_MODEL_LLM_MAX_PARALLEL_CALL_OVERRIDES.get(
-                    model,
-                    limits.llm_max_parallel_calls,
-                )
-            )
-            for model in ALLOWED_TOOL_MODELS
-        }
-        self._search = TokenSemaphore(max_parallel_calls=limits.search_max_parallel_calls)
+        self._semaphore = TokenSemaphore(max_parallel_calls=limits.max_parallel_calls)
 
     def acquire(self, invocation: ToolInvocationRequest) -> None:
         self._semaphore_for(invocation).acquire(invocation.token)
@@ -179,25 +154,13 @@ class ToolConcurrencyLimiter:
         return self._semaphore_for(invocation).in_flight(invocation.token)
 
     def _semaphore_for(self, invocation: ToolInvocationRequest) -> TokenSemaphore:
-        if invocation.tool in LLM_TOOLS:
-            return self._llm_by_model[_llm_model_for_concurrency(invocation)]
-        if invocation.tool in SEARCH_LANE_TOOLS:
-            return self._search
-        raise ValueError(f"tool {invocation.tool!r} has no concurrency lane")
-
-
-def _llm_model_for_concurrency(invocation: ToolInvocationRequest) -> ToolModelName:
-    payload = tool_payload_for_invocation(invocation)
-    raw_model = payload.get("model")
-    if raw_model is not None and not isinstance(raw_model, str):
-        raise ValueError("llm_chat model must be a string for concurrency limiting")
-    return parse_tool_model(raw_model)
+        return self._semaphore
 
 
 __all__ = [
     "DEFAULT_TOOL_CONCURRENCY_LIMITS",
-    "SEARCH_LANE_TOOLS",
     "TokenSemaphore",
     "ToolConcurrencyLimiter",
     "ToolConcurrencyLimits",
+    "max_parallel_provider_tool_calls",
 ]

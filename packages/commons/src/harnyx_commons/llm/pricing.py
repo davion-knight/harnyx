@@ -10,9 +10,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
+from harnyx_commons.llm.provider_types import CHUTES_PROVIDER, OPENROUTER_PROVIDER
 from harnyx_commons.llm.schema import LlmUsage
-from harnyx_commons.llm.tool_models import ToolModelName
+from harnyx_commons.llm.tool_models import (
+    MINER_SELECTED_LLM_PROVIDER_MODELS,
+    MinerSelectedLlmProviderName,
+    ToolModelName,
+)
 from harnyx_commons.tools.types import SearchToolName
 
 # Per-referenceable-result rates for search tools, keyed by tool name.
@@ -51,10 +57,39 @@ MODEL_PRICING: Mapping[ToolModelName, ModelPricing] = {
     "google/gemma-4-31B-turbo-TEE": ModelPricing(0.13, 0.38, 0.0),
 }
 
+MINER_TOOL_LLM_PRICING: Mapping[MinerSelectedLlmProviderName, Mapping[str, ModelPricing]] = {
+    CHUTES_PROVIDER: {
+        model: MODEL_PRICING[cast(ToolModelName, model)]
+        for model in MINER_SELECTED_LLM_PROVIDER_MODELS[CHUTES_PROVIDER]
+    },
+    OPENROUTER_PROVIDER: {
+        "openai/gpt-oss-20b": MODEL_PRICING["openai/gpt-oss-20b"],
+        "openai/gpt-oss-120b": MODEL_PRICING["openai/gpt-oss-120b"],
+        "deepseek/deepseek-v3.2": MODEL_PRICING["deepseek-ai/DeepSeek-V3.2-TEE"],
+        "z-ai/glm-5": MODEL_PRICING["zai-org/GLM-5-TEE"],
+        "qwen/qwen3.6-27b": MODEL_PRICING["Qwen/Qwen3.6-27B-TEE"],
+        "google/gemma-4-31b-it": MODEL_PRICING["google/gemma-4-31B-turbo-TEE"],
+    },
+}
+
 
 def price_llm(model: ToolModelName, usage: LlmUsage) -> float:
     """Return USD cost for a single LLM call using reference pricing."""
     pricing = MODEL_PRICING[model]
+    return _price_tokens(pricing, usage)
+
+
+def price_miner_llm(provider: str, model: str, usage: LlmUsage) -> float:
+    """Return USD cost for a miner-selected provider/model LLM call."""
+    if provider not in MINER_TOOL_LLM_PRICING:
+        raise KeyError(provider)
+    pricing_by_model = MINER_TOOL_LLM_PRICING[cast(MinerSelectedLlmProviderName, provider)]
+    pricing = pricing_by_model[model]
+    return _price_tokens(pricing, usage)
+
+
+def _price_tokens(pricing: ModelPricing, usage: LlmUsage) -> float:
+    """Return USD cost for token usage under the supplied per-model rates."""
 
     prompt_tokens = float(usage.prompt_tokens or 0)
     completion_tokens = float(usage.completion_tokens or 0)
@@ -97,10 +132,12 @@ __all__ = [
     "PARALLEL_SEARCH_BASE_COST_USD",
     "PARALLEL_SEARCH_BASE_RESULTS",
     "price_llm",
+    "price_miner_llm",
     "price_parallel_extract",
     "price_parallel_search",
     "price_search",
     "MODEL_PRICING",
+    "MINER_TOOL_LLM_PRICING",
     "SEARCH_PRICING_PER_REFERENCEABLE_RESULT",
     "ModelPricing",
 ]

@@ -14,6 +14,7 @@ from uuid import UUID
 
 from harnyx_commons.domain.miner_task import MinerTaskErrorCode
 from harnyx_validator.application.accept_batch import AcceptEvaluationBatch
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
 from harnyx_validator.application.services.evaluation_batch import EvaluationBatchConfig, MinerTaskBatchService
 from harnyx_validator.application.services.evaluation_runner import (
     ValidatorBatchFailedError,
@@ -188,6 +189,7 @@ class EvaluationWorker:
         status_provider: StatusProvider | None = None,
         batch_tracker: AcceptEvaluationBatch | None = None,
         progress_tracker: FileBackedRunProgress | None = None,
+        platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
         run_progress_retention_seconds: int = _DEFAULT_RUN_PROGRESS_RETENTION_SECONDS,
         run_progress_cleanup_interval_seconds: int = _DEFAULT_RUN_PROGRESS_CLEANUP_INTERVAL_SECONDS,
         clock: Callable[[], datetime] = _utcnow,
@@ -201,6 +203,7 @@ class EvaluationWorker:
         self._status = status_provider
         self._batch_tracker = batch_tracker
         self._progress_tracker = progress_tracker
+        self._platform_tool_proxy_scopes = platform_tool_proxy_scopes
         self._run_progress_retention = timedelta(seconds=run_progress_retention_seconds)
         self._run_progress_cleanup_interval_seconds = run_progress_cleanup_interval_seconds
         self._clock = clock
@@ -256,6 +259,7 @@ class EvaluationWorker:
                 await self._batch_service.process_async(batch)
                 if self._batch_tracker is not None:
                     self._batch_tracker.mark_completed(batch.batch_id, terminal_at=self._clock())
+                self._clear_platform_tool_proxy_batch(batch.batch_id)
                 self._prune_terminal_run_progress()
             except ValidatorBatchFailedError as exc:
                 payload = _batch_failure_capture_payload(batch_id=batch.batch_id, exc=exc)
@@ -280,6 +284,7 @@ class EvaluationWorker:
                 if self._status is not None:
                     self._status.state.last_error = exc.error_code
                     self._status.state.running = False
+                self._clear_platform_tool_proxy_batch(batch.batch_id)
                 self._prune_terminal_run_progress()
             except Exception as exc:
                 capture_exception(exc)
@@ -297,7 +302,12 @@ class EvaluationWorker:
                 if self._status is not None:
                     self._status.state.last_error = "unexpected_batch_failure"
                     self._status.state.running = False
+                self._clear_platform_tool_proxy_batch(batch.batch_id)
                 self._prune_terminal_run_progress()
+
+    def _clear_platform_tool_proxy_batch(self, batch_id: UUID) -> None:
+        if self._platform_tool_proxy_scopes is not None:
+            self._platform_tool_proxy_scopes.clear_batch(batch_id)
 
     def _prune_terminal_run_progress(self) -> None:
         if self._batch_tracker is None or self._progress_tracker is None:
@@ -326,6 +336,7 @@ def create_evaluation_worker(
     status_provider: StatusProvider | None = None,
     batch_tracker: AcceptEvaluationBatch | None = None,
     progress_tracker: FileBackedRunProgress | None = None,
+    platform_tool_proxy_scopes: PlatformToolProxyScopeRegistry | None = None,
     run_progress_retention_seconds: int = _DEFAULT_RUN_PROGRESS_RETENTION_SECONDS,
     run_progress_cleanup_interval_seconds: int = _DEFAULT_RUN_PROGRESS_CLEANUP_INTERVAL_SECONDS,
 ) -> EvaluationWorker:
@@ -336,6 +347,7 @@ def create_evaluation_worker(
         status_provider=status_provider,
         batch_tracker=batch_tracker,
         progress_tracker=progress_tracker,
+        platform_tool_proxy_scopes=platform_tool_proxy_scopes,
         run_progress_retention_seconds=run_progress_retention_seconds,
         run_progress_cleanup_interval_seconds=run_progress_cleanup_interval_seconds,
     )
@@ -370,6 +382,7 @@ def create_evaluation_worker_from_context(context: RuntimeContext) -> Evaluation
         activity=context.batch_activity,
         config=batch_config,
         progress=context.progress_tracker,
+        platform_tool_proxy_scopes=getattr(context, "platform_tool_proxy_scopes", None),
     )
     batch_tracker = context.control_deps_provider().accept_batch
     return EvaluationWorker(
@@ -378,6 +391,7 @@ def create_evaluation_worker_from_context(context: RuntimeContext) -> Evaluation
         status_provider=context.status_provider,
         batch_tracker=batch_tracker,
         progress_tracker=context.progress_tracker,
+        platform_tool_proxy_scopes=getattr(context, "platform_tool_proxy_scopes", None),
         run_progress_retention_seconds=context.settings.run_progress_retention_seconds,
         run_progress_cleanup_interval_seconds=context.settings.run_progress_cleanup_interval_seconds,
     )

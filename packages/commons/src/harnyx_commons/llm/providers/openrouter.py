@@ -17,20 +17,24 @@ from harnyx_commons.llm.schema import AbstractLlmRequest, LlmResponse, LlmThinki
 
 OPENROUTER_ENDPOINT_ID = "openrouter"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_SUPPORTED_MODELS = (
+OPENROUTER_NATIVE_SUPPORTED_MODELS = (
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "deepseek-ai/DeepSeek-V3.2-TEE",
-    "zai-org/GLM-5-TEE",
-    "Qwen/Qwen3.6-27B-TEE",
-    "google/gemma-4-31B-turbo-TEE",
+    "deepseek/deepseek-v3.2",
+    "z-ai/glm-5",
+    "qwen/qwen3.6-27b",
+    "google/gemma-4-31b-it",
 )
-OPENROUTER_MODEL_ALIASES: Mapping[str, str] = {
+OPENROUTER_INTERNAL_TO_NATIVE_MODEL: Mapping[str, str] = {
     "deepseek-ai/DeepSeek-V3.2-TEE": "deepseek/deepseek-v3.2",
     "zai-org/GLM-5-TEE": "z-ai/glm-5",
     "Qwen/Qwen3.6-27B-TEE": "qwen/qwen3.6-27b",
     "google/gemma-4-31B-turbo-TEE": "google/gemma-4-31b-it",
 }
+OPENROUTER_INTERNAL_SUPPORTED_MODELS = tuple(OPENROUTER_INTERNAL_TO_NATIVE_MODEL)
+OPENROUTER_SUPPORTED_MODELS = tuple(
+    dict.fromkeys((*OPENROUTER_NATIVE_SUPPORTED_MODELS, *OPENROUTER_INTERNAL_SUPPORTED_MODELS))
+)
 
 
 OpenRouterChatProviderFactory = Callable[[str], tuple[OpenAiCompatibleLlmProvider, httpx.AsyncClient]]
@@ -101,7 +105,7 @@ class OpenRouterLlmProvider(LlmProviderPort):
         return replace(
             request,
             provider=OPENROUTER_PROVIDER,
-            model=OPENROUTER_MODEL_ALIASES.get(model, model),
+            model=OPENROUTER_INTERNAL_TO_NATIVE_MODEL.get(model, model),
             extra=extra or None,
         )
 
@@ -179,7 +183,9 @@ def _reasoning_payload(thinking: LlmThinkingConfig | None) -> dict[str, Any] | N
 __all__ = [
     "OPENROUTER_BASE_URL",
     "OPENROUTER_ENDPOINT_ID",
-    "OPENROUTER_MODEL_ALIASES",
+    "OPENROUTER_INTERNAL_SUPPORTED_MODELS",
+    "OPENROUTER_INTERNAL_TO_NATIVE_MODEL",
+    "OPENROUTER_NATIVE_SUPPORTED_MODELS",
     "OPENROUTER_SUPPORTED_MODELS",
     "OpenRouterLlmProvider",
     "build_openrouter_chat_provider",
