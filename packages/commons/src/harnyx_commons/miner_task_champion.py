@@ -116,10 +116,29 @@ def select_batch_artifacts(
         for record in latest_by_hotkey.values()
         if record.submitted_at > previous_completed_cutoff and record.artifact_id not in incumbent_artifact_ids
     )
+    incumbent_hotkey = current_champion.miner_hotkey_ss58 if current_champion is not None else None
     challengers_ordered = tuple(
-        sorted(challengers, key=lambda record: (record.submitted_at, record.uid, str(record.artifact_id)))
+        sorted(challengers, key=lambda record: _challenger_order_key(record, incumbent_hotkey=incumbent_hotkey))
     )
     return incumbent_records + challengers_ordered
+
+
+def _challenger_order_key(
+    record: SubmittedArtifactInput,
+    *,
+    incumbent_hotkey: str | None,
+) -> tuple[int, datetime, int, str]:
+    incumbent_hotkey_priority = (
+        0
+        if incumbent_hotkey is not None and record.miner_hotkey_ss58 == incumbent_hotkey
+        else 1
+    )
+    return (
+        incumbent_hotkey_priority,
+        record.submitted_at,
+        record.uid,
+        str(record.artifact_id),
+    )
 
 
 def has_required_successful_validators(successful_validator_ids: Sequence[UUID]) -> bool:

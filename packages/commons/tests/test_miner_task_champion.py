@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -87,6 +87,64 @@ def test_select_batch_artifacts_keeps_incumbent_and_new_challengers() -> None:
     )
 
     assert selected == (incumbent, challenger)
+
+
+def test_select_batch_artifacts_prioritizes_incumbent_hotkey_new_challenger() -> None:
+    cutoff = datetime(2026, 4, 28, tzinfo=UTC)
+    incumbent = SubmittedArtifactInput(
+        uid=1,
+        artifact_id=uuid4(),
+        submitted_at=cutoff - timedelta(days=1),
+        miner_hotkey_ss58="hotkey-1",
+    )
+    earlier_copycat = SubmittedArtifactInput(
+        uid=2,
+        artifact_id=uuid4(),
+        submitted_at=cutoff + timedelta(seconds=1),
+        miner_hotkey_ss58="hotkey-2",
+    )
+    higher_artifact_non_incumbent = SubmittedArtifactInput(
+        uid=3,
+        artifact_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+        submitted_at=cutoff + timedelta(seconds=3),
+        miner_hotkey_ss58="hotkey-3",
+    )
+    lower_artifact_non_incumbent = SubmittedArtifactInput(
+        uid=3,
+        artifact_id=UUID("00000000-0000-0000-0000-000000000001"),
+        submitted_at=cutoff + timedelta(seconds=3),
+        miner_hotkey_ss58="hotkey-4",
+    )
+    incumbent_challenger = SubmittedArtifactInput(
+        uid=1,
+        artifact_id=uuid4(),
+        submitted_at=cutoff + timedelta(seconds=2),
+        miner_hotkey_ss58="hotkey-1",
+    )
+
+    selected = select_batch_artifacts(
+        latest_by_hotkey={
+            "hotkey-1": incumbent_challenger,
+            "hotkey-2": earlier_copycat,
+            "hotkey-3": higher_artifact_non_incumbent,
+            "hotkey-4": lower_artifact_non_incumbent,
+        },
+        previous_completed_cutoff=cutoff,
+        current_champion=CurrentChampionInput(
+            uid=incumbent.uid,
+            artifact_id=incumbent.artifact_id,
+            miner_hotkey_ss58="hotkey-1",
+        ),
+        incumbent=incumbent,
+    )
+
+    assert selected == (
+        incumbent,
+        incumbent_challenger,
+        earlier_copycat,
+        lower_artifact_non_incumbent,
+        higher_artifact_non_incumbent,
+    )
 
 
 def test_select_batch_artifacts_fails_when_incumbent_record_does_not_match_champion() -> None:

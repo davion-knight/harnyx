@@ -106,6 +106,7 @@ Because of that:
 
 - the champion is not always the highest score in the batch
 - challenger order matters
+- a newer eligible submission from the current champion hotkey gets the first challenger position
 - small score differences inside the tolerance band do not automatically replace the incumbent
 
 ### How participant miner emission works
