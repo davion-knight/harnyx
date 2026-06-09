@@ -165,6 +165,18 @@ class ProviderTimeoutSearchWebClient(StubDeSearchClient):
         raise TimeoutError("provider timed out")
 
 
+def _raise_provider_response_validation_error() -> None:
+    FetchPageResponse.model_validate({"data": [{"url": "https://example.com", "content": ""}]})
+    raise AssertionError("invalid provider response unexpectedly validated")
+
+
+class ResponseValidationFetchPageClient(StubDeSearchClient):
+    async def fetch_page(self, request: FetchPageRequest) -> FetchPageResponse:
+        data = request.model_dump(exclude_none=True, exclude={"provider"})
+        self.calls.append(("fetch_page", data))
+        _raise_provider_response_validation_error()
+
+
 class SlowSearchAiClient(StubDeSearchClient):
     async def search_ai(self, request: SearchAiSearchRequest) -> SearchAiSearchResponse:
         await asyncio.sleep(1.0)
@@ -471,6 +483,46 @@ async def test_runtime_invoker_routes_fetch_page_timeout() -> None:
     assert isinstance(result, ToolInvocationOutput)
     assert result.public_payload["data"][0]["content"] == "page text"
     assert stub_desearch.calls[-1] == ("fetch_page", {"url": "https://example.com", "timeout": 5.0})
+
+
+async def test_runtime_invoker_maps_provider_response_validation_to_tool_provider_error() -> None:
+    client = ResponseValidationFetchPageClient()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        web_search_client=client,
+        web_search_provider_name="desearch",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    with pytest.raises(ToolProviderError) as excinfo:
+        await _invoke(
+            invoker,
+            "fetch_page",
+            kwargs={"provider": "desearch", "url": "https://example.com"},
+        )
+
+    assert isinstance(excinfo.value.__cause__, ValidationError)
+    assert client.calls[-1] == ("fetch_page", {"url": "https://example.com"})
+
+
+async def test_runtime_invoker_maps_timed_provider_response_validation_to_tool_provider_error() -> None:
+    client = ResponseValidationFetchPageClient()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        web_search_client=client,
+        web_search_provider_name="desearch",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    with pytest.raises(ToolProviderError) as excinfo:
+        await _invoke(
+            invoker,
+            "fetch_page",
+            kwargs={"provider": "desearch", "url": "https://example.com", "timeout": 5},
+        )
+
+    assert isinstance(excinfo.value.__cause__, ValidationError)
+    assert client.calls[-1] == ("fetch_page", {"url": "https://example.com", "timeout": 5.0})
 
 
 async def test_runtime_invoker_enforces_fetch_page_timeout() -> None:

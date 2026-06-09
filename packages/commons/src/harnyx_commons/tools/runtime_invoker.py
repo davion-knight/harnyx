@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from typing import Literal, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationError, field_validator, model_validator
 from pydantic import JsonValue as PydanticJsonValue
 
 from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
@@ -519,14 +519,14 @@ async def _invoke_provider_operation(
 ) -> TInvocationResult:
     try:
         return await operation()
-    except TimeoutError as exc:
+    except (TimeoutError, ValidationError) as exc:
         raise ToolProviderError("tool provider failed") from exc
 
 
 def _task_result(task: asyncio.Task[TInvocationResult]) -> TInvocationResult:
     try:
         return task.result()
-    except TimeoutError as exc:
+    except (TimeoutError, ValidationError) as exc:
         raise ToolProviderError("tool provider failed") from exc
 
 
