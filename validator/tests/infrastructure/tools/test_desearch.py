@@ -50,6 +50,67 @@ async def test_desearch_client_posts_payload() -> None:
     assert captured["headers"]["authorization"] == "test-key"
 
 
+async def test_desearch_client_captures_json_object_cost_usd_body_metadata() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"link": "https://example.com", "title": "Example", "snippet": "Summary"}],
+                "cost_usd": 0.00015,
+                "usage_count": 1,
+                "service": "web",
+                "currency": "USD",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://api.desearch.ai",
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="test-key", client=client)
+
+    result = await adapter.search_web_with_billing(
+        SearchWebSearchRequest(provider="desearch", search_queries=("harnyx",), num=5)
+    )
+
+    assert result.billing is not None
+    assert result.billing.actual_cost_usd == pytest.approx(0.00015)
+    assert result.billing.usage_count == 1
+    assert result.billing.service == "web"
+    assert result.billing.currency == "USD"
+    assert result.billing.source == "response_body"
+    assert "cost_usd" not in result.response.model_dump(exclude_none=True)
+
+
+async def test_desearch_client_captures_array_cost_from_headers() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"link": "https://example.com", "title": "Example", "snippet": "Summary"}],
+            headers={
+                "X-Desearch-Cost-Usd": "0.00017",
+                "X-Desearch-Usage-Count": "2",
+                "X-Desearch-Service": "web",
+                "X-Desearch-Currency": "USD",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://api.desearch.ai",
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="test-key", client=client)
+
+    result = await adapter.search_web_with_billing(
+        SearchWebSearchRequest(provider="desearch", search_queries=("harnyx",), num=5)
+    )
+
+    assert result.billing is not None
+    assert result.billing.actual_cost_usd == pytest.approx(0.00017)
+    assert result.billing.usage_count == 2
+    assert result.billing.source == "response_headers"
+
+
 async def test_desearch_client_preserves_single_search_term() -> None:
     captured, transport = _capture_request()
     client = httpx.AsyncClient(base_url="https://api.desearch.ai", transport=transport)
@@ -321,6 +382,80 @@ async def test_desearch_client_fetch_page_text() -> None:
     assert response.retry_reasons == ()
     assert captured["method"] == "GET"
     assert captured["url"] == "https://api.desearch.ai/web/crawl?url=https%3A%2F%2Fexample.com&format=text"
+
+
+async def test_desearch_client_fetch_page_captures_text_cost_from_headers() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="example page content",
+            headers={
+                "X-Desearch-Cost-Usd": "0.00021",
+                "X-Desearch-Usage-Count": "1",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://api.desearch.ai",
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
+
+    result = await adapter.fetch_page_with_billing(FetchPageRequest(provider="desearch", url="https://example.com"))
+
+    assert result.response.data[0].content == "example page content"
+    assert result.billing is not None
+    assert result.billing.actual_cost_usd == pytest.approx(0.00021)
+    assert result.billing.usage_count == 1
+    assert result.billing.source == "response_headers"
+
+
+async def test_desearch_client_malformed_billing_metadata_records_reference_fallback_evidence() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"link": "https://example.com"}], "cost_usd": "not-a-number"},
+            headers={"X-Desearch-Usage-Count": "also-not-a-number"},
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://api.desearch.ai",
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
+
+    result = await adapter.search_web_with_billing(
+        SearchWebSearchRequest(provider="desearch", search_queries=("harnyx",), num=5)
+    )
+
+    assert result.billing is not None
+    assert result.billing.actual_cost_usd is None
+    assert result.billing.billable_units == 1
+    assert result.billing.source == "reference_fallback"
+
+
+async def test_desearch_client_partial_billing_metadata_keeps_result_count_for_runtime_fallback() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"link": "https://example.com"}], "usage_count": 1},
+        )
+
+    client = httpx.AsyncClient(
+        base_url="https://api.desearch.ai",
+        transport=httpx.MockTransport(handler),
+    )
+    adapter = DeSearchClient(base_url="https://api.desearch.ai", api_key="key", client=client)
+
+    result = await adapter.search_web_with_billing(
+        SearchWebSearchRequest(provider="desearch", search_queries=("harnyx",), num=5)
+    )
+
+    assert result.billing is not None
+    assert result.billing.actual_cost_usd is None
+    assert result.billing.usage_count == 1
+    assert result.billing.billable_units == 1
+    assert result.billing.source == "response_body"
 
 
 async def test_desearch_client_fetch_page_raises_on_error_status() -> None:

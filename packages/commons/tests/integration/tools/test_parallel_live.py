@@ -27,9 +27,13 @@ async def test_parallel_search_web_live() -> None:
     client = _build_parallel_client(settings)
     request = SearchWebSearchRequest(provider="parallel", search_queries=("python", "documentation"), num=3)
     try:
-        response = await client.search_web(request)
-        assert isinstance(response.data, list)
-        assert price_parallel_search(requested_results=request.num) == pytest.approx(0.005)
+        billing_response = await client.search_web_with_billing(request)
+        assert isinstance(billing_response.response.data, list)
+        assert billing_response.billing is not None
+        assert billing_response.billing.billable_units == len(billing_response.response.data)
+        assert billing_response.billing.provider_request_id is not None
+        assert billing_response.billing.source == "response_results"
+        assert price_parallel_search(billable_results=billing_response.billing.billable_units) >= 0.005
     finally:
         await client.aclose()
 
@@ -43,9 +47,13 @@ async def test_parallel_search_ai_live() -> None:
             prompt="Find the official Python documentation homepage",
             count=10,
         )
-        response = await client.search_ai(request)
-        assert isinstance(response.data, list)
-        assert price_parallel_search(requested_results=request.count) == pytest.approx(0.005)
+        billing_response = await client.search_ai_with_billing(request)
+        assert isinstance(billing_response.response.data, list)
+        assert billing_response.billing is not None
+        assert billing_response.billing.billable_units == len(billing_response.response.data)
+        assert billing_response.billing.provider_request_id is not None
+        assert billing_response.billing.source == "response_results"
+        assert price_parallel_search(billable_results=billing_response.billing.billable_units) >= 0.005
     finally:
         await client.aclose()
 
@@ -54,11 +62,18 @@ async def test_parallel_fetch_page_live() -> None:
     settings = LlmSettings()
     client = _build_parallel_client(settings)
     try:
-        response = await client.fetch_page(FetchPageRequest(provider="parallel", url="https://example.com"))
+        billing_response = await client.fetch_page_with_billing(
+            FetchPageRequest(provider="parallel", url="https://example.com")
+        )
+        response = billing_response.response
         assert len(response.data) == 1
         assert response.data[0].url == "https://example.com"
         assert response.data[0].content
-        assert price_parallel_extract(url_count=1) == pytest.approx(0.001)
+        assert billing_response.billing is not None
+        assert billing_response.billing.billable_units == len(billing_response.response.data)
+        assert billing_response.billing.provider_request_id is not None
+        assert billing_response.billing.source == "response_results"
+        assert price_parallel_extract(url_count=billing_response.billing.billable_units) == pytest.approx(0.001)
     finally:
         await client.aclose()
 

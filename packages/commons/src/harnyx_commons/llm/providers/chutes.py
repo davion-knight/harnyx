@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -19,6 +19,7 @@ from harnyx_commons.llm.providers.chutes_codec import (
     _ChutesReasoningStreamState,
     _parse_chutes_response_payload,
 )
+from harnyx_commons.llm.providers.chutes_pricing import ChutesModelPricingCache
 from harnyx_commons.llm.providers.openai_stream import (
     OpenAiStreamError,
     OpenAiStreamState,
@@ -49,6 +50,7 @@ class ChutesLlmProvider(BaseLlmProvider):
         client: httpx.AsyncClient | None = None,
         auth_header: str = "Authorization",
         max_concurrent: int | None = None,
+        pricing_cache: ChutesModelPricingCache | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("Chutes API key must be provided for LLM usage")
@@ -61,11 +63,12 @@ class ChutesLlmProvider(BaseLlmProvider):
         )
         self._api_key = api_key
         self._auth_header = auth_header
+        self._pricing_cache = pricing_cache or ChutesModelPricingCache()
 
     async def _invoke(self, request: AbstractLlmRequest) -> LlmResponse:
         headers = self._auth_headers()
 
-        return await self._call_with_retry(
+        response = await self._call_with_retry(
             request,
             call_coro=lambda current_request: self._request_chutes(
                 self._build_request(current_request),
@@ -75,6 +78,7 @@ class ChutesLlmProvider(BaseLlmProvider):
             verifier=self._verify_response,
             classify_exception=self._classify_exception,
         )
+        return await self._with_actual_cost(model=request.model, response=response)
 
     def _build_request(self, request: AbstractLlmRequest) -> _ChutesChatRequest:
         return _ChutesChatRequest.from_request(request)
@@ -113,6 +117,14 @@ class ChutesLlmProvider(BaseLlmProvider):
             metadata=metadata,
             finish_reason=llm_response.finish_reason,
         )
+
+    async def _with_actual_cost(self, *, model: str, response: LlmResponse) -> LlmResponse:
+        actual_cost = await self._pricing_cache.price(model=model, usage=response.usage)
+        metadata = dict(response.metadata or {})
+        metadata["actual_cost_usd"] = actual_cost.cost_usd
+        metadata["actual_cost_provider"] = actual_cost.provider
+        metadata["actual_cost_evidence"] = actual_cost.evidence
+        return replace(response, metadata=metadata)
 
     async def _stream_chat_completions(self, **request_kwargs: Any) -> tuple[_ChutesChatResponse, float | None]:
         started_at = time.perf_counter()

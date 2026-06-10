@@ -44,14 +44,18 @@ async def test_desearch_search_ai_live() -> None:
         max_concurrent=1,
     )
     try:
-        response = await desearch.search_ai(
+        billing_response = await desearch.search_ai_with_billing(
             SearchAiSearchRequest(
                 provider="desearch",
                 prompt="Find the official Python documentation homepage",
                 count=10,
             )
         )
+        response = billing_response.response
         assert isinstance(response.data, list)
+        assert billing_response.billing is not None
+        assert billing_response.billing.actual_cost_usd is not None
+        assert billing_response.billing.source in {"response_body", "response_headers"}
     finally:
         await desearch.aclose()
 

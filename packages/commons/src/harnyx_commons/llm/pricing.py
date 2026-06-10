@@ -108,12 +108,11 @@ def price_search(tool_name: SearchToolName, *, referenceable_results: int) -> fl
     return float(referenceable_results) * SEARCH_PRICING_PER_REFERENCEABLE_RESULT[tool_name]
 
 
-def price_parallel_search(*, requested_results: int | None) -> float:
+def price_parallel_search(*, billable_results: int) -> float:
     """Return provider-billed USD cost for one Parallel Search request."""
-    count = PARALLEL_SEARCH_BASE_RESULTS if requested_results is None else requested_results
-    if count < 0:
-        raise ValueError("requested_results must be non-negative when supplied")
-    extra_results = max(0, count - PARALLEL_SEARCH_BASE_RESULTS)
+    if billable_results < 0:
+        raise ValueError("billable_results must be non-negative")
+    extra_results = max(0, billable_results - PARALLEL_SEARCH_BASE_RESULTS)
     return PARALLEL_SEARCH_BASE_COST_USD + (
         float(extra_results) * PARALLEL_SEARCH_ADDITIONAL_RESULT_COST_USD
     )

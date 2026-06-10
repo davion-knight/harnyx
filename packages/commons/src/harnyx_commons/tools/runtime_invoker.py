@@ -8,7 +8,7 @@ import math
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationError, field_validator, model_validator
@@ -24,9 +24,10 @@ from harnyx_commons.llm.pricing import (
     SEARCH_PRICING_PER_REFERENCEABLE_RESULT,
     price_parallel_extract,
     price_parallel_search,
+    price_search,
 )
 from harnyx_commons.llm.provider import LlmProviderError, LlmProviderPort, LlmRetryExhaustedError
-from harnyx_commons.llm.provider_types import OPENROUTER_PROVIDER
+from harnyx_commons.llm.provider_types import CHUTES_PROVIDER, OPENROUTER_PROVIDER
 from harnyx_commons.llm.schema import (
     LlmChoice,
     LlmChoiceMessage,
@@ -46,12 +47,20 @@ from harnyx_commons.llm.tool_models import (
 )
 from harnyx_commons.tools.dto import tool_payload_from_args_kwargs
 from harnyx_commons.tools.executor import ToolInvocationContext, ToolInvocationOutput, ToolInvoker
-from harnyx_commons.tools.ports import WebSearchProviderPort
+from harnyx_commons.tools.ports import BillingAwareWebSearchProviderPort, WebSearchProviderPort
+from harnyx_commons.tools.provider_billing import (
+    BillingAwareSearchResponse,
+    ProviderBillingMetadata,
+    billing_evidence_payload,
+)
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
+    FetchPageResponse,
     SearchAiSearchRequest,
+    SearchAiSearchResponse,
     SearchProviderName,
     SearchWebSearchRequest,
+    SearchWebSearchResponse,
 )
 from harnyx_commons.tools.types import TOOL_NAMES, SearchToolName, ToolInvocationTimeout, ToolName, is_search_tool
 from harnyx_commons.tools.usage_tracker import ToolCallUsage  # noqa: F401 - compatibility
@@ -60,6 +69,13 @@ MINER_SANDBOX_TOOL_NAMES: tuple[ToolName, ...] = tuple(sorted(TOOL_NAMES))
 DEFAULT_TOOL_LLM_TIMEOUT_SECONDS = 120.0
 DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS = max(DESEARCH.timeout_seconds, PARALLEL.timeout_seconds)
 TInvocationResult = TypeVar("TInvocationResult")
+
+
+@dataclass(frozen=True, slots=True)
+class _ActualCost:
+    cost_usd: float | None
+    provider: str | None
+    evidence: JsonObject | None = None
 
 
 class _ToolingInfoInvocation(BaseModel):
@@ -325,14 +341,19 @@ class RuntimeToolInvoker(ToolInvoker):
             response_web = await _invoke_with_optional_timeout(
                 "search_web",
                 request_model_web.timeout,
-                lambda: web_search.search_web(request_model_web),
+                lambda: _invoke_search_with_billing(
+                    web_search,
+                    request_model_web,
+                    provider_name=provider_name,
+                    tool_name=tool_name,
+                ),
             )
-            as_mapping = response_web.model_dump(exclude_none=True, mode="json")
+            as_mapping = response_web.response.model_dump(exclude_none=True, mode="json")
             return _search_invocation_output(
                 cast(JsonObject, as_mapping),
                 provider_name=provider_name,
                 tool_name=tool_name,
-                request=request_model_web,
+                billing=response_web.billing,
             )
         elif tool_name == "search_ai":
             request_ai = SearchAiSearchRequest.model_validate(payload)
@@ -340,14 +361,19 @@ class RuntimeToolInvoker(ToolInvoker):
             response = await _invoke_with_optional_timeout(
                 "search_ai",
                 request_ai.timeout,
-                lambda: web_search.search_ai(request_ai),
+                lambda: _invoke_search_with_billing(
+                    web_search,
+                    request_ai,
+                    provider_name=provider_name,
+                    tool_name=tool_name,
+                ),
             )
-            as_mapping = response.model_dump(exclude_none=True, mode="json")
+            as_mapping = response.response.model_dump(exclude_none=True, mode="json")
             return _search_invocation_output(
                 cast(JsonObject, as_mapping),
                 provider_name=provider_name,
                 tool_name=tool_name,
-                request=request_ai,
+                billing=response.billing,
             )
         elif tool_name == "fetch_page":
             request_page = FetchPageRequest.model_validate(payload)
@@ -355,14 +381,19 @@ class RuntimeToolInvoker(ToolInvoker):
             response_page = await _invoke_with_optional_timeout(
                 "fetch_page",
                 request_page.timeout,
-                lambda: web_search.fetch_page(request_page),
+                lambda: _invoke_search_with_billing(
+                    web_search,
+                    request_page,
+                    provider_name=provider_name,
+                    tool_name=tool_name,
+                ),
             )
-            as_mapping = response_page.model_dump(exclude_none=True, mode="json")
+            as_mapping = response_page.response.model_dump(exclude_none=True, mode="json")
             return _search_invocation_output(
                 cast(JsonObject, as_mapping),
                 provider_name=provider_name,
                 tool_name=tool_name,
-                request=request_page,
+                billing=response_page.billing,
             )
         raise LookupError(f"search tool '{tool_name}' is not supported")
 
@@ -399,11 +430,13 @@ class RuntimeToolInvoker(ToolInvoker):
             raise
         except (LlmProviderError, LlmRetryExhaustedError) as exc:
             raise ToolProviderError("tool provider failed") from exc
+        actual_cost = _llm_actual_cost(llm_response)
         return ToolInvocationOutput(
             public_payload=_public_llm_response_payload(llm_response),
             execution=ToolExecutionFacts(elapsed_ms=elapsed_ms, ttft_ms=_response_ttft_ms(llm_response)),
-            actual_cost_usd=_openrouter_actual_cost_usd(llm_response),
-            actual_cost_provider=_openrouter_actual_cost_provider(llm_response),
+            actual_cost_usd=actual_cost.cost_usd,
+            actual_cost_provider=actual_cost.provider,
+            actual_cost_evidence=actual_cost.evidence,
         )
 
     def _parse_invocation(
@@ -491,6 +524,50 @@ class RuntimeToolInvoker(ToolInvoker):
             thinking=invocation.thinking.to_schema() if invocation.thinking is not None else None,
             use_case="tool_runtime_invoker",
         )
+
+
+async def _invoke_search_with_billing(
+    web_search: WebSearchProviderPort,
+    request: SearchWebSearchRequest | SearchAiSearchRequest | FetchPageRequest,
+    *,
+    provider_name: str,
+    tool_name: SearchToolName,
+) -> BillingAwareSearchResponse[SearchWebSearchResponse | SearchAiSearchResponse | FetchPageResponse]:
+    if isinstance(web_search, BillingAwareWebSearchProviderPort):
+        if tool_name == "search_web":
+            if not isinstance(request, SearchWebSearchRequest):
+                raise TypeError("search_web requires SearchWebSearchRequest")
+            return await web_search.search_web_with_billing(request)
+        if tool_name == "search_ai":
+            if not isinstance(request, SearchAiSearchRequest):
+                raise TypeError("search_ai requires SearchAiSearchRequest")
+            return await web_search.search_ai_with_billing(request)
+        if tool_name == "fetch_page":
+            if not isinstance(request, FetchPageRequest):
+                raise TypeError("fetch_page requires FetchPageRequest")
+            return await web_search.fetch_page_with_billing(request)
+    if tool_name == "search_web":
+        if not isinstance(request, SearchWebSearchRequest):
+            raise TypeError("search_web requires SearchWebSearchRequest")
+        response = await web_search.search_web(request)
+    elif tool_name == "search_ai":
+        if not isinstance(request, SearchAiSearchRequest):
+            raise TypeError("search_ai requires SearchAiSearchRequest")
+        response = await web_search.search_ai(request)
+    elif tool_name == "fetch_page":
+        if not isinstance(request, FetchPageRequest):
+            raise TypeError("fetch_page requires FetchPageRequest")
+        response = await web_search.fetch_page(request)
+    else:
+        raise LookupError(f"search tool '{tool_name}' is not supported")
+    return BillingAwareSearchResponse(
+        response=response,
+        billing=ProviderBillingMetadata(
+            actual_cost_provider=provider_name,
+            billable_units=len(response.data),
+            source="reference_fallback",
+        ),
+    )
 
 
 async def _invoke_with_optional_timeout(
@@ -613,41 +690,74 @@ def _search_invocation_output(
     *,
     provider_name: str | None,
     tool_name: SearchToolName,
-    request: SearchWebSearchRequest | SearchAiSearchRequest | FetchPageRequest,
+    billing: ProviderBillingMetadata | None,
 ) -> ToolInvocationOutput:
-    actual_cost_usd = _parallel_actual_search_cost_usd(
+    actual_cost = _search_actual_cost_from_billing(
         provider_name=provider_name,
         tool_name=tool_name,
-        request=request,
+        billing=billing,
     )
     return ToolInvocationOutput(
         public_payload=public_payload,
-        actual_cost_usd=actual_cost_usd,
-        actual_cost_provider="parallel" if actual_cost_usd is not None else None,
+        actual_cost_usd=actual_cost.cost_usd,
+        actual_cost_provider=actual_cost.provider,
+        actual_cost_evidence=actual_cost.evidence,
     )
 
 
-def _parallel_actual_search_cost_usd(
+def _search_actual_cost_from_billing(
     *,
     provider_name: str | None,
     tool_name: SearchToolName,
-    request: SearchWebSearchRequest | SearchAiSearchRequest | FetchPageRequest,
-) -> float | None:
-    if provider_name != "parallel":
-        return None
-    if tool_name == "search_web":
-        if not isinstance(request, SearchWebSearchRequest):
-            raise TypeError("search_web actual pricing requires SearchWebSearchRequest")
-        return price_parallel_search(requested_results=request.num)
-    if tool_name == "search_ai":
-        if not isinstance(request, SearchAiSearchRequest):
-            raise TypeError("search_ai actual pricing requires SearchAiSearchRequest")
-        return price_parallel_search(requested_results=request.count)
-    if tool_name == "fetch_page":
-        if not isinstance(request, FetchPageRequest):
-            raise TypeError("fetch_page actual pricing requires FetchPageRequest")
-        return price_parallel_extract(url_count=1)
-    raise LookupError(f"search tool '{tool_name}' is not supported")
+    billing: ProviderBillingMetadata | None,
+) -> _ActualCost:
+    if billing is None:
+        return _ActualCost(None, None, None)
+    evidence = billing_evidence_payload(billing)
+    billable_units = billing.billable_units or 0
+    if provider_name == "desearch":
+        if billing.actual_cost_usd is not None:
+            return _ActualCost(billing.actual_cost_usd, "desearch", evidence)
+        return _ActualCost(
+            price_search(tool_name, referenceable_results=billable_units),
+            "desearch",
+            evidence,
+        )
+    if provider_name == "parallel":
+        if tool_name in {"search_web", "search_ai"}:
+            return _ActualCost(
+                price_parallel_search(billable_results=billable_units),
+                "parallel",
+                evidence,
+            )
+        if tool_name == "fetch_page":
+            return _ActualCost(
+                price_parallel_extract(url_count=billable_units),
+                "parallel",
+                evidence,
+            )
+    return _ActualCost(None, None, None)
+
+
+def _llm_actual_cost(response: LlmResponse) -> _ActualCost:
+    metadata = response.metadata or {}
+    if metadata.get("actual_cost_provider") == CHUTES_PROVIDER:
+        cost = metadata.get("actual_cost_usd")
+        if not isinstance(cost, int | float) or isinstance(cost, bool):
+            raise ValueError("Chutes actual_cost_usd must be numeric when supplied")
+        if cost < 0:
+            raise ValueError("Chutes actual_cost_usd must be non-negative")
+        evidence = metadata.get("actual_cost_evidence")
+        return _ActualCost(
+            float(cost),
+            CHUTES_PROVIDER,
+            cast(JsonObject, evidence) if isinstance(evidence, Mapping) else None,
+        )
+    return _ActualCost(
+        _openrouter_actual_cost_usd(response),
+        _openrouter_actual_cost_provider(response),
+        None,
+    )
 
 
 def _openrouter_actual_cost_usd(response: LlmResponse) -> float | None:

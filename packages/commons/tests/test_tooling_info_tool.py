@@ -136,14 +136,14 @@ def test_zero_reasoning_price_falls_back_to_output_price() -> None:
 
 
 @pytest.mark.parametrize(
-    ("requested_results", "expected_cost"),
-    ((None, 0.005), (1, 0.005), (10, 0.005), (11, 0.006), (25, 0.02)),
+    ("billable_results", "expected_cost"),
+    ((0, 0.005), (1, 0.005), (10, 0.005), (11, 0.006), (25, 0.02)),
 )
 def test_parallel_search_actual_pricing_uses_base_price_for_up_to_ten_results(
-    requested_results: int | None,
+    billable_results: int,
     expected_cost: float,
 ) -> None:
-    assert price_parallel_search(requested_results=requested_results) == pytest.approx(expected_cost)
+    assert price_parallel_search(billable_results=billable_results) == pytest.approx(expected_cost)
 
 
 @pytest.mark.parametrize(

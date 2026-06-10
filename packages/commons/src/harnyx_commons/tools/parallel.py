@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from harnyx_commons.config.external_client import ExternalClientRetrySettings
 from harnyx_commons.errors import ToolProviderError
 from harnyx_commons.llm.retry_utils import RetryPolicy, backoff_ms
+from harnyx_commons.tools.provider_billing import BillingAwareSearchResponse, ProviderBillingMetadata
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
     FetchPageResponse,
@@ -136,13 +137,19 @@ class ParallelClient:
         )
 
     async def search_web(self, request: SearchWebSearchRequest) -> SearchWebSearchResponse:
+        return (await self.search_web_with_billing(request)).response
+
+    async def search_web_with_billing(
+        self,
+        request: SearchWebSearchRequest,
+    ) -> BillingAwareSearchResponse[SearchWebSearchResponse]:
         payload: dict[str, object] = {
             "search_queries": list(request.search_queries),
         }
         if request.num is not None:
             payload["max_results"] = request.num
         data = _ParallelSearchResponsePayload.model_validate(await self._post("/v1beta/search", payload))
-        return SearchWebSearchResponse(
+        response = SearchWebSearchResponse(
             data=[
                 SearchWebResult(
                     link=result.url,
@@ -154,14 +161,27 @@ class ParallelClient:
             attempts=data.attempts,
             retry_reasons=data.retry_reasons,
         )
+        return BillingAwareSearchResponse(
+            response=response,
+            billing=_parallel_billing(
+                billable_units=len(data.results),
+                provider_request_id=data.search_id,
+            ),
+        )
 
     async def search_ai(self, request: SearchAiSearchRequest) -> SearchAiSearchResponse:
+        return (await self.search_ai_with_billing(request)).response
+
+    async def search_ai_with_billing(
+        self,
+        request: SearchAiSearchRequest,
+    ) -> BillingAwareSearchResponse[SearchAiSearchResponse]:
         payload: dict[str, object] = {
             "objective": request.prompt,
             "max_results": request.count,
         }
         data = _ParallelSearchResponsePayload.model_validate(await self._post("/v1beta/search", payload))
-        return SearchAiSearchResponse(
+        response = SearchAiSearchResponse(
             data=[
                 SearchAiResult(
                     url=result.url,
@@ -173,8 +193,21 @@ class ParallelClient:
             attempts=data.attempts,
             retry_reasons=data.retry_reasons,
         )
+        return BillingAwareSearchResponse(
+            response=response,
+            billing=_parallel_billing(
+                billable_units=len(data.results),
+                provider_request_id=data.search_id,
+            ),
+        )
 
     async def fetch_page(self, request: FetchPageRequest) -> FetchPageResponse:
+        return (await self.fetch_page_with_billing(request)).response
+
+    async def fetch_page_with_billing(
+        self,
+        request: FetchPageRequest,
+    ) -> BillingAwareSearchResponse[FetchPageResponse]:
         payload = {
             "urls": [request.url],
             "full_content": True,
@@ -184,7 +217,7 @@ class ParallelClient:
         if len(data.results) != 1:
             raise ToolProviderError("tool provider failed")
         result = data.results[0]
-        return FetchPageResponse(
+        response = FetchPageResponse(
             data=[
                 FetchPageResult(
                     url=result.url,
@@ -194,6 +227,13 @@ class ParallelClient:
             ],
             attempts=data.attempts,
             retry_reasons=data.retry_reasons,
+        )
+        return BillingAwareSearchResponse(
+            response=response,
+            billing=_parallel_billing(
+                billable_units=len(data.results),
+                provider_request_id=data.extract_id,
+            ),
         )
 
     async def aclose(self) -> None:
@@ -277,5 +317,15 @@ class ParallelClient:
 
 def _should_retry_status(status: int | None) -> bool:
     return status == 429 or (status is not None and status >= 500)
+
+
+def _parallel_billing(*, billable_units: int, provider_request_id: str | None) -> ProviderBillingMetadata:
+    return ProviderBillingMetadata(
+        actual_cost_provider="parallel",
+        billable_units=billable_units,
+        provider_request_id=provider_request_id,
+        source="response_results",
+    )
+
 
 __all__ = ["ParallelClient"]

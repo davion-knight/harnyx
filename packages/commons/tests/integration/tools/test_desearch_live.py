@@ -22,10 +22,13 @@ async def test_search_web_live() -> None:
     )
     request = SearchWebSearchRequest(provider="desearch", search_queries=("United States", "latest news"), num=5)
 
-    result = await client.search_links_web(request)
+    billing_result = await client.search_web_with_billing(request)
     await client.aclose()
 
-    assert isinstance(result.data, list)
+    assert isinstance(billing_result.response.data, list)
+    assert billing_result.billing is not None
+    assert billing_result.billing.actual_cost_usd is not None
+    assert billing_result.billing.source in {"response_body", "response_headers"}
 
 
 async def test_fetch_page_live() -> None:
@@ -38,12 +41,16 @@ async def test_fetch_page_live() -> None:
     )
     request = FetchPageRequest(provider="desearch", url="https://example.com")
 
-    result = await client.fetch_page(request)
+    billing_result = await client.fetch_page_with_billing(request)
     await client.aclose()
 
+    result = billing_result.response
     assert len(result.data) == 1
     assert result.data[0].url == "https://example.com"
     assert result.data[0].content
+    assert billing_result.billing is not None
+    assert billing_result.billing.actual_cost_usd is not None
+    assert billing_result.billing.source in {"response_body", "response_headers"}
 
 
 async def test_search_twitter_live() -> None:

@@ -6,9 +6,9 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from opentelemetry import trace
@@ -23,6 +23,7 @@ from harnyx_commons.tools.desearch_ai_protocol import (
     DeSearchAiDocsResponse,
     parse_desearch_ai_response,
 )
+from harnyx_commons.tools.provider_billing import BillingAwareSearchResponse, ProviderBillingMetadata
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
     FetchPageResponse,
@@ -126,6 +127,12 @@ class DeSearchWebSearchPage:
     results: list[SearchWebResult]
 
 
+@dataclass(frozen=True, slots=True)
+class _DeSearchRequestData:
+    data: dict[str, Any]
+    billing: ProviderBillingMetadata | None
+
+
 class DeSearchClient:
     """Lightweight async client for DeSearch endpoints."""
 
@@ -163,7 +170,27 @@ class DeSearchClient:
         response_format: str = "json",
     ) -> dict[str, Any] | None:
         path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
-        return await self._request(
+        result = await self._request_with_billing(
+            "post",
+            path,
+            json_payload=dict(payload),
+            expect_data=expect_data,
+            allow_not_found=allow_not_found,
+            response_format=response_format,
+        )
+        return result.data if result is not None else None
+
+    async def _post_with_billing(
+        self,
+        endpoint: str,
+        payload: Mapping[str, Any],
+        *,
+        expect_data: bool = True,
+        allow_not_found: bool = False,
+        response_format: str = "json",
+    ) -> _DeSearchRequestData | None:
+        path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        return await self._request_with_billing(
             "post",
             path,
             json_payload=dict(payload),
@@ -182,7 +209,27 @@ class DeSearchClient:
         response_format: str = "json",
     ) -> dict[str, Any] | None:
         path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
-        return await self._request(
+        result = await self._request_with_billing(
+            "get",
+            path,
+            params=dict(params),
+            expect_data=expect_data,
+            allow_not_found=allow_not_found,
+            response_format=response_format,
+        )
+        return result.data if result is not None else None
+
+    async def _get_with_billing(
+        self,
+        endpoint: str,
+        params: Mapping[str, Any],
+        *,
+        expect_data: bool = True,
+        allow_not_found: bool = False,
+        response_format: str = "json",
+    ) -> _DeSearchRequestData | None:
+        path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        return await self._request_with_billing(
             "get",
             path,
             params=dict(params),
@@ -194,10 +241,33 @@ class DeSearchClient:
     # Convenience wrappers ------------------------------------------------------------------------
 
     async def search_web(self, request: SearchWebSearchRequest) -> SearchWebSearchResponse:
-        return await self.search_links_web(request)
+        return (await self.search_web_with_billing(request)).response
+
+    async def search_web_with_billing(
+        self,
+        request: SearchWebSearchRequest,
+    ) -> BillingAwareSearchResponse[SearchWebSearchResponse]:
+        data = await self._search_links_web_page_with_billing(request, start=None)
+        if data is None:
+            raise ToolProviderError("tool provider failed")
+        response = SearchWebSearchResponse.model_validate(data.data)
+        return BillingAwareSearchResponse(
+            response=response,
+            billing=_billing_with_billable_units(
+                data.billing,
+                provider="desearch",
+                billable_units=len(response.data),
+            ),
+        )
 
     async def search_ai(self, request: SearchAiSearchRequest) -> SearchAiSearchResponse:
-        raw = await self.ai_search(
+        return (await self.search_ai_with_billing(request)).response
+
+    async def search_ai_with_billing(
+        self,
+        request: SearchAiSearchRequest,
+    ) -> BillingAwareSearchResponse[SearchAiSearchResponse]:
+        raw = await self.ai_search_with_billing(
             prompt=request.prompt,
             tools=_MINER_AI_TOOLS,
             model=DeSearchAiModel.HORIZON,
@@ -206,15 +276,29 @@ class DeSearchClient:
             result_type=DeSearchAiResultType.LINKS_WITH_FINAL_SUMMARY,
             system_message="",
         )
-        metadata = _DeSearchRetryMetadataPayload.model_validate(raw)
-        return SearchAiSearchResponse(
-            data=_extract_desearch_ai_results(raw),
+        metadata = _DeSearchRetryMetadataPayload.model_validate(raw.data)
+        response = SearchAiSearchResponse(
+            data=_extract_desearch_ai_results(raw.data),
             attempts=metadata.attempts,
             retry_reasons=metadata.retry_reasons,
         )
+        return BillingAwareSearchResponse(
+            response=response,
+            billing=_billing_with_billable_units(
+                raw.billing,
+                provider="desearch",
+                billable_units=len(response.data),
+            ),
+        )
 
     async def fetch_page(self, request: FetchPageRequest) -> FetchPageResponse:
-        data = await self._get(
+        return (await self.fetch_page_with_billing(request)).response
+
+    async def fetch_page_with_billing(
+        self,
+        request: FetchPageRequest,
+    ) -> BillingAwareSearchResponse[FetchPageResponse]:
+        data = await self._get_with_billing(
             "web/crawl",
             {"url": request.url, "format": "text"},
             expect_data=False,
@@ -222,11 +306,19 @@ class DeSearchClient:
         )
         if data is None:
             raise ToolProviderError("tool provider failed")
-        payload = _DeSearchCrawlResponsePayload.model_validate(data)
-        return FetchPageResponse(
+        payload = _DeSearchCrawlResponsePayload.model_validate(data.data)
+        response = FetchPageResponse(
             data=[FetchPageResult(url=request.url, content=payload.content)],
             attempts=payload.attempts,
             retry_reasons=payload.retry_reasons,
+        )
+        return BillingAwareSearchResponse(
+            response=response,
+            billing=_billing_with_billable_units(
+                data.billing,
+                provider="desearch",
+                billable_units=len(response.data),
+            ),
         )
 
     async def search_links_web(self, request: SearchWebSearchRequest) -> SearchWebSearchResponse:
@@ -241,6 +333,15 @@ class DeSearchClient:
         *,
         start: int | None,
     ) -> dict[str, Any] | None:
+        result = await self._search_links_web_page_with_billing(request, start=start)
+        return result.data if result is not None else None
+
+    async def _search_links_web_page_with_billing(
+        self,
+        request: SearchWebSearchRequest,
+        *,
+        start: int | None,
+    ) -> _DeSearchRequestData | None:
         params: dict[str, Any] = {
             "query": _build_web_query(request.search_queries),
         }
@@ -248,7 +349,7 @@ class DeSearchClient:
             params["num"] = request.num
         if start is not None:
             params["start"] = start
-        return await self._get("web", params)
+        return await self._get_with_billing("web", params)
 
     async def search_links_twitter(
         self,
@@ -413,6 +514,28 @@ class DeSearchClient:
         result_type: DeSearchAiResultType,
         system_message: str,
     ) -> object:
+        result = await self.ai_search_with_billing(
+            prompt=prompt,
+            tools=tools,
+            model=model,
+            count=count,
+            date_filter=date_filter,
+            result_type=result_type,
+            system_message=system_message,
+        )
+        return result.data
+
+    async def ai_search_with_billing(
+        self,
+        *,
+        prompt: str,
+        tools: tuple[DeSearchAiTool, ...],
+        model: DeSearchAiModel,
+        count: int,
+        date_filter: DeSearchAiDateFilter | None,
+        result_type: DeSearchAiResultType,
+        system_message: str,
+    ) -> _DeSearchRequestData:
         if not prompt.strip():
             raise ValueError("desearch ai_search requires non-empty prompt")
         if count <= 0:
@@ -432,7 +555,7 @@ class DeSearchClient:
             "count": max(_DESEARCH_AI_MIN_COUNT, min(_DESEARCH_AI_MAX_COUNT, count)),
         }
         payload = {key: value for key, value in payload_items.items() if value is not None}
-        data = await self._post("desearch/ai/search", payload, expect_data=False)
+        data = await self._post_with_billing("desearch/ai/search", payload, expect_data=False)
         if data is None:
             raise ToolProviderError("tool provider failed")
         return data
@@ -463,7 +586,7 @@ class DeSearchClient:
     # ------------------------------------------------------------------
     # internal
 
-    async def _request(
+    async def _request_with_billing(
         self,
         method: str,
         path: str,
@@ -473,7 +596,7 @@ class DeSearchClient:
         expect_data: bool = True,
         allow_not_found: bool = False,
         response_format: str = "json",
-    ) -> dict[str, Any] | None:
+    ) -> _DeSearchRequestData | None:
         if self._semaphore is None:
             return await self._request_with_retries(
                 method,
@@ -511,7 +634,7 @@ class DeSearchClient:
         allow_not_found: bool,
         wait_ms: float,
         response_format: str,
-    ) -> dict[str, Any] | None:
+    ) -> _DeSearchRequestData | None:
         reasons: list[str] = []
         total_latency_ms = 0.0
         attempts_made = 0
@@ -530,7 +653,10 @@ class DeSearchClient:
                     attempt_start = time.perf_counter()
                     try:
                         resp = await self._send(method, path, json_payload=json_payload, params=params)
-                        raw_response, data = await self._parse_response(resp, response_format=response_format)
+                        raw_response, data, billing = await self._parse_response(
+                            resp,
+                            response_format=response_format,
+                        )
                         total_latency_ms += (time.perf_counter() - attempt_start) * 1000
                         if expect_data:
                             if self._missing_data(data):
@@ -581,7 +707,7 @@ class DeSearchClient:
                                 },
                             },
                         )
-                        return data
+                        return _DeSearchRequestData(data=data, billing=billing)
                     except httpx.HTTPStatusError as exc:  # pragma: no cover - network errors
                         status = exc.response.status_code if exc.response else None
                         if allow_not_found and status == 404:
@@ -659,18 +785,26 @@ class DeSearchClient:
         return await self._client.get(path, headers=headers, params=params)
 
     @staticmethod
-    async def _parse_response(resp: httpx.Response, *, response_format: str) -> tuple[object, dict[str, Any]]:
+    async def _parse_response(
+        resp: httpx.Response,
+        *,
+        response_format: str,
+    ) -> tuple[object, dict[str, Any], ProviderBillingMetadata | None]:
         resp.raise_for_status()
+        billing = _billing_metadata_from_headers(resp.headers)
         if response_format == "text":
             raw = resp.text
-            return raw, {"content": raw}
+            return raw, {"content": raw}, billing
         raw = resp.json()
+        body_billing = _billing_metadata_from_json(raw)
+        if body_billing is not None:
+            billing = body_billing
         data = raw
         if isinstance(data, list):
             data = {"data": data}
         if not isinstance(data, dict):
             raise RuntimeError("desearch response was not an object")
-        return raw, data
+        return raw, data, billing
 
     @staticmethod
     def _missing_data(data: dict[str, Any]) -> bool:
@@ -687,6 +821,95 @@ class DeSearchClient:
     async def _sleep(self, attempt: int) -> None:
         backoff = backoff_ms(attempt, self._retry_policy)
         await asyncio.sleep(backoff / 1000)
+
+
+def _billing_metadata_from_headers(headers: httpx.Headers) -> ProviderBillingMetadata | None:
+    cost = _optional_float(headers.get("x-desearch-cost-usd"))
+    usage_count = _optional_int(headers.get("x-desearch-usage-count"))
+    if cost is None and usage_count is None:
+        return None
+    return ProviderBillingMetadata(
+        actual_cost_provider="desearch",
+        actual_cost_usd=cost,
+        usage_count=usage_count,
+        service=_optional_text(headers.get("x-desearch-service")),
+        currency=_optional_text(headers.get("x-desearch-currency")),
+        source="response_headers",
+    )
+
+
+def _billing_metadata_from_json(raw: object) -> ProviderBillingMetadata | None:
+    if not isinstance(raw, Mapping):
+        return None
+    raw_mapping = cast(Mapping[str, object], raw)
+    cost = _optional_float(raw_mapping.get("cost_usd"))
+    usage_count = _optional_int(raw_mapping.get("usage_count"))
+    if cost is None and usage_count is None:
+        return None
+    return ProviderBillingMetadata(
+        actual_cost_provider="desearch",
+        actual_cost_usd=cost,
+        usage_count=usage_count,
+        service=_optional_text(raw_mapping.get("service")),
+        currency=_optional_text(raw_mapping.get("currency")),
+        source="response_body",
+    )
+
+
+def _reference_fallback_billing(*, provider: str, billable_units: int) -> ProviderBillingMetadata:
+    return ProviderBillingMetadata(
+        actual_cost_provider=provider,
+        billable_units=billable_units,
+        source="reference_fallback",
+    )
+
+
+def _billing_with_billable_units(
+    billing: ProviderBillingMetadata | None,
+    *,
+    provider: str,
+    billable_units: int,
+) -> ProviderBillingMetadata:
+    if billing is None:
+        return _reference_fallback_billing(provider=provider, billable_units=billable_units)
+    if billing.actual_cost_usd is not None or billing.billable_units is not None:
+        return billing
+    return replace(billing, billable_units=billable_units)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, int | float | str):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric < 0:
+        return None
+    return numeric
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, int | float | str):
+        return None
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric < 0:
+        return None
+    return numeric
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _parse_tweet_ids(posts: list[SearchXResult]) -> list[int]:

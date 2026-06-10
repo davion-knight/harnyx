@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import httpx
 import pytest
 from pydantic import BaseModel
 
+from harnyx_commons.llm.pricing import ModelPricing
 from harnyx_commons.llm.providers.chutes import (
     ChutesLlmProvider,
     ChutesTextEmbeddingClient,
@@ -19,12 +21,14 @@ from harnyx_commons.llm.providers.chutes_codec import (
     _ChutesChatResponse,
     _ChutesReasoningStreamState,
 )
+from harnyx_commons.llm.providers.chutes_pricing import ChutesModelPricingCache
 from harnyx_commons.llm.providers.openai_stream import (
     OpenAiStreamError,
     OpenAiStreamState,
     _OpenAiStreamEvent,
     iter_openai_sse_events,
 )
+from harnyx_commons.llm.retry_utils import RetryPolicy
 from harnyx_commons.llm.schema import (
     LlmMessage,
     LlmMessageContentPart,
@@ -32,6 +36,7 @@ from harnyx_commons.llm.schema import (
     LlmResponse,
     LlmThinkingConfig,
     LlmUsage,
+    PostprocessResult,
 )
 
 
@@ -315,6 +320,113 @@ async def test_chutes_provider_persists_stream_ttft_metadata() -> None:
     assert response.metadata is not None
     assert isinstance(response.metadata["ttft_ms"], float)
     assert response.metadata["ttft_ms"] >= 0.0
+
+
+@pytest.mark.anyio("asyncio")
+async def test_chutes_provider_attaches_actual_cost_from_cached_pricing_without_live_fetch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        payload = {
+            "id": "resp-cost",
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop", "index": 0}],
+            "usage": {"prompt_tokens": 1_000, "completion_tokens": 2_000, "total_tokens": 3_000},
+        }
+        return httpx.Response(200, text=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n")
+
+    provider = ChutesLlmProvider(
+        base_url="https://example.com",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+        pricing_cache=ChutesModelPricingCache(
+            cached_pricing={"deepseek-ai/DeepSeek-V3.2-TEE": ModelPricing(0.10, 0.20, 0.0)}
+        ),
+    )
+    try:
+        response = await provider.invoke(_basic_chutes_request())
+    finally:
+        await provider.aclose()
+
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_provider"] == "chutes"
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.0005)
+    assert response.metadata["actual_cost_evidence"]["source"] == "live_cache"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_chutes_provider_attaches_actual_cost_from_hard_coded_fallback() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        payload = {
+            "id": "resp-cost-fallback",
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop", "index": 0}],
+            "usage": {"prompt_tokens": 1_000, "completion_tokens": 2_000, "total_tokens": 3_000},
+        }
+        return httpx.Response(200, text=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n")
+
+    provider = ChutesLlmProvider(
+        base_url="https://example.com",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+    )
+
+    try:
+        response = await provider.invoke(_basic_chutes_request(model="Qwen/Qwen3.6-27B-TEE"))
+    finally:
+        await provider.aclose()
+
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_provider"] == "chutes"
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.0043)
+    assert response.metadata["actual_cost_evidence"]["source"] == "hard_coded_fallback"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_chutes_provider_prices_final_accumulated_usage_after_provider_retries() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url.path == "/v1/chat/completions"
+        text = "bad" if calls == 1 else "ok"
+        payload = {
+            "id": f"resp-cost-retry-{calls}",
+            "choices": [{"delta": {"content": text}, "finish_reason": "stop", "index": 0}],
+            "usage": {
+                "prompt_tokens": calls * 1_000,
+                "completion_tokens": calls * 1_000,
+                "total_tokens": calls * 2_000,
+            },
+        }
+        return httpx.Response(200, text=f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n")
+
+    def postprocessor(response: LlmResponse) -> PostprocessResult:
+        if response.raw_text == "ok":
+            return PostprocessResult(ok=True, retryable=False)
+        return PostprocessResult(ok=False, retryable=True, reason="bad response")
+
+    provider = ChutesLlmProvider(
+        base_url="https://example.com",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+        pricing_cache=ChutesModelPricingCache(
+            cached_pricing={"deepseek-ai/DeepSeek-V3.2-TEE": ModelPricing(0.10, 0.20, 0.0)}
+        ),
+    )
+    provider._retry_policy = RetryPolicy(attempts=2, initial_ms=0, max_ms=0, jitter=0.0)
+
+    try:
+        response = await provider.invoke(replace(_basic_chutes_request(), postprocessor=postprocessor))
+    finally:
+        await provider.aclose()
+
+    assert calls == 2
+    assert response.usage.prompt_tokens == 3_000
+    assert response.usage.completion_tokens == 3_000
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.0009)
+    assert response.metadata["actual_cost_evidence"]["prompt_tokens"] == 3_000
+    assert response.metadata["actual_cost_evidence"]["completion_tokens"] == 3_000
 
 
 @pytest.mark.anyio("asyncio")

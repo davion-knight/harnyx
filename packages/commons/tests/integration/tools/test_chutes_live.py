@@ -58,6 +58,10 @@ async def test_chutes_tool_model_completion_live(model: str) -> None:
         await provider.aclose()
 
     assert response.raw_text
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_usd"] >= 0.0
+    assert response.metadata["actual_cost_provider"] == "chutes"
+    assert response.metadata["actual_cost_evidence"]["source"] == "hard_coded_fallback"
 
 
 async def test_miner_paid_chutes_helper_completion_live() -> None:
