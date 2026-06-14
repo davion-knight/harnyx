@@ -494,13 +494,17 @@ def _build_local_provider_tooling(
     resolved: Settings,
     search_client: WebSearchProviderPort | None,
     tool_llm_provider: LlmProviderPort | None,
+    search_provider_resolver: Callable[[SearchProviderName], WebSearchProviderPort] | None = None,
+    llm_provider_resolver: Callable[[str], LlmProviderPort] | None = None,
 ) -> tuple[ToolInvoker, ToolExecutor]:
     local_invoker = build_miner_sandbox_tool_invoker(
         state.receipt_log,
         web_search_client=search_client,
         web_search_provider_name=resolved.llm.search_provider,
+        web_search_provider_resolver=search_provider_resolver,
         llm_provider=tool_llm_provider,
         llm_provider_name=resolved.llm.tool_llm_provider,
+        llm_provider_resolver=llm_provider_resolver,
         allowed_models=ALLOWED_TOOL_MODELS,
     )
     return local_invoker, _ProviderTrackingToolExecutor(

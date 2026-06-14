@@ -447,6 +447,35 @@ async def test_runtime_invoker_routes_search_payload() -> None:
     assert stub_desearch.calls == [("web", {"search_queries": ("harnyx", "subnet")})]
 
 
+async def test_runtime_invoker_uses_search_provider_resolver_for_requested_provider() -> None:
+    configured_client = StubDeSearchClient()
+    parallel_client = StubDeSearchClient()
+    resolved_providers: list[str] = []
+
+    def resolve_search_provider(provider: str) -> StubDeSearchClient:
+        resolved_providers.append(provider)
+        return parallel_client
+
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        web_search_client=configured_client,
+        web_search_provider_name="desearch",
+        web_search_provider_resolver=resolve_search_provider,
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    result = await _invoke(
+        invoker,
+        "search_web",
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+    )
+
+    assert isinstance(result, ToolInvocationOutput)
+    assert resolved_providers == ["parallel"]
+    assert parallel_client.calls == [("web", {"search_queries": ("harnyx",)})]
+    assert configured_client.calls == []
+
+
 async def test_runtime_invoker_parallel_actual_cost_uses_provider_metadata() -> None:
     client = CostedSearchClient(provider="parallel", actual_cost_usd=0.0061, returned_results=1)
     invoker = RuntimeToolInvoker(
@@ -900,6 +929,39 @@ async def test_runtime_invoker_routes_llm_chat(model: str) -> None:
     assert recorded.messages[0].content[0].text == "hi"
     assert recorded.provider == "openrouter"
     assert recorded.timeout_seconds == pytest.approx(120.0)
+
+
+async def test_runtime_invoker_uses_llm_provider_resolver_for_requested_provider() -> None:
+    configured_chutes = StubChutesProvider()
+    openrouter = StubOpenRouterProvider()
+    resolved_providers: list[str] = []
+
+    def resolve_llm_provider(provider: str) -> StubOpenRouterProvider:
+        resolved_providers.append(provider)
+        return openrouter
+
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        llm_provider=configured_chutes,
+        llm_provider_name="chutes",
+        llm_provider_resolver=resolve_llm_provider,
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    result = await _invoke(
+        invoker,
+        "llm_chat",
+        kwargs={
+            "provider": "openrouter",
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": OPENROUTER_NATIVE_TOOL_MODEL,
+        },
+    )
+
+    assert isinstance(result, ToolInvocationOutput)
+    assert resolved_providers == ["openrouter"]
+    assert openrouter.calls[0].provider == "openrouter"
+    assert configured_chutes.calls == []
 
 
 async def test_runtime_invoker_routes_llm_chat_from_first_positional_payload() -> None:

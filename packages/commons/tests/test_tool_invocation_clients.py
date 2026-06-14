@@ -188,6 +188,17 @@ def test_tool_invocation_clients_can_require_search_provider() -> None:
         )
 
 
+def test_tool_invocation_clients_can_skip_routed_tool_provider_policy() -> None:
+    clients = build_tool_invocation_clients(
+        llm_settings=LlmSettings.model_construct(tool_llm_provider="bedrock"),
+        bedrock_settings=BedrockSettings.model_construct(region="us-east-1"),
+        vertex_settings=VertexSettings.model_construct(gcp_project_id="project", gcp_location="us-central1"),
+        build_routed_tool_llm_provider=False,
+    )
+
+    assert clients.tool_llm_provider is None
+
+
 def test_internal_search_provider_keeps_configured_desearch_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -246,6 +257,59 @@ def test_internal_search_provider_keeps_configured_parallel_concurrency(
             "timeout": invocation_clients.PARALLEL.timeout_seconds,
             "max_concurrent": 11,
         }
+    ]
+
+
+def test_cached_web_search_provider_registry_resolves_requested_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeDeSearchClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(("desearch", kwargs))
+
+    class _FakeParallelClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(("parallel", kwargs))
+
+    monkeypatch.setattr(invocation_clients, "DeSearchClient", _FakeDeSearchClient)
+    monkeypatch.setattr(invocation_clients, "ParallelClient", _FakeParallelClient)
+    registry = invocation_clients.CachedWebSearchProviderRegistry(
+        llm_settings=LlmSettings.model_construct(
+            desearch_api_key=SecretStr("operator-desearch-key"),
+            desearch_max_concurrent=7,
+            parallel_api_key=SecretStr("operator-parallel-key"),
+            parallel_base_url="https://parallel.example",
+            parallel_max_concurrent=11,
+        )
+    )
+
+    parallel = registry.resolve("parallel")
+    same_parallel = registry.resolve("parallel")
+    desearch = registry.resolve("desearch")
+
+    assert parallel is same_parallel
+    assert parallel is not desearch
+    assert captured == [
+        (
+            "parallel",
+            {
+                "base_url": "https://parallel.example",
+                "api_key": "operator-parallel-key",
+                "timeout": invocation_clients.PARALLEL.timeout_seconds,
+                "max_concurrent": 11,
+            },
+        ),
+        (
+            "desearch",
+            {
+                "base_url": invocation_clients.DESEARCH.base_url,
+                "api_key": "operator-desearch-key",
+                "timeout": invocation_clients.DESEARCH.timeout_seconds,
+                "max_concurrent": 7,
+            },
+        ),
     ]
 
 

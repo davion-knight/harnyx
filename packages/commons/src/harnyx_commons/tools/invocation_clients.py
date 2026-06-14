@@ -38,6 +38,7 @@ from harnyx_commons.tools.search_models import (
 @dataclass(frozen=True, slots=True)
 class ToolInvocationClients:
     search_client: WebSearchProviderPort | None
+    search_provider_registry: CachedWebSearchProviderRegistry
     llm_provider_registry: CachedLlmProviderRegistry
     tool_llm_provider: LlmProviderPort | None
 
@@ -49,8 +50,10 @@ def build_tool_invocation_clients(
     vertex_settings: VertexSettings,
     lazy_search: bool = True,
     require_search: bool = False,
+    build_routed_tool_llm_provider: bool = True,
 ) -> ToolInvocationClients:
-    validate_tool_invocation_provider_policy(llm_settings)
+    if build_routed_tool_llm_provider:
+        validate_tool_invocation_provider_policy(llm_settings)
     provider_registry = build_cached_llm_provider_registry(
         llm_settings=llm_settings,
         bedrock_settings=bedrock_settings,
@@ -62,8 +65,13 @@ def build_tool_invocation_clients(
             lazy=lazy_search,
             required=require_search,
         ),
+        search_provider_registry=CachedWebSearchProviderRegistry(llm_settings=llm_settings),
         llm_provider_registry=provider_registry,
-        tool_llm_provider=build_optional_tool_llm_provider(llm_settings, provider_registry),
+        tool_llm_provider=(
+            build_optional_tool_llm_provider(llm_settings, provider_registry)
+            if build_routed_tool_llm_provider
+            else None
+        ),
     )
 
 
@@ -98,25 +106,57 @@ def build_tool_llm_provider(
     )
 
 
+class CachedWebSearchProviderRegistry:
+    def __init__(self, *, llm_settings: LlmSettings) -> None:
+        self._llm_settings = llm_settings
+        self._cache: dict[SearchProviderName, WebSearchProviderPort] = {}
+
+    def resolve(self, provider: SearchProviderName | str) -> WebSearchProviderPort:
+        provider_name = parse_search_provider_name(provider)
+        search_provider = self._cache.get(provider_name)
+        if search_provider is None:
+            search_provider = build_web_search_provider_for_name(self._llm_settings, provider_name)
+            self._cache[provider_name] = search_provider
+        return search_provider
+
+    async def aclose(self) -> None:
+        errors: list[Exception] = []
+        for provider_name, provider in self._cache.items():
+            try:
+                await provider.aclose()
+            except Exception as exc:
+                exc.add_note(f"cached search provider close failed: {provider_name}")
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("cached search provider cleanup failed", errors)
+
+
 def build_web_search_provider(llm_settings: LlmSettings) -> WebSearchProviderPort:
-    provider = llm_settings.search_provider
-    if provider is None:
+    if llm_settings.search_provider is None:
         raise RuntimeError("SEARCH_PROVIDER must be configured")
-    if provider == "desearch":
+    return build_web_search_provider_for_name(llm_settings, llm_settings.search_provider)
+
+
+def build_web_search_provider_for_name(
+    llm_settings: LlmSettings,
+    provider: SearchProviderName | str,
+) -> WebSearchProviderPort:
+    provider_name = parse_search_provider_name(provider)
+    if provider_name == "desearch":
         return DeSearchClient(
             base_url=DESEARCH.base_url,
             api_key=llm_settings.desearch_api_key_value,
             timeout=DESEARCH.timeout_seconds,
             max_concurrent=llm_settings.desearch_max_concurrent,
         )
-    if provider == "parallel":
+    if provider_name == "parallel":
         return ParallelClient(
             base_url=llm_settings.parallel_base_url,
             api_key=llm_settings.parallel_api_key_value,
             timeout=PARALLEL.timeout_seconds,
             max_concurrent=llm_settings.parallel_max_concurrent,
         )
-    raise ValueError(f"unsupported search provider: {provider}")
+    raise AssertionError(f"unsupported parsed search provider: {provider_name}")
 
 
 def build_miner_paid_web_search_provider(
@@ -248,6 +288,7 @@ class LazySearchProvider(WebSearchProviderPort):
 
 
 __all__ = [
+    "CachedWebSearchProviderRegistry",
     "LazyLlmProvider",
     "LazySearchProvider",
     "ToolInvocationClients",
@@ -256,5 +297,6 @@ __all__ = [
     "build_tool_invocation_clients",
     "build_tool_llm_provider",
     "build_web_search_provider",
+    "build_web_search_provider_for_name",
     "validate_tool_invocation_provider_policy",
 ]

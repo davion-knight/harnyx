@@ -160,16 +160,20 @@ def build_miner_sandbox_tool_invoker(
     *,
     web_search_client: WebSearchProviderPort | None = None,
     web_search_provider_name: str | None = None,
+    web_search_provider_resolver: Callable[[SearchProviderName], WebSearchProviderPort] | None = None,
     llm_provider: LlmProviderPort | None = None,
     llm_provider_name: str | None = None,
+    llm_provider_resolver: Callable[[str], LlmProviderPort] | None = None,
     allowed_models: tuple[ToolModelName, ...] = ALLOWED_TOOL_MODELS,
 ) -> RuntimeToolInvoker:
     return RuntimeToolInvoker(
         receipt_log,
         web_search_client=web_search_client,
         web_search_provider_name=web_search_provider_name,
+        web_search_provider_resolver=web_search_provider_resolver,
         llm_provider=llm_provider,
         llm_provider_name=llm_provider_name,
+        llm_provider_resolver=llm_provider_resolver,
         advertised_tool_names=MINER_SANDBOX_TOOL_NAMES,
         allowed_models=allowed_models,
     )
@@ -214,8 +218,10 @@ class RuntimeToolInvoker(ToolInvoker):
         *,
         web_search_client: WebSearchProviderPort | None = None,
         web_search_provider_name: str | None = None,
+        web_search_provider_resolver: Callable[[SearchProviderName], WebSearchProviderPort] | None = None,
         llm_provider: LlmProviderPort | None = None,
         llm_provider_name: str | None = None,
+        llm_provider_resolver: Callable[[str], LlmProviderPort] | None = None,
         advertised_tool_names: tuple[ToolName, ...] | None = None,
         allowed_models: tuple[ToolModelName, ...] = ALLOWED_TOOL_MODELS,
     ) -> None:
@@ -223,8 +229,10 @@ class RuntimeToolInvoker(ToolInvoker):
         self._logger = logging.getLogger("harnyx_commons.tools.runtime_invoker")
         self._web_search = web_search_client
         self._web_search_provider_name = web_search_provider_name
+        self._web_search_provider_resolver = web_search_provider_resolver
         self._llm_provider = llm_provider
         self._llm_provider_name = llm_provider_name
+        self._llm_provider_resolver = llm_provider_resolver
         self._advertised_tool_names = tuple(sorted(advertised_tool_names or TOOL_NAMES))
         _ = allowed_models
 
@@ -352,13 +360,12 @@ class RuntimeToolInvoker(ToolInvoker):
         args: Sequence[JsonValue],
         kwargs: Mapping[str, JsonValue],
     ) -> ToolInvocationOutput:
-        web_search = self._web_search
-        if web_search is None:
+        if self._web_search is None and self._web_search_provider_resolver is None:
             raise LookupError("search client is not configured")
         payload = tool_payload_from_args_kwargs(args, kwargs)
         if tool_name == "search_web":
             request_model_web = SearchWebSearchRequest.model_validate(payload)
-            self._require_search_provider(request_model_web.provider)
+            web_search, provider_name = self._resolve_search_provider(request_model_web.provider)
             response_web = await _invoke_with_optional_timeout(
                 "search_web",
                 request_model_web.timeout,
@@ -373,11 +380,11 @@ class RuntimeToolInvoker(ToolInvoker):
                 cast(JsonObject, as_mapping),
                 tool_name=tool_name,
                 billing=response_web.billing,
-                request_provider=request_model_web.provider,
+                request_provider=provider_name,
             )
         elif tool_name == "search_ai":
             request_ai = SearchAiSearchRequest.model_validate(payload)
-            self._require_search_provider(request_ai.provider)
+            web_search, provider_name = self._resolve_search_provider(request_ai.provider)
             response = await _invoke_with_optional_timeout(
                 "search_ai",
                 request_ai.timeout,
@@ -392,11 +399,11 @@ class RuntimeToolInvoker(ToolInvoker):
                 cast(JsonObject, as_mapping),
                 tool_name=tool_name,
                 billing=response.billing,
-                request_provider=request_ai.provider,
+                request_provider=provider_name,
             )
         elif tool_name == "fetch_page":
             request_page = FetchPageRequest.model_validate(payload)
-            self._require_search_provider(request_page.provider)
+            web_search, provider_name = self._resolve_search_provider(request_page.provider)
             response_page = await _invoke_with_optional_timeout(
                 "fetch_page",
                 request_page.timeout,
@@ -411,7 +418,7 @@ class RuntimeToolInvoker(ToolInvoker):
                 cast(JsonObject, as_mapping),
                 tool_name=tool_name,
                 billing=response_page.billing,
-                request_provider=request_page.provider,
+                request_provider=provider_name,
             )
         raise LookupError(f"search tool '{tool_name}' is not supported")
 
@@ -420,11 +427,10 @@ class RuntimeToolInvoker(ToolInvoker):
         args: Sequence[JsonValue],
         kwargs: Mapping[str, JsonValue],
     ) -> ToolInvocationOutput:
-        llm_provider = self._llm_provider
-        if llm_provider is None:
+        if self._llm_provider is None and self._llm_provider_resolver is None:
             raise LookupError("llm provider is not configured")
-
         invocation = self._parse_invocation(args, kwargs)
+        llm_provider = self._resolve_llm_provider(invocation.provider)
         messages = self._normalize_messages(invocation)
         tools = self._normalize_tools(invocation)
         max_output_tokens = invocation.max_output_tokens or invocation.max_tokens
@@ -483,7 +489,7 @@ class RuntimeToolInvoker(ToolInvoker):
             }
         )
 
-    def _require_search_provider(self, requested_provider: SearchProviderName) -> str:
+    def _require_search_provider(self, requested_provider: SearchProviderName) -> SearchProviderName:
         configured_provider = self._web_search_provider_name
         if configured_provider is None:
             raise LookupError("search provider name is not configured")
@@ -493,6 +499,18 @@ class RuntimeToolInvoker(ToolInvoker):
                 f"{configured_provider!r}"
             )
         return requested_provider
+
+    def _resolve_search_provider(
+        self,
+        requested_provider: SearchProviderName,
+    ) -> tuple[WebSearchProviderPort, SearchProviderName]:
+        resolver = self._web_search_provider_resolver
+        if resolver is not None:
+            return resolver(requested_provider), requested_provider
+        web_search = self._web_search
+        if web_search is None:
+            raise LookupError("search client is not configured")
+        return web_search, self._require_search_provider(requested_provider)
 
     def _require_llm_provider(self, requested_provider: str) -> str:
         configured_provider = self._llm_provider_name
@@ -504,6 +522,16 @@ class RuntimeToolInvoker(ToolInvoker):
                 f"{configured_provider!r}"
             )
         return requested_provider
+
+    def _resolve_llm_provider(self, requested_provider: str) -> LlmProviderPort:
+        resolver = self._llm_provider_resolver
+        if resolver is not None:
+            return resolver(requested_provider)
+        llm_provider = self._llm_provider
+        if llm_provider is None:
+            raise LookupError("llm provider is not configured")
+        self._require_llm_provider(requested_provider)
+        return llm_provider
 
     @staticmethod
     def _normalize_messages(invocation: LlmToolInvocation) -> tuple[LlmMessage, ...]:
@@ -535,9 +563,8 @@ class RuntimeToolInvoker(ToolInvoker):
         tools: tuple[LlmTool, ...] | None,
         max_output_tokens: int | None,
     ) -> LlmRequest:
-        provider = self._require_llm_provider(invocation.provider)
         return LlmRequest(
-            provider=provider,
+            provider=invocation.provider,
             model=invocation.model,
             messages=messages,
             temperature=invocation.temperature,

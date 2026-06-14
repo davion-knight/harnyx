@@ -48,7 +48,16 @@ from harnyx_miner.platform_monitoring import (
     SelectedBatchContext,
 )
 from harnyx_miner_sdk.json_types import JsonValue
-from harnyx_validator.application.dto.evaluation import MinerTaskRunSubmission, ScriptArtifactSpec, TokenUsageSummary
+from harnyx_validator.application.dto.evaluation import (
+    MinerTaskAttemptAuditRecord,
+    MinerTaskAttemptRetryDecision,
+    MinerTaskAttemptStatus,
+    MinerTaskAttemptTerminalEffect,
+    MinerTaskBatchSpec,
+    MinerTaskRunSubmission,
+    ScriptArtifactSpec,
+    TokenUsageSummary,
+)
 from harnyx_validator.application.services.evaluation_runner import (
     ArtifactEvaluationOutcome,
     ArtifactFailure,
@@ -199,6 +208,33 @@ def _submission(
             status=SessionStatus.COMPLETED,
             active_attempt=attempt_count,
         ),
+    )
+
+
+def _attempt_for_local_progress(
+    batch: MinerTaskBatchSpec,
+    *,
+    attempt_number: int = 1,
+) -> MinerTaskAttemptAuditRecord:
+    task = batch.tasks[0]
+    artifact = batch.artifacts[0]
+    started_at = datetime.now(UTC)
+    return MinerTaskAttemptAuditRecord(
+        validator_session_id=uuid4(),
+        batch_id=batch.batch_id,
+        artifact_id=artifact.artifact_id,
+        task_id=task.task_id,
+        attempt_number=attempt_number,
+        uid=artifact.uid,
+        miner_hotkey_ss58="seed-miner-hotkey",
+        started_at=started_at,
+        finished_at=started_at + timedelta(seconds=1),
+        status=MinerTaskAttemptStatus.FAILED,
+        error_code="tool_execution_timeout",
+        error_summary_code="timeout_miner_owned",
+        retry_decision=MinerTaskAttemptRetryDecision.WILL_RETRY,
+        terminal_effect=MinerTaskAttemptTerminalEffect.NONE,
+        max_attempts=2,
     )
 
 
@@ -571,6 +607,7 @@ def test_local_eval_runtime_create_binds_sandbox_publish_to_loopback(
         "build_tool_invocation_clients",
         lambda **_kwargs: SimpleNamespace(
             search_client=_FakeAsyncResource(),
+            search_provider_registry=_FakeRegistry(),
             llm_provider_registry=_FakeRegistry(),
             tool_llm_provider=_FakeAsyncResource(),
         ),
@@ -606,6 +643,7 @@ def test_local_eval_runtime_create_binds_sandbox_publish_to_loopback(
 
 async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() -> None:
     search_client = _FakeAsyncResource()
+    search_provider_registry = _FakeAsyncResource()
     llm_provider_registry = _FakeAsyncResource()
     tool_llm_provider = _FakeAsyncResource()
     scoring_llm_provider = _FakeAsyncResource()
@@ -621,6 +659,7 @@ async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() 
         _runner=cast(Any, object()),
         _state=SimpleNamespace(),
         _search_client=search_client,
+        _search_provider_registry=search_provider_registry,
         _llm_provider_registry=llm_provider_registry,
         _tool_llm_provider=tool_llm_provider,
         _scoring_llm_provider=scoring_llm_provider,
@@ -634,6 +673,7 @@ async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() 
     await runtime.aclose()
 
     assert search_client.closed is True
+    assert search_provider_registry.closed is True
     assert llm_provider_registry.closed is True
     assert tool_llm_provider.closed is False
     assert scoring_llm_provider.closed is False
@@ -641,6 +681,7 @@ async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() 
 
 async def test_local_runtime_closes_llm_provider_registry_when_search_close_fails() -> None:
     search_client = _FailingAsyncResource()
+    search_provider_registry = _FakeAsyncResource()
     llm_provider_registry = _FakeAsyncResource()
     runtime = local_eval.LocalEvaluationRuntime(
         settings=cast(Any, SimpleNamespace()),
@@ -654,6 +695,7 @@ async def test_local_runtime_closes_llm_provider_registry_when_search_close_fail
         _runner=cast(Any, object()),
         _state=SimpleNamespace(),
         _search_client=search_client,
+        _search_provider_registry=search_provider_registry,
         _llm_provider_registry=llm_provider_registry,
         _tool_llm_provider=_FakeAsyncResource(),
         _scoring_llm_provider=_FakeAsyncResource(),
@@ -668,6 +710,7 @@ async def test_local_runtime_closes_llm_provider_registry_when_search_close_fail
         await runtime.aclose()
 
     assert search_client.closed is True
+    assert search_provider_registry.closed is True
     assert llm_provider_registry.closed is True
 
 
@@ -838,6 +881,7 @@ def _local_runtime(
             tool_concurrency_limiter=object(),
         ),
         _search_client=_FakeAsyncResource(),
+        _search_provider_registry=_FakeAsyncResource(),
         _llm_provider_registry=_FakeAsyncResource(),
         _tool_llm_provider=_FakeAsyncResource(),
         _scoring_llm_provider=_FakeAsyncResource(),
@@ -881,6 +925,32 @@ def _precreate_public_file(path: Path) -> None:
 
 def _assert_private_mode(path: Path, expected_mode: int) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == expected_mode
+
+
+def test_local_progress_recorder_delegates_attempt_tracking_to_storage(tmp_path: Path) -> None:
+    task = _task(uuid4(), "retry task")
+    artifact = ScriptArtifactSpec(uid=3, artifact_id=uuid4(), content_hash="target-hash", size_bytes=64)
+    batch = MinerTaskBatchSpec(
+        batch_id=uuid4(),
+        cutoff_at="2026-03-27T05:55:00Z",
+        created_at="2026-03-27T06:00:00Z",
+        tasks=(task,),
+        artifacts=(artifact,),
+    )
+    storage = local_eval.FileBackedRunProgress(storage_root=tmp_path / "run-progress")
+    progress = local_eval._LocalProgressRecorder(_display=None, _storage=storage)
+
+    progress.register(batch)
+
+    assert progress.next_attempt_number(batch.batch_id, artifact.artifact_id, task.task_id) == 1
+
+    attempt = _attempt_for_local_progress(batch)
+    progress.record_terminated_attempt(attempt)
+
+    assert progress.next_attempt_number(batch.batch_id, artifact.artifact_id, task.task_id) == 2
+    assert storage.completed_run_page(batch.batch_id, after_sequence=0, limit=10)["items"] == (
+        {"sequence": 1, "kind": "terminated_attempt", "submission": None, "attempt": attempt},
+    )
 
 
 def test_local_eval_writes_default_reports_for_latest_completed_vs_champion(
@@ -1053,7 +1123,8 @@ def test_invocation_only_runtime_factory_skips_default_scoring_provider(
         "build_tool_invocation_clients",
         lambda **_kwargs: SimpleNamespace(
             search_client=None,
-            llm_provider_registry=object(),
+            search_provider_registry=SimpleNamespace(resolve=lambda _name: object()),
+            llm_provider_registry=SimpleNamespace(resolve=lambda _name: object()),
             tool_llm_provider=None,
         ),
     )
@@ -1650,6 +1721,7 @@ async def test_local_runtime_executes_target_and_champion_via_sandbox_and_reuses
             tool_concurrency_limiter=tool_concurrency_limiter,
         ),
         _search_client=_FakeAsyncResource(),
+        _search_provider_registry=_FakeAsyncResource(),
         _llm_provider_registry=_FakeAsyncResource(),
         _tool_llm_provider=_FakeAsyncResource(),
         _scoring_llm_provider=_FakeAsyncResource(),
@@ -1974,6 +2046,7 @@ async def test_local_runtime_stops_started_sandbox_when_cancelled_during_startup
             tool_concurrency_limiter=object(),
         ),
         _search_client=None,
+        _search_provider_registry=None,
         _llm_provider_registry=None,
         _tool_llm_provider=None,
         _scoring_llm_provider=None,

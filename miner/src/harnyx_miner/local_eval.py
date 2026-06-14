@@ -54,7 +54,12 @@ from harnyx_miner.platform_monitoring import (
     SelectedBatchContext,
     platform_base_url_from_env,
 )
-from harnyx_validator.application.dto.evaluation import MinerTaskBatchSpec, MinerTaskRunSubmission, ScriptArtifactSpec
+from harnyx_validator.application.dto.evaluation import (
+    MinerTaskAttemptAuditRecord,
+    MinerTaskBatchSpec,
+    MinerTaskRunSubmission,
+    ScriptArtifactSpec,
+)
 from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
 from harnyx_validator.application.invoke_entrypoint import EntrypointInvoker
 from harnyx_validator.application.ports.progress import ProgressRecorder, ProviderFailureEvidence
@@ -278,6 +283,12 @@ class _LocalProgressRecorder(ProgressRecorder):
         if self._display is not None:
             self._display.record(result)
 
+    def record_terminated_attempt(self, attempt: MinerTaskAttemptAuditRecord) -> None:
+        self._storage.record_terminated_attempt(attempt)
+
+    def next_attempt_number(self, batch_id: UUID, artifact_id: UUID, task_id: UUID) -> int:
+        return self._storage.next_attempt_number(batch_id, artifact_id, task_id)
+
     def restore_completed_runs(
         self,
         batch: MinerTaskBatchSpec,
@@ -357,6 +368,7 @@ class LocalEvaluationRuntime:
     _runner: EvaluationRunner
     _state: Any
     _search_client: Any
+    _search_provider_registry: Any
     _llm_provider_registry: Any
     _tool_llm_provider: Any
     _scoring_llm_provider: Any | None
@@ -379,6 +391,7 @@ class LocalEvaluationRuntime:
             llm_settings=settings.llm,
             bedrock_settings=settings.bedrock,
             vertex_settings=settings.vertex,
+            build_routed_tool_llm_provider=False,
         )
         scoring_route = _resolve_scoring_judge_route(settings)
         scoring_llm_provider = invocation_clients.llm_provider_registry.resolve(scoring_route.provider)
@@ -392,6 +405,7 @@ class LocalEvaluationRuntime:
             settings=settings,
             state=state,
             search_client=invocation_clients.search_client,
+            search_provider_registry=invocation_clients.search_provider_registry,
             llm_provider_registry=invocation_clients.llm_provider_registry,
             tool_llm_provider=invocation_clients.tool_llm_provider,
             scoring_llm_provider=scoring_llm_provider,
@@ -415,11 +429,13 @@ class LocalEvaluationRuntime:
             llm_settings=settings.llm,
             bedrock_settings=settings.bedrock,
             vertex_settings=settings.vertex,
+            build_routed_tool_llm_provider=False,
         )
         return cls._from_components(
             settings=settings,
             state=state,
             search_client=invocation_clients.search_client,
+            search_provider_registry=invocation_clients.search_provider_registry,
             llm_provider_registry=invocation_clients.llm_provider_registry,
             tool_llm_provider=invocation_clients.tool_llm_provider,
             scoring_llm_provider=None,
@@ -435,6 +451,7 @@ class LocalEvaluationRuntime:
         settings: Settings,
         state: Any,
         search_client: Any,
+        search_provider_registry: Any,
         llm_provider_registry: Any,
         tool_llm_provider: Any,
         scoring_llm_provider: Any | None,
@@ -447,6 +464,8 @@ class LocalEvaluationRuntime:
             resolved=settings,
             search_client=search_client,
             tool_llm_provider=tool_llm_provider,
+            search_provider_resolver=search_provider_registry.resolve,
+            llm_provider_resolver=llm_provider_registry.resolve,
         )
         progress = _LocalProgressRecorder(
             _display=progress_reporter,
@@ -473,6 +492,7 @@ class LocalEvaluationRuntime:
             _runner=runner,
             _state=state,
             _search_client=search_client,
+            _search_provider_registry=search_provider_registry,
             _llm_provider_registry=llm_provider_registry,
             _tool_llm_provider=tool_llm_provider,
             _scoring_llm_provider=scoring_llm_provider,
@@ -697,6 +717,7 @@ class LocalEvaluationRuntime:
                 self._tool_host = None
         await _close_async_resources(
             self._search_client,
+            self._search_provider_registry,
             self._llm_provider_registry,
             errors=errors,
             owner="local eval",
