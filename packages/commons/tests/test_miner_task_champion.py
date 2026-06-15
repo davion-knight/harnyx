@@ -11,13 +11,14 @@ from harnyx_commons.miner_task_champion import (
     ChampionSelection,
     CurrentChampionInput,
     SubmittedArtifactInput,
+    artifact_batch_scores,
     filter_successful_validator_runs,
     select_batch_artifacts,
     select_champion,
     selection_from_stored_champion_weights,
     validate_champion_run_inputs,
 )
-from harnyx_commons.miner_task_ranking import CascadeConfig, RankingCascade
+from harnyx_commons.miner_task_ranking import ArtifactAggregateBundle, CascadeConfig, RankingCascade
 
 
 def test_selection_from_stored_champion_weights_reads_single_champion_score() -> None:
@@ -180,6 +181,37 @@ def test_filter_successful_validator_runs_keeps_only_successful_validators() -> 
     )
 
     assert filter_successful_validator_runs(runs, successful_validator_ids=(validator_b,)) == (runs[1],)
+
+
+def test_artifact_batch_scores_normalize_aggregate_totals_by_task_count() -> None:
+    artifact_a = uuid4()
+    artifact_b = uuid4()
+
+    scores = artifact_batch_scores(
+        artifact_ids=(artifact_a, artifact_b),
+        task_count=2,
+        aggregates=ArtifactAggregateBundle(
+            vectors={},
+            totals={artifact_a: 1.2, artifact_b: 0.8},
+            costs={},
+        ),
+    )
+
+    assert scores == {
+        artifact_a: pytest.approx(0.6),
+        artifact_b: pytest.approx(0.4),
+    }
+
+
+def test_artifact_batch_scores_reject_invalid_normalized_score() -> None:
+    artifact_id = uuid4()
+
+    with pytest.raises(ValueError, match="artifact batch score must be between 0.0 and 1.0"):
+        artifact_batch_scores(
+            artifact_ids=(artifact_id,),
+            task_count=2,
+            aggregates=ArtifactAggregateBundle(vectors={}, totals={artifact_id: 2.2}, costs={}),
+        )
 
 
 def test_validate_champion_run_inputs_rejects_incomplete_validator_coverage() -> None:

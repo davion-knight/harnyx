@@ -4,9 +4,11 @@ import pytest
 
 from harnyx_commons.miner_task_emission import (
     OWNER_UID,
+    ParticipantEmissionScore,
     apply_miner_emission_cap,
     compose_emission_weights,
     compose_participant_emission_weights,
+    compose_tiered_participant_emission_allocations,
     owner_fallback_weights,
     participant_emission_fraction,
 )
@@ -131,6 +133,134 @@ def test_participant_emission_rejects_invalid_configured_weight(raw_value: float
 
 def test_participant_emission_fraction_uses_configured_weight() -> None:
     assert participant_emission_fraction(3, miner_participation_emission=0.01) == pytest.approx(0.03)
+
+
+def test_tiered_participant_emission_uses_ceil_30_and_all_eligible_thresholds() -> None:
+    weights = compose_tiered_participant_emission_allocations(
+        (
+            ParticipantEmissionScore("hotkey-a", 1.0),
+            ParticipantEmissionScore("hotkey-b", 0.9),
+            ParticipantEmissionScore("hotkey-c", 0.8),
+            ParticipantEmissionScore("hotkey-d", 0.7),
+            ParticipantEmissionScore("hotkey-e", 0.6),
+        ),
+        miner_participation_emission=0.01,
+    )
+
+    assert weights == {
+        "hotkey-a": pytest.approx(0.02),
+        "hotkey-b": pytest.approx(0.02),
+        "hotkey-c": pytest.approx(0.01),
+        "hotkey-d": pytest.approx(0.01),
+        "hotkey-e": pytest.approx(0.01),
+    }
+
+
+def test_tiered_participant_emission_expands_ties_at_boundaries() -> None:
+    weights = compose_tiered_participant_emission_allocations(
+        (
+            ParticipantEmissionScore("hotkey-a", 1.0),
+            ParticipantEmissionScore("hotkey-b", 0.9),
+            ParticipantEmissionScore("hotkey-c", 0.9),
+            ParticipantEmissionScore("hotkey-d", 0.8),
+            ParticipantEmissionScore("hotkey-e", 0.7),
+        ),
+        miner_participation_emission=0.01,
+    )
+
+    assert weights == {
+        "hotkey-a": pytest.approx(0.02),
+        "hotkey-b": pytest.approx(0.02),
+        "hotkey-c": pytest.approx(0.02),
+        "hotkey-d": pytest.approx(0.01),
+        "hotkey-e": pytest.approx(0.01),
+    }
+
+
+def test_tiered_participant_emission_excludes_zero_scores_from_allocations() -> None:
+    weights = compose_tiered_participant_emission_allocations(
+        (
+            ParticipantEmissionScore("hotkey-a", 1.0),
+            ParticipantEmissionScore("hotkey-b", 0.5),
+            ParticipantEmissionScore("hotkey-c", 0.0),
+        ),
+        miner_participation_emission=0.01,
+    )
+
+    assert weights == {
+        "hotkey-a": pytest.approx(0.02),
+        "hotkey-b": pytest.approx(0.01),
+    }
+
+
+def test_tiered_participant_emission_counts_zero_scores_in_cutoff_population() -> None:
+    weights = compose_tiered_participant_emission_allocations(
+        (
+            ParticipantEmissionScore("hotkey-a", 1.0),
+            ParticipantEmissionScore("hotkey-b", 0.5),
+            ParticipantEmissionScore("hotkey-c", 0.0),
+            ParticipantEmissionScore("hotkey-d", 0.0),
+            ParticipantEmissionScore("hotkey-e", 0.0),
+            ParticipantEmissionScore("hotkey-f", 0.0),
+            ParticipantEmissionScore("hotkey-g", 0.0),
+            ParticipantEmissionScore("hotkey-h", 0.0),
+            ParticipantEmissionScore("hotkey-i", 0.0),
+            ParticipantEmissionScore("hotkey-j", 0.0),
+        ),
+        miner_participation_emission=0.01,
+    )
+
+    assert weights == {
+        "hotkey-a": pytest.approx(0.02),
+        "hotkey-b": pytest.approx(0.02),
+    }
+
+
+def test_tiered_participant_emission_all_zero_scores_return_empty_allocations() -> None:
+    weights = compose_tiered_participant_emission_allocations(
+        (
+            ParticipantEmissionScore("hotkey-a", 0.0),
+            ParticipantEmissionScore("hotkey-b", 0.0),
+        ),
+        miner_participation_emission=0.01,
+    )
+
+    assert weights == {}
+
+
+def test_tiered_participant_emission_deduplicates_participant_key_by_higher_score() -> None:
+    weights = compose_tiered_participant_emission_allocations(
+        (
+            ParticipantEmissionScore("hotkey-a", 0.2),
+            ParticipantEmissionScore("hotkey-a", 0.9),
+            ParticipantEmissionScore("hotkey-b", 0.8),
+            ParticipantEmissionScore("hotkey-c", 0.1),
+        ),
+        miner_participation_emission=0.01,
+    )
+
+    assert weights["hotkey-a"] == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize("raw_score", [-0.1, 1.1, float("nan")])
+def test_tiered_participant_emission_rejects_invalid_scores(raw_score: float) -> None:
+    with pytest.raises(ValueError, match="participant score must be between 0.0 and 1.0"):
+        compose_tiered_participant_emission_allocations(
+            (ParticipantEmissionScore("hotkey-a", raw_score),)
+        )
+
+
+def test_tiered_participant_emission_rejects_empty_participant_key() -> None:
+    with pytest.raises(ValueError, match="participant key must be non-empty"):
+        compose_tiered_participant_emission_allocations((ParticipantEmissionScore("", 1.0),))
+
+
+def test_tiered_participant_emission_rejects_total_weight_over_one() -> None:
+    with pytest.raises(ValueError, match="participant emission exceeds total weight"):
+        compose_tiered_participant_emission_allocations(
+            tuple(ParticipantEmissionScore(f"hotkey-{index}", 1.0) for index in range(51)),
+            miner_participation_emission=0.01,
+        )
 
 
 def test_compose_emission_weights_adds_champion_and_participant_components() -> None:

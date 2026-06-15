@@ -208,7 +208,7 @@ def select_champion(
         )
 
     champion_identity = artifact_identity_map[champion_artifact_id]
-    artifact_scores = _artifact_scores(
+    artifact_scores = artifact_batch_scores(
         artifact_ids=candidate_artifact_ids,
         task_count=len(task_ids),
         aggregates=aggregates,
@@ -312,29 +312,29 @@ def _validated_incumbent(
     return (incumbent,), {incumbent.artifact_id}
 
 
-def _champion_batch_score(
+def artifact_batch_score(
     *,
-    champion_artifact_id: UUID,
+    artifact_id: UUID,
     task_count: int,
     aggregates: ArtifactAggregateBundle,
 ) -> float:
     if task_count <= 0:
         raise ValueError("batch contains no tasks")
-    score = float(aggregates.totals[champion_artifact_id]) / float(task_count)
+    score = float(aggregates.totals[artifact_id]) / float(task_count)
     if not isfinite(score) or score < 0.0 or score > 1.0:
-        raise ValueError("champion batch score must be between 0.0 and 1.0")
+        raise ValueError("artifact batch score must be between 0.0 and 1.0")
     return score
 
 
-def _artifact_scores(
+def artifact_batch_scores(
     *,
     artifact_ids: Sequence[UUID],
     task_count: int,
     aggregates: ArtifactAggregateBundle,
 ) -> dict[UUID, float]:
     return {
-        artifact_id: _champion_batch_score(
-            champion_artifact_id=artifact_id,
+        artifact_id: artifact_batch_score(
+            artifact_id=artifact_id,
             task_count=task_count,
             aggregates=aggregates,
         )
@@ -377,6 +377,8 @@ __all__ = [
     "CurrentChampionInput",
     "REQUIRED_SUCCESSFUL_VALIDATOR_COUNT",
     "SubmittedArtifactInput",
+    "artifact_batch_score",
+    "artifact_batch_scores",
     "eligible_validator_ids",
     "filter_successful_validator_runs",
     "has_required_successful_validators",
