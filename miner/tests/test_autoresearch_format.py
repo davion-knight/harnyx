@@ -216,6 +216,17 @@ def test_prepare_resolves_explicit_benchmark_suite(monkeypatch: pytest.MonkeyPat
     assert pin.sample_size == 20
 
 
+def test_prepare_resolves_draco_current_benchmark_suite() -> None:
+    prepare = _load_prepare_module()
+
+    pin = prepare._resolve_benchmark(benchmark_suite="draco", sample_size=1)
+
+    assert pin.suite_slug == "draco"
+    assert pin.dataset_version == "2026-06-16-hf-ce076749"
+    assert pin.scoring_version == "weighted-rubric-v1"
+    assert pin.sample_size == 1
+
+
 def test_prepare_parses_local_benchmark_report_summary(tmp_path: Path) -> None:
     prepare = _load_prepare_module()
     report_path = tmp_path / "local-benchmark-report.json"

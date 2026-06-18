@@ -31,6 +31,7 @@ class BenchmarkDatasetItem:
     problem_category: str
     answer: str
     answer_type: BenchmarkAnswerType
+    source_item_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

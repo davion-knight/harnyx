@@ -317,7 +317,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         required=True,
         help=(
             "Benchmark suite slug to pin for local benchmark runs, "
-            "for example webwalkerqa, deepsearchqa, or deepresearch9k-l1."
+            "for example draco, webwalkerqa, deepsearchqa, or deepresearch9k-l1."
         ),
     )
     parser.add_argument(

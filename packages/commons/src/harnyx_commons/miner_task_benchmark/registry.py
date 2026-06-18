@@ -12,6 +12,11 @@ from harnyx_commons.miner_task_benchmark.deepsearchqa.loader import (
     list_deepsearchqa_snapshots,
     load_deepsearchqa_snapshot,
 )
+from harnyx_commons.miner_task_benchmark.draco.loader import (
+    DRACO_SUITE_SLUG,
+    list_draco_snapshots,
+    load_draco_snapshot,
+)
 from harnyx_commons.miner_task_benchmark.types import BenchmarkDatasetSnapshot
 from harnyx_commons.miner_task_benchmark.webwalkerqa.loader import (
     WEBWALKERQA_SUITE_SLUG,
@@ -26,11 +31,13 @@ BenchmarkSnapshotVersionKey = tuple[str, str]
 _BENCHMARK_SNAPSHOT_CATALOG_LOADERS: dict[str, BenchmarkSnapshotCatalogLoader] = {
     DEEPRESEARCH9K_L1_SUITE_SLUG: list_deepresearch9k_l1_snapshots,
     DEEPSEARCHQA_SUITE_SLUG: list_deepsearchqa_snapshots,
+    DRACO_SUITE_SLUG: list_draco_snapshots,
     WEBWALKERQA_SUITE_SLUG: list_webwalkerqa_snapshots,
 }
 _BENCHMARK_CURRENT_SNAPSHOT_LOADERS: dict[str, BenchmarkCurrentSnapshotLoader] = {
     DEEPRESEARCH9K_L1_SUITE_SLUG: load_deepresearch9k_l1_snapshot,
     DEEPSEARCHQA_SUITE_SLUG: load_deepsearchqa_snapshot,
+    DRACO_SUITE_SLUG: load_draco_snapshot,
     WEBWALKERQA_SUITE_SLUG: load_webwalkerqa_snapshot,
 }
 

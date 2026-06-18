@@ -6,12 +6,13 @@ import json
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from harnyx_commons.config.bedrock import BedrockSettings
+from harnyx_commons.config.benchmark_rubric_judge import BenchmarkRubricJudgeLlmSettings
 from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.config.vertex import VertexSettings
 from harnyx_commons.domain.miner_task import (
@@ -22,19 +23,23 @@ from harnyx_commons.domain.miner_task import (
     Response,
     ScoreBreakdown,
 )
+from harnyx_commons.json_types import JsonObject
 from harnyx_commons.llm.provider_factory import (
-    CachedLlmProviderRegistry,
     build_cached_llm_provider_registry,
 )
 from harnyx_commons.miner_task_benchmark import (
+    BENCHMARK_CORRECTNESS_SCORING_VERSION,
     BENCHMARK_SAMPLE_SIZE,
-    BenchmarkCorrectnessScore,
+    BENCHMARK_WEIGHTED_RUBRIC_SCORING_VERSION,
     BenchmarkCorrectnessScoringConfig,
     BenchmarkCorrectnessScoringService,
     BenchmarkDatasetItem,
     BenchmarkDatasetSnapshot,
     BenchmarkItemOutcome,
     BenchmarkItemState,
+    BenchmarkRunMetrics,
+    BenchmarkWeightedRubricScoringConfig,
+    BenchmarkWeightedRubricScoringService,
     aggregate_benchmark_metrics,
     benchmark_backing_batch_id_for_run,
     benchmark_run_id_for_source_batch,
@@ -75,10 +80,81 @@ def _emit_progress(message: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class _BenchmarkItemScore:
+    is_correct: bool | None
+    score: float | None
+    score_reason: str | None
+    score_detail: JsonObject | None
+
+
+class _LocalBenchmarkScoringService(Protocol):
+    async def score(
+        self,
+        *,
+        item: BenchmarkDatasetItem,
+        generated_answer: str,
+    ) -> _BenchmarkItemScore: ...
+
+
+class _BenchmarkScoringRegistry(Protocol):
+    async def aclose(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _CorrectnessLocalBenchmarkScoringService:
+    delegate: BenchmarkCorrectnessScoringService
+
+    async def score(
+        self,
+        *,
+        item: BenchmarkDatasetItem,
+        generated_answer: str,
+    ) -> _BenchmarkItemScore:
+        score = await self.delegate.score(
+            question=item.problem,
+            reference_answer=item.answer,
+            generated_answer=generated_answer,
+        )
+        return _BenchmarkItemScore(
+            is_correct=score.is_correct,
+            score=1.0 if score.is_correct else 0.0,
+            score_reason=score.reason,
+            score_detail=None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _WeightedRubricLocalBenchmarkScoringService:
+    delegate: BenchmarkWeightedRubricScoringService
+
+    async def score(
+        self,
+        *,
+        item: BenchmarkDatasetItem,
+        generated_answer: str,
+    ) -> _BenchmarkItemScore:
+        score = await self.delegate.score(
+            question=item.problem,
+            rubric_answer=item.answer,
+            generated_answer=generated_answer,
+        )
+        return _BenchmarkItemScore(
+            is_correct=None,
+            score=score.normalized_score,
+            score_reason=None,
+            score_detail=score.score_detail,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _BenchmarkScoringBundle:
-    service: BenchmarkCorrectnessScoringService
-    registry: CachedLlmProviderRegistry
-    config: BenchmarkCorrectnessScoringConfig
+    service: _LocalBenchmarkScoringService
+    registry: _BenchmarkScoringRegistry
+    config: BenchmarkCorrectnessScoringConfig | BenchmarkWeightedRubricScoringConfig
+    scoring_boundary: str
+    scoring_method: str
+    uses_numeric_scores: bool
+    failed_item_report_score: float | None
 
     async def aclose(self) -> None:
         await self.registry.aclose()
@@ -89,7 +165,7 @@ class _BenchmarkItemResult:
     item: BenchmarkDatasetItem
     task: MinerTask
     submission: MinerTaskRunSubmission | None
-    score: BenchmarkCorrectnessScore | None
+    score: _BenchmarkItemScore | None
     error_code: str | None
     error_message: str | None
 
@@ -150,7 +226,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--suite",
         help=(
             "Benchmark suite slug. Required unless --list-suites is used, "
-            "for example webwalkerqa, deepsearchqa, or deepresearch9k-l1."
+            "for example draco, webwalkerqa, deepsearchqa, or deepresearch9k-l1."
         ),
     )
     parser.add_argument("--dataset-version", help="Pinned benchmark dataset version.")
@@ -255,7 +331,7 @@ async def _amain(argv: Sequence[str] | None) -> None:
             scoring_config=_INVOCATION_ONLY_SCORING_CONFIG,
             run_progress_root=run_progress_root,
         )
-        scoring = _build_benchmark_scoring_bundle()
+        scoring = _build_benchmark_scoring_bundle(snapshot.manifest.scoring_version)
         _emit_progress(
             "running candidate against benchmark items: "
             f"parallelism={args.parallelism}"
@@ -278,6 +354,8 @@ async def _amain(argv: Sequence[str] | None) -> None:
             await scoring.aclose()
 
     elapsed_seconds = time.monotonic() - started
+    if scoring is None:
+        raise RuntimeError("benchmark scoring was not initialized")
     report = _build_report(
         snapshot=snapshot,
         source_batch_id=source_batch_id,
@@ -287,7 +365,7 @@ async def _amain(argv: Sequence[str] | None) -> None:
         target_bytes=target_bytes,
         target_artifact=target_artifact,
         results=results,
-        scoring_config=scoring.config,
+        scoring=scoring,
         output_dir=output_dir,
         elapsed_seconds=elapsed_seconds,
         parallelism=args.parallelism,
@@ -356,7 +434,15 @@ def _build_target_artifact_spec(
     )
 
 
-def _build_benchmark_scoring_bundle() -> _BenchmarkScoringBundle:
+def _build_benchmark_scoring_bundle(scoring_version: str) -> _BenchmarkScoringBundle:
+    if scoring_version == BENCHMARK_CORRECTNESS_SCORING_VERSION:
+        return _build_correctness_scoring_bundle()
+    if scoring_version == BENCHMARK_WEIGHTED_RUBRIC_SCORING_VERSION:
+        return _build_weighted_rubric_scoring_bundle()
+    raise unsupported_benchmark_scoring_version_error(scoring_version)
+
+
+def _build_correctness_scoring_bundle() -> _BenchmarkScoringBundle:
     load_public_env()
     llm_settings = LlmSettings()
     model = llm_settings.benchmark_llm_model.strip()
@@ -378,12 +464,59 @@ def _build_benchmark_scoring_bundle() -> _BenchmarkScoringBundle:
         timeout_seconds=llm_settings.benchmark_llm_timeout_seconds or llm_settings.llm_timeout_seconds,
     )
     return _BenchmarkScoringBundle(
-        service=BenchmarkCorrectnessScoringService(
-            llm_provider=provider,
-            config=config,
+        service=_CorrectnessLocalBenchmarkScoringService(
+            BenchmarkCorrectnessScoringService(
+                llm_provider=provider,
+                config=config,
+            )
         ),
         registry=registry,
         config=config,
+        scoring_boundary="benchmark-correctness-judge",
+        scoring_method="binary correctness against the canonical benchmark answer",
+        uses_numeric_scores=False,
+        failed_item_report_score=0.0,
+    )
+
+
+def _build_weighted_rubric_scoring_bundle() -> _BenchmarkScoringBundle:
+    load_public_env()
+    llm_settings = LlmSettings()
+    rubric_settings = BenchmarkRubricJudgeLlmSettings()
+    provider_name = rubric_settings.provider
+    model = rubric_settings.model.strip()
+    if provider_name is None or not model:
+        raise RuntimeError(
+            "BENCHMARK_RUBRIC_JUDGE_LLM_PROVIDER and BENCHMARK_RUBRIC_JUDGE_LLM_MODEL "
+            "must be configured to run weighted rubric local benchmark scoring"
+        )
+    registry = build_cached_llm_provider_registry(
+        llm_settings=llm_settings,
+        bedrock_settings=BedrockSettings(),
+        vertex_settings=VertexSettings(),
+    )
+    provider = registry.resolve(provider_name)
+    config = BenchmarkWeightedRubricScoringConfig(
+        provider=provider_name,
+        model=model,
+        temperature=rubric_settings.temperature,
+        max_output_tokens=None,
+        reasoning_effort=rubric_settings.reasoning_effort,
+        timeout_seconds=rubric_settings.timeout_seconds or llm_settings.llm_timeout_seconds,
+    )
+    return _BenchmarkScoringBundle(
+        service=_WeightedRubricLocalBenchmarkScoringService(
+            BenchmarkWeightedRubricScoringService(
+                llm_provider=provider,
+                config=config,
+            )
+        ),
+        registry=registry,
+        config=config,
+        scoring_boundary="benchmark-weighted-rubric-judge",
+        scoring_method="weighted rubric criteria judged independently",
+        uses_numeric_scores=True,
+        failed_item_report_score=None,
     )
 
 
@@ -410,7 +543,7 @@ async def _evaluate_and_score_items(
     items: Sequence[BenchmarkDatasetItem],
     tasks: Sequence[MinerTask],
     invocation_scoring: EvaluationScoringService,
-    scoring_service: BenchmarkCorrectnessScoringService,
+    scoring_service: _LocalBenchmarkScoringService,
     parallelism: int,
 ) -> tuple[_BenchmarkItemResult, ...]:
     semaphore = asyncio.Semaphore(parallelism)
@@ -444,7 +577,7 @@ async def _evaluate_and_score_item(
     item: BenchmarkDatasetItem,
     task: MinerTask,
     invocation_scoring: EvaluationScoringService,
-    scoring_service: BenchmarkCorrectnessScoringService,
+    scoring_service: _LocalBenchmarkScoringService,
 ) -> _BenchmarkItemResult:
     try:
         outcome = await runtime.evaluate_artifact(
@@ -488,7 +621,7 @@ async def _score_item_submission(
     item: BenchmarkDatasetItem,
     task: MinerTask,
     submission: MinerTaskRunSubmission | None,
-    scoring_service: BenchmarkCorrectnessScoringService,
+    scoring_service: _LocalBenchmarkScoringService,
 ) -> _BenchmarkItemResult:
     if submission is None:
         return _BenchmarkItemResult(
@@ -521,8 +654,7 @@ async def _score_item_submission(
         )
     try:
         score = await scoring_service.score(
-            question=item.problem,
-            reference_answer=item.answer,
+            item=item,
             generated_answer=response.text,
         )
     except Exception as exc:
@@ -554,12 +686,12 @@ def _build_report(
     target_bytes: bytes,
     target_artifact: ScriptArtifactSpec,
     results: Sequence[_BenchmarkItemResult],
-    scoring_config: BenchmarkCorrectnessScoringConfig,
+    scoring: _BenchmarkScoringBundle,
     output_dir: Path,
     elapsed_seconds: float,
     parallelism: int,
 ) -> dict[str, object]:
-    metrics = aggregate_benchmark_metrics(tuple(_item_outcome(result) for result in results))
+    metrics = _aggregate_local_report_metrics(results=results, scoring=scoring)
     cost_totals = _aggregate_cost_totals(
         tuple(result.submission for result in results if result.submission is not None)
     )
@@ -594,17 +726,17 @@ def _build_report(
             "execution_boundary": "docker-sandbox",
             "sandbox_item_parallelism": 1,
             "benchmark_item_parallelism": parallelism,
-            "scoring_boundary": "benchmark-correctness-judge",
+            "scoring_boundary": scoring.scoring_boundary,
         },
         "scoring_context": {
-            "provider": scoring_config.provider,
-            "model": scoring_config.model,
-            "temperature": scoring_config.temperature,
-            "max_output_tokens": scoring_config.max_output_tokens,
-            "reasoning_effort": scoring_config.reasoning_effort,
-            "timeout_seconds": scoring_config.timeout_seconds,
+            "provider": scoring.config.provider,
+            "model": scoring.config.model,
+            "temperature": scoring.config.temperature,
+            "max_output_tokens": scoring.config.max_output_tokens,
+            "reasoning_effort": scoring.config.reasoning_effort,
+            "timeout_seconds": scoring.config.timeout_seconds,
             "scoring_version": snapshot.manifest.scoring_version,
-            "method": "binary correctness against the canonical benchmark answer",
+            "method": scoring.scoring_method,
         },
         "artifacts": {
             "target": {
@@ -626,18 +758,33 @@ def _build_report(
             "total_seconds": round(elapsed_seconds, 3),
             "cost_totals": cost_totals,
         },
-        "items": [_item_report(result) for result in results],
+        "items": [_item_report(result, scoring=scoring) for result in results],
     }
 
 
+def _aggregate_local_report_metrics(
+    *,
+    results: Sequence[_BenchmarkItemResult],
+    scoring: _BenchmarkScoringBundle,
+) -> BenchmarkRunMetrics:
+    metrics = aggregate_benchmark_metrics(tuple(_item_outcome(result) for result in results))
+    if not scoring.uses_numeric_scores:
+        return metrics
+    return replace(metrics, correct_item_count=None)
+
+
 def _item_outcome(result: _BenchmarkItemResult) -> BenchmarkItemOutcome:
+    numeric_score = None
+    if result.score is not None and result.score.is_correct is None:
+        numeric_score = result.score.score
     return BenchmarkItemOutcome(
         state=result.state,
         is_correct=result.is_correct,
+        score=numeric_score,
     )
 
 
-def _item_report(result: _BenchmarkItemResult) -> dict[str, object]:
+def _item_report(result: _BenchmarkItemResult, *, scoring: _BenchmarkScoringBundle) -> dict[str, object]:
     return {
         "item_index": result.item.item_index,
         "task_id": str(result.task.task_id),
@@ -651,8 +798,9 @@ def _item_report(result: _BenchmarkItemResult) -> dict[str, object]:
             else None
         ),
         "is_correct": result.score.is_correct if result.score is not None else None,
-        "score": 1.0 if result.score is not None and result.score.is_correct else 0.0,
-        "score_reason": result.score.reason if result.score is not None else None,
+        "score": result.score.score if result.score is not None else scoring.failed_item_report_score,
+        "score_reason": result.score.score_reason if result.score is not None else None,
+        "score_detail": result.score.score_detail if result.score is not None else None,
         "invocation": _submission_detail(result.submission),
         "error": (
             {

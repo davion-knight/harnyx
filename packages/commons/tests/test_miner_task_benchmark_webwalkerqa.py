@@ -87,11 +87,13 @@ def test_benchmark_registry_loads_webwalkerqa_current_and_explicit_snapshot() ->
     assert list_current_benchmark_suite_slugs() == (
         "deepresearch9k-l1",
         "deepsearchqa",
+        "draco",
         "webwalkerqa",
     )
     assert {item.manifest.suite_slug for item in list_current_benchmark_snapshots()} == {
         "deepresearch9k-l1",
         "deepsearchqa",
+        "draco",
         "webwalkerqa",
     }
 

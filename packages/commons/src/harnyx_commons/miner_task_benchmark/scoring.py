@@ -12,6 +12,9 @@ from harnyx_commons.llm.json_utils import pydantic_postprocessor
 from harnyx_commons.llm.provider import LlmProviderPort
 from harnyx_commons.llm.provider_types import LlmProviderName
 from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest
+from harnyx_commons.miner_task_benchmark.rubric_scoring import (
+    BENCHMARK_WEIGHTED_RUBRIC_SCORING_VERSION,
+)
 
 _CORRECTNESS_SYSTEM_PROMPT = (
     "You are a strict benchmark judge.\n\n"
@@ -30,7 +33,20 @@ _CORRECTNESS_SYSTEM_PROMPT = (
     "Return JSON only with exactly two keys: `is_correct` and `reason`."
 )
 BENCHMARK_SAMPLE_SIZE = 20
-SUPPORTED_BENCHMARK_SCORING_VERSION = "correctness-v1"
+BENCHMARK_CORRECTNESS_SCORING_VERSION = "correctness-v1"
+SUPPORTED_BENCHMARK_SCORING_VERSION = BENCHMARK_CORRECTNESS_SCORING_VERSION
+SUPPORTED_BENCHMARK_SCORING_VERSIONS = frozenset(
+    {
+        BENCHMARK_CORRECTNESS_SCORING_VERSION,
+        BENCHMARK_WEIGHTED_RUBRIC_SCORING_VERSION,
+    }
+)
+DEFINED_BENCHMARK_SCORING_VERSIONS = frozenset(
+    {
+        BENCHMARK_CORRECTNESS_SCORING_VERSION,
+        BENCHMARK_WEIGHTED_RUBRIC_SCORING_VERSION,
+    }
+)
 
 
 class BenchmarkSampleItem(Protocol):
@@ -38,12 +54,23 @@ class BenchmarkSampleItem(Protocol):
 
 
 class BenchmarkRunMetricsInput(Protocol):
-    queued_item_count: int
-    running_item_count: int
-    completed_item_count: int
-    failed_item_count: int
-    correct_item_count: int
-    mean_total_score: float | None
+    @property
+    def queued_item_count(self) -> int: ...
+
+    @property
+    def running_item_count(self) -> int: ...
+
+    @property
+    def completed_item_count(self) -> int: ...
+
+    @property
+    def failed_item_count(self) -> int: ...
+
+    @property
+    def correct_item_count(self) -> int | None: ...
+
+    @property
+    def mean_total_score(self) -> float | None: ...
 
 
 _SampleItemT = TypeVar("_SampleItemT", bound=BenchmarkSampleItem)
@@ -79,6 +106,7 @@ class BenchmarkItemState(StrEnum):
 class BenchmarkItemOutcome:
     state: BenchmarkItemState
     is_correct: bool | None
+    score: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +115,7 @@ class BenchmarkRunMetrics:
     running_item_count: int
     completed_item_count: int
     failed_item_count: int
-    correct_item_count: int
+    correct_item_count: int | None
     mean_total_score: float | None
 
     def derive_state(self) -> BenchmarkRunState:
@@ -191,15 +219,44 @@ def aggregate_benchmark_metrics(items: tuple[BenchmarkItemOutcome, ...]) -> Benc
             correct_item_count=0,
             mean_total_score=None,
         )
-    correct_item_count = sum(1 for item in completed if item.is_correct is True)
+    _validate_completed_scoring_mode(completed)
+    correct_item_count = _aggregate_correct_item_count(completed)
+    score_total = sum(_score_for_completed_item(item) for item in completed)
     return BenchmarkRunMetrics(
         queued_item_count=queued_item_count,
         running_item_count=running_item_count,
         completed_item_count=completed_item_count,
         failed_item_count=failed_item_count,
         correct_item_count=correct_item_count,
-        mean_total_score=correct_item_count / terminal_item_count,
+        mean_total_score=score_total / terminal_item_count,
     )
+
+
+def _validate_completed_scoring_mode(completed: tuple[BenchmarkItemOutcome, ...]) -> None:
+    has_numeric_score = any(item.score is not None for item in completed)
+    has_binary_score = any(item.is_correct is not None for item in completed)
+    if has_numeric_score and has_binary_score:
+        raise ValueError("mixed benchmark item scoring modes are not supported")
+
+
+def _aggregate_correct_item_count(completed: tuple[BenchmarkItemOutcome, ...]) -> int | None:
+    if any(item.score is not None for item in completed):
+        return None
+    return sum(1 for item in completed if item.is_correct is True)
+
+
+def _score_for_completed_item(item: BenchmarkItemOutcome) -> float:
+    if item.score is not None:
+        return _validate_score_unit_interval(item.score)
+    if item.is_correct is True:
+        return 1.0
+    return 0.0
+
+
+def _validate_score_unit_interval(score: float) -> float:
+    if score < 0.0 or score > 1.0:
+        raise ValueError("benchmark item score must be between 0.0 and 1.0")
+    return score
 
 
 def derive_benchmark_run_state(metrics: BenchmarkRunMetricsInput) -> BenchmarkRunState:
@@ -237,13 +294,18 @@ def benchmark_backing_batch_terminalizes_unfinished_items(*, backing_batch_is_te
 
 
 def is_supported_benchmark_scoring_version(scoring_version: str) -> bool:
-    return scoring_version == SUPPORTED_BENCHMARK_SCORING_VERSION
+    return scoring_version in SUPPORTED_BENCHMARK_SCORING_VERSIONS
+
+
+def is_defined_benchmark_scoring_version(scoring_version: str) -> bool:
+    return scoring_version in DEFINED_BENCHMARK_SCORING_VERSIONS
 
 
 def unsupported_benchmark_scoring_version_error(scoring_version: str) -> RuntimeError:
+    expected = ", ".join(repr(version) for version in sorted(SUPPORTED_BENCHMARK_SCORING_VERSIONS))
     return RuntimeError(
         f"unsupported benchmark scoring_version {scoring_version!r}; "
-        f"expected {SUPPORTED_BENCHMARK_SCORING_VERSION!r}"
+        f"expected one of {expected}"
     )
 
 
@@ -275,7 +337,9 @@ def sample_benchmark_items(
 
 
 __all__ = [
+    "BENCHMARK_CORRECTNESS_SCORING_VERSION",
     "BENCHMARK_SAMPLE_SIZE",
+    "DEFINED_BENCHMARK_SCORING_VERSIONS",
     "BenchmarkItemOutcome",
     "BenchmarkItemState",
     "BenchmarkCorrectnessScore",
@@ -285,9 +349,11 @@ __all__ = [
     "BenchmarkRunMetricsInput",
     "BenchmarkRunState",
     "SUPPORTED_BENCHMARK_SCORING_VERSION",
+    "SUPPORTED_BENCHMARK_SCORING_VERSIONS",
     "aggregate_benchmark_metrics",
     "benchmark_backing_batch_terminalizes_unfinished_items",
     "derive_benchmark_run_state",
+    "is_defined_benchmark_scoring_version",
     "is_supported_benchmark_scoring_version",
     "project_benchmark_run_state",
     "sample_benchmark_items",

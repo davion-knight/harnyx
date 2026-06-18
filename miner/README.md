@@ -60,11 +60,13 @@ Create a `.env` at the repo root (copy from `.env.example`) and fill:
 | `DESEARCH_API_KEY` | Optional: required if your agent uses search tools |
 | `SEARCH_PROVIDER` | Optional: required if your agent uses search tools |
 | `PLATFORM_BASE_URL` | Public monitoring and script uploads |
-| `BENCHMARK_LLM_PROVIDER` | Optional benchmark judge provider; defaults to `chutes` |
-| `BENCHMARK_LLM_MODEL` | Required when running a local benchmark |
+| `BENCHMARK_LLM_PROVIDER` | Optional `correctness-v1` benchmark judge provider; defaults to `chutes` |
+| `BENCHMARK_LLM_MODEL` | Required when running a `correctness-v1` local benchmark |
+| `BENCHMARK_RUBRIC_JUDGE_LLM_PROVIDER` | Required with `BENCHMARK_RUBRIC_JUDGE_LLM_MODEL` for `weighted-rubric-v1` local benchmark scoring |
+| `BENCHMARK_RUBRIC_JUDGE_LLM_MODEL` | Required with `BENCHMARK_RUBRIC_JUDGE_LLM_PROVIDER` for `weighted-rubric-v1` local benchmark scoring |
 
 The checked-in default is `SEARCH_PROVIDER=desearch`. If you need a fallback search provider, miner tooling also supports `parallel`; set `SEARCH_PROVIDER=parallel` and `PARALLEL_API_KEY`.
-If you set `BENCHMARK_LLM_PROVIDER=vertex`, also configure Vertex credentials such as `GCP_PROJECT_ID` and `GCP_LOCATION`.
+If you set either benchmark judge provider to `vertex`, also configure Vertex credentials such as `GCP_PROJECT_ID` and `GCP_LOCATION`. For DRACO with Gemini 3.1 Pro Preview, use `BENCHMARK_RUBRIC_JUDGE_LLM_PROVIDER=vertex`, `BENCHMARK_RUBRIC_JUDGE_LLM_MODEL=gemini-3.1-pro-preview`, and `GCP_LOCATION=global`. `BENCHMARK_LLM_*` settings do not enable `weighted-rubric-v1` by fallback; rubric scoring uses only the dedicated `BENCHMARK_RUBRIC_JUDGE_LLM_*` settings.
 
 #### Provider credentials on the platform
 
@@ -334,8 +336,8 @@ uv run --package harnyx-miner harnyx-miner-local-benchmark \
   --source-batch-id <completed-batch-id>
 ```
 
-This writes a structured JSON report with the open benchmark question, reference answer, generated answer, binary correctness result, cost, runtime, and errors for each item.
-The local benchmark uses the public `harnyx_commons.miner_task_benchmark` boundary for packaged benchmark data, deterministic benchmark IDs, scoring, sampling, metric aggregation, and scoring-version checks. Miners must pass `--suite` so the report names the exact benchmark suite and version under test; there is no default suite. It does not depend on private platform internals.
+This writes a structured JSON report with the open benchmark question, reference answer or rubric payload, generated answer, score, optional `score_detail`, cost, runtime, and errors for each item.
+The local benchmark uses the public `harnyx_commons.miner_task_benchmark` boundary for packaged benchmark data, deterministic benchmark IDs, scoring, sampling, metric aggregation, and scoring-version checks. Miners must pass `--suite` so the report names the exact benchmark suite and version under test; there is no default suite. Current-suite listing shows active public benchmark suites, including DRACO. DRACO local runs require dedicated `BENCHMARK_RUBRIC_JUDGE_LLM_*` settings and use the current weighted-rubric snapshot when dataset/scoring flags are omitted. The command does not depend on private platform internals.
 
 For upstream-style autonomous experimentation, see [`AUTO-RESEARCH.md`](AUTO-RESEARCH.md). That guide gives the operator prompt, environment checklist, setup commands, and safety boundaries. The agent-facing research policy lives in [`program.md`](program.md).
 
