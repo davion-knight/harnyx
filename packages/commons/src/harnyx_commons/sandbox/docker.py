@@ -41,9 +41,15 @@ _MOUNTINFO_CONTAINER_ID_PATTERN = re.compile(
 _NON_SENSITIVE_DIAGNOSTIC_ENV_KEYS = frozenset({"SANDBOX_HOST", "SANDBOX_PORT"})
 _STALE_LEGACY_CONTAINER_STATUSES = ("created", "exited", "dead")
 _SANDBOX_ENTRYPOINT_CONNECT_ATTEMPTS = 2
+_CONTAINER_IP_READY_TIMEOUT_SECONDS = 5.0
+_CONTAINER_IP_READY_POLL_INTERVAL_SECONDS = 0.1
 _RETRYABLE_SANDBOX_ENTRYPOINT_CONNECTION_NOT_ESTABLISHED_ERRORS = (
     httpx.ConnectError,
 )
+
+
+class _ContainerIpNotReadyError(RuntimeError):
+    """Docker has not published a usable container IP for the configured network yet."""
 
 
 class HttpSandboxClient(SandboxClient):
@@ -708,6 +714,36 @@ class DockerSandboxManager(SandboxManager):
         if not network:
             raise ValueError("sandbox network must be provided when host_port is not published")
 
+        deadline = time.monotonic() + _CONTAINER_IP_READY_TIMEOUT_SECONDS
+        last_error: _ContainerIpNotReadyError | None = None
+        while True:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                if last_error is None:
+                    raise RuntimeError(f"docker inspect returned invalid IP address for network: {network}")
+                raise RuntimeError(str(last_error)) from last_error
+            try:
+                return self._resolve_container_ip_once(
+                    options,
+                    network=network,
+                    command_timeout_seconds=min(remaining_seconds, self._command_timeout_seconds),
+                )
+            except _ContainerIpNotReadyError as exc:
+                last_error = exc
+                sleep_seconds = min(
+                    _CONTAINER_IP_READY_POLL_INTERVAL_SECONDS,
+                    max(deadline - time.monotonic(), 0.0),
+                )
+                if sleep_seconds > 0:
+                    time.sleep(sleep_seconds)
+
+    def _resolve_container_ip_once(
+        self,
+        options: SandboxOptions,
+        *,
+        network: str,
+        command_timeout_seconds: float,
+    ) -> str:
         args = [
             self._docker,
             "inspect",
@@ -716,24 +752,32 @@ class DockerSandboxManager(SandboxManager):
             options.container_name,
         ]
         try:
-            result = self._run_command(args, capture_output=True, text=True, check=True)
-        except subprocess.TimeoutExpired as exc:  # pragma: no cover - integration only
-            raise RuntimeError(f"docker inspect timed out after {self._command_timeout_seconds:g}s") from exc
+            result = self._run_command(
+                args,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=command_timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise _ContainerIpNotReadyError(
+                f"docker inspect timed out while waiting for network: {network}"
+            ) from exc
         output = (result.stdout or "").strip()
         if not output:
-            raise RuntimeError("docker inspect returned empty network settings")
+            raise _ContainerIpNotReadyError("docker inspect returned empty network settings")
 
         networks = json.loads(output)
         if not isinstance(networks, dict):
-            raise TypeError("docker inspect network settings must be a JSON object")
+            raise _ContainerIpNotReadyError("docker inspect network settings must be a JSON object")
 
         network_details = networks.get(network)
         if not isinstance(network_details, dict):
-            raise RuntimeError(f"docker inspect did not include network: {network}")
+            raise _ContainerIpNotReadyError(f"docker inspect did not include network: {network}")
 
         ip_address = network_details.get("IPAddress")
         if not isinstance(ip_address, str) or not ip_address:
-            raise RuntimeError(f"docker inspect returned invalid IP address for network: {network}")
+            raise _ContainerIpNotReadyError(f"docker inspect returned invalid IP address for network: {network}")
 
         return ip_address
 

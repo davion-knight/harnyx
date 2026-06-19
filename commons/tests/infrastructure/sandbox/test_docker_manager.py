@@ -395,6 +395,133 @@ def test_docker_manager_skips_port_mapping_when_host_port_missing() -> None:
     manager.stop(deployment)
 
 
+class SequencedInspectRunner:
+    def __init__(self, inspect_stdout: list[str]) -> None:
+        self._inspect_stdout = list(inspect_stdout)
+        self.commands: list[tuple[list[str], dict[str, object]]] = []
+
+    def __call__(self, args: list[str], **kwargs: object):
+        self.commands.append((list(args), dict(kwargs)))
+        if args[:2] == ["docker", "run"] and "-d" in args:
+            return subprocess_completed(args, "container123\n")
+        if args[:2] == ["docker", "inspect"]:
+            if not self._inspect_stdout:
+                raise AssertionError("unexpected docker inspect call")
+            return subprocess_completed(args, self._inspect_stdout.pop(0))
+        if args[:2] == ["docker", "stop"]:
+            return subprocess_completed(args, "")
+        raise AssertionError(f"unexpected command: {args}")
+
+    @property
+    def inspect_commands(self) -> list[tuple[list[str], dict[str, object]]]:
+        return [(args, kwargs) for args, kwargs in self.commands if args[:2] == ["docker", "inspect"]]
+
+
+def _internal_network_options() -> SandboxOptions:
+    return SandboxOptions(
+        image="harnyx/sandbox:demo",
+        container_name="sandbox-demo",
+        host_port=None,
+        container_port=8000,
+        network="harnyx-net",
+        host_container_url=_HOST_CONTAINER_URL,
+    )
+
+
+def test_docker_manager_waits_for_container_ip_before_internal_network_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(docker_module.time, "sleep", lambda _seconds: None)
+    runner = SequencedInspectRunner(
+        [
+            '{"harnyx-net":{"IPAddress":""}}\n',
+            '{"harnyx-net":{"IPAddress":"172.19.0.2"}}\n',
+        ]
+    )
+
+    def client_factory(base_url: str, host_container_url: str | None) -> DummyClient:
+        return DummyClient(base_url, host_container_url)
+
+    manager = DockerSandboxManager(command_runner=runner, client_factory=client_factory)
+
+    deployment = manager.start(_internal_network_options())
+
+    assert deployment.base_url == "http://172.19.0.2:8000"
+    assert len(runner.inspect_commands) == 2
+
+
+def test_docker_manager_waits_when_configured_network_is_not_attached_yet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(docker_module.time, "sleep", lambda _seconds: None)
+    runner = SequencedInspectRunner(
+        [
+            "{}\n",
+            '{"other-net":{"IPAddress":"172.18.0.2"}}\n',
+            '{"harnyx-net":{"IPAddress":"172.19.0.2"}}\n',
+        ]
+    )
+
+    manager = DockerSandboxManager(
+        command_runner=runner,
+        client_factory=lambda base_url, host_container_url: DummyClient(base_url, host_container_url),
+    )
+
+    deployment = manager.start(_internal_network_options())
+
+    assert deployment.base_url == "http://172.19.0.2:8000"
+    assert len(runner.inspect_commands) == 3
+
+
+def test_docker_manager_bounds_each_container_ip_inspect_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(docker_module.time, "sleep", lambda _seconds: None)
+    inspect_timeouts: list[float] = []
+    calls: list[list[str]] = []
+
+    def command_runner(args: list[str], **kwargs: object):
+        calls.append(list(args))
+        if args[:2] == ["docker", "run"] and "-d" in args:
+            return subprocess_completed(args, "container123\n")
+        if args[:2] == ["docker", "inspect"]:
+            inspect_timeouts.append(float(kwargs["timeout"]))
+            if len(inspect_timeouts) == 1:
+                raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs["timeout"])
+            return subprocess_completed(args, '{"harnyx-net":{"IPAddress":"172.19.0.2"}}\n')
+        raise AssertionError(f"unexpected command: {args}")
+
+    manager = DockerSandboxManager(
+        command_runner=command_runner,
+        client_factory=lambda base_url, host_container_url: DummyClient(base_url, host_container_url),
+        command_timeout_seconds=120.0,
+    )
+
+    deployment = manager.start(_internal_network_options())
+
+    assert deployment.base_url == "http://172.19.0.2:8000"
+    assert len(inspect_timeouts) == 2
+    assert inspect_timeouts[0] <= docker_module._CONTAINER_IP_READY_TIMEOUT_SECONDS
+    assert calls[0][:2] == ["docker", "run"]
+
+
+def test_docker_manager_cleans_up_when_container_ip_never_becomes_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(docker_module, "_CONTAINER_IP_READY_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(docker_module, "_CONTAINER_IP_READY_POLL_INTERVAL_SECONDS", 0.001)
+    runner = SequencedInspectRunner(['{"harnyx-net":{"IPAddress":""}}\n'] * 100)
+    manager = DockerSandboxManager(
+        command_runner=runner,
+        client_factory=lambda base_url, host_container_url: DummyClient(base_url, host_container_url),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid IP address for network: harnyx-net"):
+        manager.start(_internal_network_options())
+
+    assert any(args == ["docker", "stop", "-t", "5", "container123"] for args, _ in runner.commands)
+
+
 def test_docker_manager_mounts_volumes() -> None:
     runner = RecordingRunner()
 

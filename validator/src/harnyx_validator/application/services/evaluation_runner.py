@@ -721,6 +721,11 @@ class EvaluationRunner:
             )
             if timeout_decision is not None:
                 return timeout_decision
+            if is_timeout_sandbox_invocation(
+                status_code=exc.status_code,
+                detail_exception=exc.detail_exception,
+            ):
+                return _review_timeout_decision(exc)
             control_failure_decision = self._platform_tool_proxy_control_failure_decision(
                 artifact=artifact,
                 task=task,
@@ -728,11 +733,6 @@ class EvaluationRunner:
             )
             if control_failure_decision is not None:
                 return control_failure_decision
-            if is_timeout_sandbox_invocation(
-                status_code=exc.status_code,
-                detail_exception=exc.detail_exception,
-            ):
-                return _review_timeout_decision(exc)
             provider_failures = self._consume_provider_failures(issued.session.session_id)
             return self._non_timeout_failure_decision(
                 batch_id=batch_id,

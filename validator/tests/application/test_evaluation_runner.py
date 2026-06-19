@@ -34,6 +34,7 @@ from harnyx_commons.errors import SessionBudgetExhaustedError
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_validator.application.dto.evaluation import (
+    MinerTaskAttemptTerminalEffect,
     MinerTaskRunRequest,
     MinerTaskRunSubmission,
     ScriptArtifactSpec,
@@ -1195,6 +1196,49 @@ class _AlwaysPlatformToolProxyTimeoutOrchestrator:
             receipt_id=f"platform-tool-proxy-timeout-{self.calls}",
         )
         raise _provider_tool_failure_error()
+
+
+class _SandboxTimeoutAfterPlatformToolProxyControlReceiptOrchestrator:
+    def __init__(
+        self,
+        *,
+        sessions: FakeSessionRegistry,
+        receipt_log: FakeReceiptLog,
+    ) -> None:
+        self._sessions = sessions
+        self._receipt_log = receipt_log
+
+    async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+        session = self._sessions.get(request.session_id)
+        assert session is not None
+        _record_receipt(
+            self._receipt_log,
+            session_id=request.session_id,
+            uid=request.uid,
+            receipt_id="platform-tool-proxy-grant-failed",
+            issued_at=datetime(2025, 10, 17, 12, 1, tzinfo=UTC),
+            cost_usd=0.0,
+            outcome=ToolCallOutcome.INTERNAL_ERROR,
+            active_attempt=session.active_attempt,
+            extra={
+                "platform_tool_proxy_error_code": "platform_tool_proxy_grant_failed",
+                "platform_tool_proxy_status_code": "0",
+                "error_type": "PlatformToolProxyInvocationError",
+                "error_message": "platform tool proxy grant failed",
+            },
+        )
+        _record_platform_tool_proxy_timeout_receipt(
+            self._receipt_log,
+            request=request,
+            active_attempt=session.active_attempt,
+            receipt_id="platform-tool-proxy-timeout",
+        )
+        raise _sandbox_invocation_error(
+            "sandbox entrypoint request timed out",
+            status_code=504,
+            detail_exception="TimeoutException",
+            detail_error="sandbox entrypoint request timed out",
+        )
 
 
 class _PlatformToolProxyTimeoutThenDifferentMinerExceptionOrchestrator:
@@ -2837,6 +2881,71 @@ async def test_evaluation_runner_records_platform_tool_proxy_timeout_as_miner_ow
     ]
     assert attempt_logs == [("platform-tool-proxy-timeout-1",), ("platform-tool-proxy-timeout-2",)]
     assert len(submission.execution_log) == 1
+    assert evaluation_store.records == [submission]
+
+
+async def test_evaluation_runner_timeout_owned_path_ignores_earlier_proxy_control_receipt(
+    tmp_path: Path,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
+    evaluation_store = _RecordingEvaluationStore()
+    receipt_log = FakeReceiptLog()
+    progress = _progress(tmp_path)
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=session_manager,
+        evaluation_records=evaluation_store,
+        receipt_log=receipt_log,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=progress,
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="sandbox timeout after proxy grant failure"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+    )
+    orchestrator = _SandboxTimeoutAfterPlatformToolProxyControlReceiptOrchestrator(
+        sessions=session_registry,
+        receipt_log=receipt_log,
+    )
+
+    batch_id = uuid4()
+    result = await runner.evaluate_artifact_with_state(
+        batch_id=batch_id,
+        artifact=artifact,
+        tasks=(task,),
+        orchestrator=cast(TaskRunOrchestrator, orchestrator),
+    )
+
+    assert len(result.submissions) == 1
+    submission = result.submissions[0]
+    assert submission.run.details.error == EvaluationError(
+        code="timeout_miner_owned",
+        message=TERMINAL_TIMEOUT_ERROR_MESSAGE,
+    )
+    page = progress.completed_run_page(batch_id, after_sequence=0, limit=10)
+    terminated_attempts = [
+        item["attempt"]
+        for item in page["items"]
+        if item["kind"] == "terminated_attempt" and item["attempt"] is not None
+    ]
+    assert len(terminated_attempts) == 1
+    attempt = terminated_attempts[0]
+    assert attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    assert {receipt.receipt_id for receipt in attempt.execution_log} == {
+        "platform-tool-proxy-grant-failed",
+        "platform-tool-proxy-timeout",
+    }
     assert evaluation_store.records == [submission]
 
 
