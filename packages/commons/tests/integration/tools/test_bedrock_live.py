@@ -9,6 +9,8 @@ from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequ
 
 pytestmark = [pytest.mark.integration, pytest.mark.expensive, pytest.mark.anyio("asyncio")]
 
+_LIVE_READ_TIMEOUT_SECONDS = 600.0
+
 
 def _provider() -> LlmProviderAdapter:
     settings = BedrockSettings()
@@ -17,7 +19,7 @@ def _provider() -> LlmProviderAdapter:
         delegate=BedrockLlmProvider(
             region=settings.region_value,
             connect_timeout_seconds=settings.connect_timeout_seconds,
-            read_timeout_seconds=settings.read_timeout_seconds,
+            read_timeout_seconds=_LIVE_READ_TIMEOUT_SECONDS,
         ),
     )
 
