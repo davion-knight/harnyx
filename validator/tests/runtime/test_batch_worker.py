@@ -667,7 +667,7 @@ def test_batch_failure_capture_payload_groups_conclusive_artifact_failures_as_ar
     ]
 
 
-def test_create_evaluation_worker_from_context_passes_settings_parallelism(monkeypatch) -> None:
+def test_create_evaluation_worker_from_context_uses_fixed_batch_parallelism(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class CapturingBatchService:
@@ -680,8 +680,6 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
 
     context = SimpleNamespace(
         settings=SimpleNamespace(
-            artifact_parallelism=4,
-            artifact_task_parallelism=5,
             run_progress_retention_seconds=123,
             run_progress_cleanup_interval_seconds=45,
         ),
@@ -707,7 +705,7 @@ def test_create_evaluation_worker_from_context_passes_settings_parallelism(monke
     config = captured["config"]
     assert isinstance(config, EvaluationBatchConfig)
     assert config.artifact_parallelism == 4
-    assert config.artifact_task_parallelism == 5
+    assert config.artifact_task_parallelism == 20
     assert worker._run_progress_retention == timedelta(seconds=123)
     assert worker._run_progress_cleanup_interval_seconds == 45
     assert worker._progress_tracker is context.progress_tracker

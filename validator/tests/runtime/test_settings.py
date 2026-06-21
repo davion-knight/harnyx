@@ -40,43 +40,14 @@ def test_settings_accepts_validator_env_names(monkeypatch) -> None:
     assert settings.rpc_port == 9001
 
 
-def test_settings_defaults_artifact_task_parallelism_to_external_default(monkeypatch) -> None:
-    monkeypatch.delenv("VALIDATOR_TASK_PARALLELISM", raising=False)
+def test_settings_ignore_removed_parallelism_env_names(monkeypatch) -> None:
+    monkeypatch.setenv("VALIDATOR_ARTIFACT_PARALLELISM", "1")
+    monkeypatch.setenv("VALIDATOR_TASK_PARALLELISM", "10")
 
     settings = Settings.load()
 
-    assert settings.artifact_task_parallelism == 20
-
-
-def test_settings_defaults_artifact_parallelism_to_external_default(monkeypatch) -> None:
-    monkeypatch.delenv("VALIDATOR_ARTIFACT_PARALLELISM", raising=False)
-
-    settings = Settings.load()
-
-    assert settings.artifact_parallelism == 4
-
-
-def test_settings_accepts_artifact_parallelism_override(monkeypatch) -> None:
-    monkeypatch.setenv("VALIDATOR_ARTIFACT_PARALLELISM", "2")
-
-    settings = Settings.load()
-
-    assert settings.artifact_parallelism == 2
-
-
-def test_settings_rejects_non_positive_artifact_parallelism(monkeypatch) -> None:
-    monkeypatch.setenv("VALIDATOR_ARTIFACT_PARALLELISM", "0")
-
-    with pytest.raises(ValidationError):
-        Settings.load()
-
-
-def test_settings_accepts_artifact_task_parallelism_override(monkeypatch) -> None:
-    monkeypatch.setenv("VALIDATOR_TASK_PARALLELISM", "5")
-
-    settings = Settings.load()
-
-    assert settings.artifact_task_parallelism == 5
+    assert not hasattr(settings, "artifact_parallelism")
+    assert not hasattr(settings, "artifact_task_parallelism")
 
 
 def test_settings_defaults_validator_state_dir(monkeypatch) -> None:
@@ -124,13 +95,6 @@ def test_settings_rejects_non_positive_run_progress_retention(monkeypatch) -> No
 
 def test_settings_rejects_non_positive_run_progress_cleanup_interval(monkeypatch) -> None:
     monkeypatch.setenv("VALIDATOR_RUN_PROGRESS_CLEANUP_INTERVAL_SECONDS", "0")
-
-    with pytest.raises(ValidationError):
-        Settings.load()
-
-
-def test_settings_rejects_non_positive_artifact_task_parallelism(monkeypatch) -> None:
-    monkeypatch.setenv("VALIDATOR_TASK_PARALLELISM", "0")
 
     with pytest.raises(ValidationError):
         Settings.load()

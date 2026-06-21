@@ -40,7 +40,7 @@ Edit `.env` and set at least:
 | `SCORING_LLM_RETRY_MAX_MS` | Optional pairwise scoring LLM request retry maximum backoff; defaults to `300000` |
 | `SCORING_LLM_RETRY_JITTER` | Optional pairwise scoring LLM request retry jitter ratio; defaults to `0.2` |
 
-The defaults in `.env.example` already target mainnet (`finney`) and netuid `67`. Validator sandbox execution defaults to `harnyx/harnyx-subnet-sandbox:finney`; set `SANDBOX_IMAGE=harnyx/harnyx-subnet-sandbox:testnet` for staging/testnet, or use another explicit value only when you intentionally want to test or pin a different sandbox image. `VALIDATOR_ARTIFACT_PARALLELISM` controls concurrent artifact sandboxes and defaults to `4`; `VALIDATOR_TASK_PARALLELISM` controls batch-wide task sessions across those artifacts and defaults to `20`.
+The defaults in `.env.example` already target mainnet (`finney`) and netuid `67`. Validator sandbox execution defaults to `harnyx/harnyx-subnet-sandbox:finney`; set `SANDBOX_IMAGE=harnyx/harnyx-subnet-sandbox:testnet` for staging/testnet, or use another explicit value only when you intentionally want to test or pin a different sandbox image. Validator batch execution uses fixed runtime concurrency: 4 concurrent artifact sandboxes and 20 batch-wide task sessions across those artifacts.
 
 Provider-backed miner script tools execute through platform tool proxy with miner-stored credentials. Validators do not need `SEARCH_PROVIDER`, `DESEARCH_API_KEY`, `PARALLEL_API_KEY`, or `TOOL_LLM_PROVIDER` for normal miner task provider-backed tool execution.
 

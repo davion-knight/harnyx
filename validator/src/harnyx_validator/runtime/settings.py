@@ -74,17 +74,7 @@ class Settings(BaseSettings):
         alias="VALIDATOR_PORT",
     )
 
-    # --- Evaluation ---
-    artifact_parallelism: int = Field(
-        default=4,
-        alias="VALIDATOR_ARTIFACT_PARALLELISM",
-        ge=1,
-    )
-    artifact_task_parallelism: int = Field(
-        default=20,
-        alias="VALIDATOR_TASK_PARALLELISM",
-        ge=1,
-    )
+    # --- Evaluation state ---
     validator_state_dir: Path = Field(
         default=Path("/workspace/.harnyx_state"),
         alias="VALIDATOR_STATE_DIR",
