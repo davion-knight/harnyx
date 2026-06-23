@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -11,8 +12,9 @@ from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from types import TracebackType
-from typing import TypeVar
+from typing import TypeVar, cast
 from uuid import UUID
 
 from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
@@ -36,10 +38,15 @@ from harnyx_validator.application.ports.evaluation_record import EvaluationRecor
 from harnyx_validator.application.ports.progress import ProgressRecorder
 from harnyx_validator.application.ports.subtensor import SubtensorClientPort
 from harnyx_validator.application.services.evaluation_runner import (
+    DIAGNOSTIC_ID_MAX_LENGTH,
+    DIAGNOSTIC_LOG_TAIL_MAX_LENGTH,
+    DIAGNOSTIC_STATE_ERROR_MAX_LENGTH,
+    DIAGNOSTIC_TEXT_MAX_LENGTH,
     LOCAL_RETRY_ATTEMPTS,
     ArtifactEvaluationOutcome,
     ArtifactExecutionFailedError,
     EvaluationRunner,
+    SandboxFailureDiagnostics,
     UnexpectedArtifactExecutionError,
     ValidatorBatchFailedError,
     ValidatorBatchFailureDetail,
@@ -55,6 +62,15 @@ _T = TypeVar("_T")
 logger = logging.getLogger("harnyx_validator.scheduler")
 measurement_logger = logging.getLogger("harnyx_validator.measurement")
 _BATCH_FAILURE_PROGRESS_PAGE_SIZE = 500
+_NON_SENSITIVE_DIAGNOSTIC_ENV_KEYS = frozenset(
+    {
+        "AGENT_PATH",
+        "EVALUATION_RUN_ID",
+        "MINER_UID",
+        "SANDBOX_HOST",
+        "SANDBOX_PORT",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -777,6 +793,7 @@ class EvaluationScheduler:
         blocking_executor: Executor,
     ) -> SandboxDeployment:
         last_error_message = ""
+        last_options: object | None = None
         for attempt_number in range(1, LOCAL_RETRY_ATTEMPTS + 1):
             options = await self._build_sandbox_options_or_raise_artifact_failure(
                 batch_id=batch_id,
@@ -784,6 +801,7 @@ class EvaluationScheduler:
                 tasks=tasks,
                 blocking_executor=blocking_executor,
             )
+            last_options = options
             try:
                 return await _run_blocking_call(blocking_executor, self._sandboxes.start, options)
             except Exception as exc:
@@ -810,6 +828,7 @@ class EvaluationScheduler:
             error_code=MinerTaskErrorCode.SANDBOX_START_FAILED,
             error_message=last_error_message or "artifact setup failed",
             exception_type=None,
+            sandbox_diagnostics=_sandbox_failure_diagnostics_from_options(last_options),
         )
 
     async def _build_sandbox_options_or_raise_artifact_failure(
@@ -897,6 +916,7 @@ class EvaluationScheduler:
         error_code: MinerTaskErrorCode,
         error_message: str,
         exception_type: str | None,
+        sandbox_diagnostics: SandboxFailureDiagnostics | None = None,
     ) -> ArtifactExecutionFailedError:
         return ArtifactExecutionFailedError(
             error_code=error_code,
@@ -908,6 +928,7 @@ class EvaluationScheduler:
                 artifact_id=artifact.artifact_id,
                 uid=artifact.uid,
                 exception_type=exception_type,
+                sandbox_diagnostics=sandbox_diagnostics,
             ),
             completed_submissions=(),
             remaining_tasks=tuple(tasks),
@@ -1015,6 +1036,167 @@ class EvaluationScheduler:
             if pair not in recorded_pairs:
                 completed_by_pair.setdefault(pair, submission)
         return tuple(completed_by_pair.values())
+
+
+def _sandbox_failure_diagnostics_from_options(options: object | None) -> SandboxFailureDiagnostics | None:
+    if not isinstance(options, SandboxOptions) or options.failure_diagnostics_dir is None:
+        return None
+    diagnostics_dir = Path(options.failure_diagnostics_dir)
+    try:
+        sandbox_options = _read_json_object(diagnostics_dir / "sandbox-options.json")
+        docker_inspect = _docker_inspect_container(_read_json(diagnostics_dir / "docker-inspect.json"))
+        docker_state = _object_field(docker_inspect, "State")
+        docker_pull_result = _read_json_object(diagnostics_dir / "docker-pull-result.json")
+        docker_run_result = _read_json_object(diagnostics_dir / "docker-run-result.json")
+        return SandboxFailureDiagnostics(
+            image=_bounded_identifier(options.image or _string_field(sandbox_options, "image")),
+            pull_policy=_bounded_identifier(options.pull_policy or _string_field(sandbox_options, "pull_policy")),
+            container_name=_bounded_identifier(
+                options.container_name or _string_field(sandbox_options, "container_name")
+            ),
+            container_id=_bounded_identifier(_string_field(docker_inspect, "Id")),
+            status=_bounded_identifier(_string_field(docker_state, "Status")),
+            exit_code=_int_field(docker_state, "ExitCode"),
+            oom_killed=_bool_field(docker_state, "OOMKilled"),
+            state_error=_bounded_text(
+                _redact_sensitive_text(_string_field(docker_state, "Error"), options),
+                max_length=DIAGNOSTIC_STATE_ERROR_MAX_LENGTH,
+            ),
+            error_text=_bounded_text(
+                _redact_sensitive_text(_read_text(diagnostics_dir / "error.txt"), options),
+                max_length=DIAGNOSTIC_TEXT_MAX_LENGTH,
+            ),
+            docker_logs_tail=_bounded_log_tail(
+                _redact_sensitive_text(_read_text(diagnostics_dir / "docker-logs.txt"), options)
+            ),
+            pull_returncode=_int_field(docker_pull_result, "returncode"),
+            pull_stdout_tail=_bounded_text(
+                _redact_sensitive_text(_string_field(docker_pull_result, "stdout"), options),
+                max_length=DIAGNOSTIC_TEXT_MAX_LENGTH,
+            ),
+            pull_stderr_tail=_bounded_text(
+                _redact_sensitive_text(_string_field(docker_pull_result, "stderr"), options),
+                max_length=DIAGNOSTIC_TEXT_MAX_LENGTH,
+            ),
+            run_returncode=_int_field(docker_run_result, "returncode"),
+            run_stdout_tail=_bounded_text(
+                _redact_sensitive_text(_string_field(docker_run_result, "stdout"), options),
+                max_length=DIAGNOSTIC_TEXT_MAX_LENGTH,
+            ),
+            run_stderr_tail=_bounded_text(
+                _redact_sensitive_text(_string_field(docker_run_result, "stderr"), options),
+                max_length=DIAGNOSTIC_TEXT_MAX_LENGTH,
+            ),
+        )
+    except Exception as exc:  # pragma: no cover - diagnostic path must not mask the failure
+        logger.warning(
+            "sandbox failure diagnostics could not be summarized",
+            extra={"diagnostics_dir": str(diagnostics_dir)},
+            exc_info=exc,
+        )
+        return None
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _read_json(path: Path) -> object | None:
+    text = _read_text(path)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _read_json_object(path: Path) -> dict[str, object] | None:
+    value = _read_json(path)
+    if not isinstance(value, dict):
+        return None
+    return cast("dict[str, object]", value)
+
+
+def _docker_inspect_container(value: object | None) -> dict[str, object] | None:
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        return cast("dict[str, object]", value[0])
+    if isinstance(value, dict):
+        return cast("dict[str, object]", value)
+    return None
+
+
+def _object_field(mapping: dict[str, object] | None, field: str) -> dict[str, object] | None:
+    if mapping is None:
+        return None
+    value = mapping.get(field)
+    if isinstance(value, dict):
+        return cast("dict[str, object]", value)
+    return None
+
+
+def _string_field(mapping: dict[str, object] | None, field: str) -> str | None:
+    if mapping is None:
+        return None
+    value = mapping.get(field)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _int_field(mapping: dict[str, object] | None, field: str) -> int | None:
+    if mapping is None:
+        return None
+    value = mapping.get(field)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _bool_field(mapping: dict[str, object] | None, field: str) -> bool | None:
+    if mapping is None:
+        return None
+    value = mapping.get(field)
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _bounded_identifier(value: str | None) -> str | None:
+    return _bounded_text(value, max_length=DIAGNOSTIC_ID_MAX_LENGTH)
+
+
+def _redact_sensitive_text(value: str | None, options: SandboxOptions) -> str | None:
+    if value is None:
+        return None
+    redacted = value
+    for key, env_value in options.env.items():
+        if key in _NON_SENSITIVE_DIAGNOSTIC_ENV_KEYS or not env_value:
+            continue
+        redacted = redacted.replace(env_value, "<redacted>")
+    return redacted
+
+
+def _bounded_text(value: str | None, *, max_length: int) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= max_length:
+        return value
+    return value[-max_length:]
+
+
+def _bounded_log_tail(value: str | None) -> str | None:
+    if value is None:
+        return None
+    lines = value.splitlines()
+    if len(lines) > 200:
+        value = "\n".join(lines[-200:])
+    return _bounded_text(value, max_length=DIAGNOSTIC_LOG_TAIL_MAX_LENGTH)
 
 
 async def _run_blocking_call(

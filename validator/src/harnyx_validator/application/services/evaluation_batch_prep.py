@@ -162,6 +162,13 @@ class BatchExecutionPlanner:
                 f"{artifact.artifact_id.hex[:8]}-{run_ctx.batch_id.hex[:8]}"
             )
             container_name = f"{container_name_prefix}-{uuid4().hex[:12]}"
+            failure_diagnostics_dir = (
+                run_ctx.state_dir
+                / "sandbox-diagnostics"
+                / str(run_ctx.batch_id)
+                / str(artifact.artifact_id)
+                / container_name
+            )
             labels = dict(run_ctx.base_options.labels)
             labels.update(
                 SANDBOX_LABELS
@@ -190,6 +197,7 @@ class BatchExecutionPlanner:
                 labels=labels,
                 env=env,
                 volumes=volumes,
+                failure_diagnostics_dir=str(failure_diagnostics_dir),
             )
 
         return sandbox_options_factory

@@ -190,6 +190,12 @@ def test_batch_execution_planner_uses_unique_labeled_sandbox_names(
     assert first.container_name.startswith(prefix)
     assert second.container_name.startswith(prefix)
     assert first.container_name != second.container_name
+    assert first.failure_diagnostics_dir == str(
+        tmp_path / "sandbox-diagnostics" / str(batch.batch_id) / str(artifact.artifact_id) / first.container_name
+    )
+    assert second.failure_diagnostics_dir == str(
+        tmp_path / "sandbox-diagnostics" / str(batch.batch_id) / str(artifact.artifact_id) / second.container_name
+    )
     assert first.labels == {
         "existing": "kept",
         "harnyx.sandbox.managed": "true",

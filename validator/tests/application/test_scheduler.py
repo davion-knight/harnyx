@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
 from typing import Any
 from uuid import UUID, uuid4
@@ -30,6 +31,7 @@ from harnyx_commons.domain.tool_usage import ToolUsageSummary
 from harnyx_commons.infrastructure.state.session_registry import InMemorySessionRegistry
 from harnyx_commons.infrastructure.state.token_registry import InMemoryTokenRegistry
 from harnyx_commons.sandbox.manager import SandboxDeployment, SandboxManager
+from harnyx_commons.sandbox.options import SandboxOptions
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptAuditRecord,
     MinerTaskRunSubmission,
@@ -2355,6 +2357,7 @@ async def test_scheduler_does_not_synthesize_zero_score_rows_for_conclusive_setu
 
 async def test_scheduler_fails_batch_immediately_on_conclusive_sandbox_start_failure(
     blocking_executor: ThreadPoolExecutor,
+    tmp_path: Path,
 ) -> None:
     task = _task("startup failure")
     subtensor = FakeSubtensorClient()
@@ -2369,6 +2372,52 @@ async def test_scheduler_fails_batch_immediately_on_conclusive_sandbox_start_fai
     evaluation_records = DummyEvaluationRecordStore()
     session_manager = SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry())
     receipt_log = DummyReceiptLog()
+    diagnostics_dir = tmp_path / "sandbox-diagnostics"
+    diagnostics_dir.mkdir()
+    (diagnostics_dir / "sandbox-options.json").write_text(
+        """
+        {
+          "image": "harnyx/sandbox:test",
+          "container_name": "sandbox-uid-7",
+          "pull_policy": "always",
+          "env": {"MINER_UID": "7", "SECRET_TOKEN": "<redacted>"}
+        }
+        """,
+        encoding="utf-8",
+    )
+    (diagnostics_dir / "error.txt").write_text(
+        "RuntimeError: sandbox failed without secret value\n",
+        encoding="utf-8",
+    )
+    (diagnostics_dir / "docker-inspect.json").write_text(
+        """
+        [
+          {
+            "Id": "container-123",
+            "Config": {"Env": ["SECRET_TOKEN=should-not-leak"]},
+            "State": {
+              "Status": "exited",
+              "ExitCode": 255,
+              "OOMKilled": false,
+              "Error": "process exited"
+            }
+          }
+        ]
+        """,
+        encoding="utf-8",
+    )
+    (diagnostics_dir / "docker-logs.txt").write_text(
+        "safe log line\nSECRET_TOKEN=should-not-leak was already redacted upstream\n",
+        encoding="utf-8",
+    )
+    (diagnostics_dir / "docker-pull-result.json").write_text(
+        '{"returncode": 1, "stdout": "pull out", "stderr": "pull err"}',
+        encoding="utf-8",
+    )
+    (diagnostics_dir / "docker-run-result.json").write_text(
+        '{"returncode": 125, "stdout": "run out", "stderr": "run err"}',
+        encoding="utf-8",
+    )
 
     scheduler = EvaluationScheduler(
         tasks=(task,),
@@ -2379,7 +2428,13 @@ async def test_scheduler_fails_batch_immediately_on_conclusive_sandbox_start_fai
         receipt_log=receipt_log,
         blocking_executor=blocking_executor,
         orchestrator_factory=lambda _client: _client,
-        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        sandbox_options_factory=lambda artifact: SandboxOptions(
+            image="harnyx/sandbox:test",
+            container_name=f"sandbox-{artifact.uid}",
+            pull_policy="always",
+            env={"MINER_UID": str(artifact.uid), "SECRET_TOKEN": "should-not-leak"},
+            failure_diagnostics_dir=str(diagnostics_dir),
+        ),
         clock=lambda: datetime(2025, 10, 27, tzinfo=UTC),
         config=SchedulerConfig(
             token_secret_bytes=8,
@@ -2396,6 +2451,25 @@ async def test_scheduler_fails_batch_immediately_on_conclusive_sandbox_start_fai
         await scheduler.run(batch_id=uuid4(), requested_artifacts=artifacts)
     assert exc_info.value.error_code == MinerTaskErrorCode.SANDBOX_START_FAILED
     assert exc_info.value.failure_detail.error_code == "sandbox_start_failed"
+    diagnostics = exc_info.value.failure_detail.sandbox_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.image == "harnyx/sandbox:test"
+    assert diagnostics.container_name == "sandbox-3"
+    assert diagnostics.container_id == "container-123"
+    assert diagnostics.status == "exited"
+    assert diagnostics.exit_code == 255
+    assert diagnostics.oom_killed is False
+    assert diagnostics.state_error == "process exited"
+    assert diagnostics.error_text == "RuntimeError: sandbox failed without secret value\n"
+    assert diagnostics.docker_logs_tail is not None
+    assert "safe log line" in diagnostics.docker_logs_tail
+    assert diagnostics.pull_returncode == 1
+    assert diagnostics.pull_stderr_tail == "pull err"
+    assert diagnostics.run_returncode == 125
+    assert diagnostics.run_stderr_tail == "run err"
+    serialized = str(diagnostics)
+    assert "Config" not in serialized
+    assert "should-not-leak" not in serialized
     assert exc_info.value.remaining_tasks == (task,)
     assert len(sandbox_manager.starts) == 2
     assert evaluation_records.records_by_batch == []

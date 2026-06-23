@@ -29,7 +29,14 @@ from harnyx_validator.application.dto.evaluation import (
     TokenUsageSummary,
 )
 from harnyx_validator.application.ports.progress import ProviderFailureEvidence
-from harnyx_validator.application.services.evaluation_runner import ValidatorBatchFailureDetail
+from harnyx_validator.application.services.evaluation_runner import (
+    DIAGNOSTIC_ID_MAX_LENGTH,
+    DIAGNOSTIC_LOG_TAIL_MAX_LENGTH,
+    DIAGNOSTIC_STATE_ERROR_MAX_LENGTH,
+    DIAGNOSTIC_TEXT_MAX_LENGTH,
+    SandboxFailureDiagnostics,
+    ValidatorBatchFailureDetail,
+)
 from harnyx_validator.domain.evaluation import MinerTaskRun
 from harnyx_validator.domain.shared_config import VALIDATOR_STRICT_CONFIG
 
@@ -344,6 +351,53 @@ def _serialize_failure_detail_message(detail: ValidatorBatchFailureDetail) -> st
     return detail.error_code
 
 
+class SandboxFailureDiagnosticsResponse(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    image: str | None = Field(default=None, max_length=DIAGNOSTIC_ID_MAX_LENGTH)
+    pull_policy: str | None = Field(default=None, max_length=DIAGNOSTIC_ID_MAX_LENGTH)
+    container_name: str | None = Field(default=None, max_length=DIAGNOSTIC_ID_MAX_LENGTH)
+    container_id: str | None = Field(default=None, max_length=DIAGNOSTIC_ID_MAX_LENGTH)
+    status: str | None = Field(default=None, max_length=DIAGNOSTIC_ID_MAX_LENGTH)
+    exit_code: int | None = None
+    oom_killed: bool | None = None
+    state_error: str | None = Field(default=None, max_length=DIAGNOSTIC_STATE_ERROR_MAX_LENGTH)
+    error_text: str | None = Field(default=None, max_length=DIAGNOSTIC_TEXT_MAX_LENGTH)
+    docker_logs_tail: str | None = Field(default=None, max_length=DIAGNOSTIC_LOG_TAIL_MAX_LENGTH)
+    pull_returncode: int | None = None
+    pull_stdout_tail: str | None = Field(default=None, max_length=DIAGNOSTIC_TEXT_MAX_LENGTH)
+    pull_stderr_tail: str | None = Field(default=None, max_length=DIAGNOSTIC_TEXT_MAX_LENGTH)
+    run_returncode: int | None = None
+    run_stdout_tail: str | None = Field(default=None, max_length=DIAGNOSTIC_TEXT_MAX_LENGTH)
+    run_stderr_tail: str | None = Field(default=None, max_length=DIAGNOSTIC_TEXT_MAX_LENGTH)
+
+    @classmethod
+    def from_domain(
+        cls,
+        diagnostics: SandboxFailureDiagnostics | None,
+    ) -> SandboxFailureDiagnosticsResponse | None:
+        if diagnostics is None:
+            return None
+        return cls(
+            image=diagnostics.image,
+            pull_policy=diagnostics.pull_policy,
+            container_name=diagnostics.container_name,
+            container_id=diagnostics.container_id,
+            status=diagnostics.status,
+            exit_code=diagnostics.exit_code,
+            oom_killed=diagnostics.oom_killed,
+            state_error=diagnostics.state_error,
+            error_text=diagnostics.error_text,
+            docker_logs_tail=diagnostics.docker_logs_tail,
+            pull_returncode=diagnostics.pull_returncode,
+            pull_stdout_tail=diagnostics.pull_stdout_tail,
+            pull_stderr_tail=diagnostics.pull_stderr_tail,
+            run_returncode=diagnostics.run_returncode,
+            run_stdout_tail=diagnostics.run_stdout_tail,
+            run_stderr_tail=diagnostics.run_stderr_tail,
+        )
+
+
 class FailureDetailResponse(BaseModel):
     model_config = VALIDATOR_STRICT_CONFIG
 
@@ -355,6 +409,7 @@ class FailureDetailResponse(BaseModel):
     exception_type: str | None = None
     traceback: str | None = None
     occurred_at: str = Field(min_length=1)
+    sandbox_diagnostics: SandboxFailureDiagnosticsResponse | None = None
 
     @classmethod
     def from_domain(cls, detail: ValidatorBatchFailureDetail) -> FailureDetailResponse:
@@ -367,6 +422,7 @@ class FailureDetailResponse(BaseModel):
             exception_type=detail.exception_type,
             traceback=detail.traceback,
             occurred_at=detail.occurred_at.isoformat(),
+            sandbox_diagnostics=SandboxFailureDiagnosticsResponse.from_domain(detail.sandbox_diagnostics),
         )
 
 
@@ -521,6 +577,7 @@ __all__ = [
     "RestoreMinerTaskRunModel",
     "RestoreMinerTaskRunSubmissionModel",
     "SessionModel",
+    "SandboxFailureDiagnosticsResponse",
     "ScriptArtifactRequestModel",
     "SequencedCompletedRunSubmissionModel",
     "SimilarityJudgeRequestModel",

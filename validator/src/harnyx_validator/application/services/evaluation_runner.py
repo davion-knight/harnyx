@@ -77,6 +77,10 @@ TaskSessionLimiter = AbstractAsyncContextManager[None]
 logger = logging.getLogger("harnyx_validator.scheduler")
 measurement_logger = logging.getLogger("harnyx_validator.measurement")
 LOCAL_RETRY_ATTEMPTS = 2
+DIAGNOSTIC_ID_MAX_LENGTH = 512
+DIAGNOSTIC_STATE_ERROR_MAX_LENGTH = 2048
+DIAGNOSTIC_TEXT_MAX_LENGTH = 4096
+DIAGNOSTIC_LOG_TAIL_MAX_LENGTH = 8192
 VALIDATOR_OWNED_PLATFORM_TOOL_PROXY_CONTROL_ERROR_CODES = frozenset(
     {
         "platform_tool_proxy_denied",
@@ -152,6 +156,26 @@ class TaskAttemptDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxFailureDiagnostics:
+    image: str | None = None
+    pull_policy: str | None = None
+    container_name: str | None = None
+    container_id: str | None = None
+    status: str | None = None
+    exit_code: int | None = None
+    oom_killed: bool | None = None
+    state_error: str | None = None
+    error_text: str | None = None
+    docker_logs_tail: str | None = None
+    pull_returncode: int | None = None
+    pull_stdout_tail: str | None = None
+    pull_stderr_tail: str | None = None
+    run_returncode: int | None = None
+    run_stdout_tail: str | None = None
+    run_stderr_tail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ValidatorBatchFailureDetail:
     error_code: str
     error_message: str
@@ -161,6 +185,7 @@ class ValidatorBatchFailureDetail:
     uid: int | None = None
     exception_type: str | None = None
     traceback: str | None = None
+    sandbox_diagnostics: SandboxFailureDiagnostics | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1774,6 +1799,7 @@ __all__ = [
     "ArtifactEvaluationOutcome",
     "ArtifactFailure",
     "EvaluationRunner",
+    "SandboxFailureDiagnostics",
     "LOCAL_RETRY_ATTEMPTS",
     "TERMINAL_TIMEOUT_ERROR_MESSAGE",
     "TaskAttemptDecision",

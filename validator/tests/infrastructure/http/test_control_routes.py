@@ -47,7 +47,10 @@ from harnyx_validator.application.dto.evaluation import (
     TokenUsageSummary,
 )
 from harnyx_validator.application.restore_batch import RestoreEvaluationBatch
-from harnyx_validator.application.services.evaluation_runner import ValidatorBatchFailureDetail
+from harnyx_validator.application.services.evaluation_runner import (
+    SandboxFailureDiagnostics,
+    ValidatorBatchFailureDetail,
+)
 from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.domain.evaluation import MinerTaskRun
 from harnyx_validator.infrastructure.http.middleware import request_logging_middleware
@@ -890,6 +893,13 @@ def test_failed_status_keeps_failure_detail_and_runs_page_keeps_sequence() -> No
             uid=first_submission.run.uid,
             exception_type="SandboxInvocationError",
             traceback="Traceback (most recent call last): ...",
+            sandbox_diagnostics=SandboxFailureDiagnostics(
+                image="harnyx/sandbox:test",
+                container_name="sandbox-7",
+                status="exited",
+                exit_code=255,
+                docker_logs_tail="safe log tail",
+            ),
         ),
     )
     app = _create_test_app(provider)
@@ -911,6 +921,24 @@ def test_failed_status_keeps_failure_detail_and_runs_page_keeps_sequence() -> No
         "exception_type": "SandboxInvocationError",
         "traceback": "Traceback (most recent call last): ...",
         "occurred_at": "2026-03-26T21:00:00+00:00",
+        "sandbox_diagnostics": {
+            "image": "harnyx/sandbox:test",
+            "pull_policy": None,
+            "container_name": "sandbox-7",
+            "container_id": None,
+            "status": "exited",
+            "exit_code": 255,
+            "oom_killed": None,
+            "state_error": None,
+            "error_text": None,
+            "docker_logs_tail": "safe log tail",
+            "pull_returncode": None,
+            "pull_stdout_tail": None,
+            "pull_stderr_tail": None,
+            "run_returncode": None,
+            "run_stdout_tail": None,
+            "run_stderr_tail": None,
+        },
     }
     assert body["total"] == 2
     assert body["completed"] == 2
@@ -924,6 +952,7 @@ def test_failed_status_keeps_failure_detail_and_runs_page_keeps_sequence() -> No
     ]
     assert [item["sequence"] for item in runs_body["items"]] == [1, 2]
     assert all("query" not in item["submission"]["run"] for item in runs_body["items"])
+    assert runs_body["failure_detail"] is None
 
 
 def test_runs_endpoint_preserves_real_record_sequence_without_artifact_sorting(tmp_path: Path) -> None:
@@ -1199,6 +1228,7 @@ def test_status_endpoint_replaces_blank_failure_message_at_transport_boundary() 
         "exception_type": "ReadTimeout",
         "traceback": None,
         "occurred_at": "2026-03-31T09:26:00+00:00",
+        "sandbox_diagnostics": None,
     }
     assert body["total"] == 1
     assert body["completed"] == 1

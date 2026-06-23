@@ -105,6 +105,23 @@ Body: [BatchProgressRunsPageResponse](#model-batchprogressrunspageresponse)
 |  | `error_message` |  | req | `string` |
 |  | `exception_type` |  | opt | `string` (nullable) |
 |  | `occurred_at` |  | req | `string` |
+|  | `sandbox_diagnostics` |  | opt | [SandboxFailureDiagnosticsResponse](#model-sandboxfailurediagnosticsresponse) (nullable) |
+|  |  | `container_id` | opt | `string` (nullable) |
+|  |  | `container_name` | opt | `string` (nullable) |
+|  |  | `docker_logs_tail` | opt | `string` (nullable) |
+|  |  | `error_text` | opt | `string` (nullable) |
+|  |  | `exit_code` | opt | `integer` (nullable) |
+|  |  | `image` | opt | `string` (nullable) |
+|  |  | `oom_killed` | opt | `boolean` (nullable) |
+|  |  | `pull_policy` | opt | `string` (nullable) |
+|  |  | `pull_returncode` | opt | `integer` (nullable) |
+|  |  | `pull_stderr_tail` | opt | `string` (nullable) |
+|  |  | `pull_stdout_tail` | opt | `string` (nullable) |
+|  |  | `run_returncode` | opt | `integer` (nullable) |
+|  |  | `run_stderr_tail` | opt | `string` (nullable) |
+|  |  | `run_stdout_tail` | opt | `string` (nullable) |
+|  |  | `state_error` | opt | `string` (nullable) |
+|  |  | `status` | opt | `string` (nullable) |
 |  | `task_id` |  | opt | `string` (nullable) |
 |  | `traceback` |  | opt | `string` (nullable) |
 |  | `uid` |  | opt | `integer` (nullable) |
@@ -240,6 +257,23 @@ Body: [BatchProgressStatusResponse](#model-batchprogressstatusresponse)
 |  | `error_message` |  | req | `string` |
 |  | `exception_type` |  | opt | `string` (nullable) |
 |  | `occurred_at` |  | req | `string` |
+|  | `sandbox_diagnostics` |  | opt | [SandboxFailureDiagnosticsResponse](#model-sandboxfailurediagnosticsresponse) (nullable) |
+|  |  | `container_id` | opt | `string` (nullable) |
+|  |  | `container_name` | opt | `string` (nullable) |
+|  |  | `docker_logs_tail` | opt | `string` (nullable) |
+|  |  | `error_text` | opt | `string` (nullable) |
+|  |  | `exit_code` | opt | `integer` (nullable) |
+|  |  | `image` | opt | `string` (nullable) |
+|  |  | `oom_killed` | opt | `boolean` (nullable) |
+|  |  | `pull_policy` | opt | `string` (nullable) |
+|  |  | `pull_returncode` | opt | `integer` (nullable) |
+|  |  | `pull_stderr_tail` | opt | `string` (nullable) |
+|  |  | `pull_stdout_tail` | opt | `string` (nullable) |
+|  |  | `run_returncode` | opt | `integer` (nullable) |
+|  |  | `run_stderr_tail` | opt | `string` (nullable) |
+|  |  | `run_stdout_tail` | opt | `string` (nullable) |
+|  |  | `state_error` | opt | `string` (nullable) |
+|  |  | `status` | opt | `string` (nullable) |
 |  | `task_id` |  | opt | `string` (nullable) |
 |  | `traceback` |  | opt | `string` (nullable) |
 |  | `uid` |  | opt | `integer` (nullable) |
@@ -499,6 +533,23 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `error_message` |  | req | `string` |
 |  | `exception_type` |  | opt | `string` (nullable) |
 |  | `occurred_at` |  | req | `string` |
+|  | `sandbox_diagnostics` |  | opt | [SandboxFailureDiagnosticsResponse](#model-sandboxfailurediagnosticsresponse) (nullable) |
+|  |  | `container_id` | opt | `string` (nullable) |
+|  |  | `container_name` | opt | `string` (nullable) |
+|  |  | `docker_logs_tail` | opt | `string` (nullable) |
+|  |  | `error_text` | opt | `string` (nullable) |
+|  |  | `exit_code` | opt | `integer` (nullable) |
+|  |  | `image` | opt | `string` (nullable) |
+|  |  | `oom_killed` | opt | `boolean` (nullable) |
+|  |  | `pull_policy` | opt | `string` (nullable) |
+|  |  | `pull_returncode` | opt | `integer` (nullable) |
+|  |  | `pull_stderr_tail` | opt | `string` (nullable) |
+|  |  | `pull_stdout_tail` | opt | `string` (nullable) |
+|  |  | `run_returncode` | opt | `integer` (nullable) |
+|  |  | `run_stderr_tail` | opt | `string` (nullable) |
+|  |  | `run_stdout_tail` | opt | `string` (nullable) |
+|  |  | `state_error` | opt | `string` (nullable) |
+|  |  | `status` | opt | `string` (nullable) |
 |  | `task_id` |  | opt | `string` (nullable) |
 |  | `traceback` |  | opt | `string` (nullable) |
 |  | `uid` |  | opt | `integer` (nullable) |
@@ -624,6 +675,23 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `error_message` |  | req | `string` |
 |  | `exception_type` |  | opt | `string` (nullable) |
 |  | `occurred_at` |  | req | `string` |
+|  | `sandbox_diagnostics` |  | opt | [SandboxFailureDiagnosticsResponse](#model-sandboxfailurediagnosticsresponse) (nullable) |
+|  |  | `container_id` | opt | `string` (nullable) |
+|  |  | `container_name` | opt | `string` (nullable) |
+|  |  | `docker_logs_tail` | opt | `string` (nullable) |
+|  |  | `error_text` | opt | `string` (nullable) |
+|  |  | `exit_code` | opt | `integer` (nullable) |
+|  |  | `image` | opt | `string` (nullable) |
+|  |  | `oom_killed` | opt | `boolean` (nullable) |
+|  |  | `pull_policy` | opt | `string` (nullable) |
+|  |  | `pull_returncode` | opt | `integer` (nullable) |
+|  |  | `pull_stderr_tail` | opt | `string` (nullable) |
+|  |  | `pull_stdout_tail` | opt | `string` (nullable) |
+|  |  | `run_returncode` | opt | `integer` (nullable) |
+|  |  | `run_stderr_tail` | opt | `string` (nullable) |
+|  |  | `run_stdout_tail` | opt | `string` (nullable) |
+|  |  | `state_error` | opt | `string` (nullable) |
+|  |  | `status` | opt | `string` (nullable) |
 |  | `task_id` |  | opt | `string` (nullable) |
 |  | `traceback` |  | opt | `string` (nullable) |
 |  | `uid` |  | opt | `integer` (nullable) |
@@ -895,6 +963,23 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 | `error_message` |  |  | req | `string` |
 | `exception_type` |  |  | opt | `string` (nullable) |
 | `occurred_at` |  |  | req | `string` |
+| `sandbox_diagnostics` |  |  | opt | [SandboxFailureDiagnosticsResponse](#model-sandboxfailurediagnosticsresponse) (nullable) |
+|  | `container_id` |  | opt | `string` (nullable) |
+|  | `container_name` |  | opt | `string` (nullable) |
+|  | `docker_logs_tail` |  | opt | `string` (nullable) |
+|  | `error_text` |  | opt | `string` (nullable) |
+|  | `exit_code` |  | opt | `integer` (nullable) |
+|  | `image` |  | opt | `string` (nullable) |
+|  | `oom_killed` |  | opt | `boolean` (nullable) |
+|  | `pull_policy` |  | opt | `string` (nullable) |
+|  | `pull_returncode` |  | opt | `integer` (nullable) |
+|  | `pull_stderr_tail` |  | opt | `string` (nullable) |
+|  | `pull_stdout_tail` |  | opt | `string` (nullable) |
+|  | `run_returncode` |  | opt | `integer` (nullable) |
+|  | `run_stderr_tail` |  | opt | `string` (nullable) |
+|  | `run_stdout_tail` |  | opt | `string` (nullable) |
+|  | `state_error` |  | opt | `string` (nullable) |
+|  | `status` |  | opt | `string` (nullable) |
 | `task_id` |  |  | opt | `string` (nullable) |
 | `traceback` |  |  | opt | `string` (nullable) |
 | `uid` |  |  | opt | `integer` (nullable) |
@@ -942,6 +1027,16 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
       "minLength": 1,
       "title": "Occurred At",
       "type": "string"
+    },
+    "sandbox_diagnostics": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/SandboxFailureDiagnosticsResponse"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "task_id": {
       "anyOf": [
@@ -2008,6 +2103,231 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
     "specifics"
   ],
   "title": "RestoreMinerTaskRunSubmissionModel",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-sandboxfailurediagnosticsresponse"></a>
+### Model: SandboxFailureDiagnosticsResponse
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `container_id` |  |  | opt | `string` (nullable) |
+| `container_name` |  |  | opt | `string` (nullable) |
+| `docker_logs_tail` |  |  | opt | `string` (nullable) |
+| `error_text` |  |  | opt | `string` (nullable) |
+| `exit_code` |  |  | opt | `integer` (nullable) |
+| `image` |  |  | opt | `string` (nullable) |
+| `oom_killed` |  |  | opt | `boolean` (nullable) |
+| `pull_policy` |  |  | opt | `string` (nullable) |
+| `pull_returncode` |  |  | opt | `integer` (nullable) |
+| `pull_stderr_tail` |  |  | opt | `string` (nullable) |
+| `pull_stdout_tail` |  |  | opt | `string` (nullable) |
+| `run_returncode` |  |  | opt | `integer` (nullable) |
+| `run_stderr_tail` |  |  | opt | `string` (nullable) |
+| `run_stdout_tail` |  |  | opt | `string` (nullable) |
+| `state_error` |  |  | opt | `string` (nullable) |
+| `status` |  |  | opt | `string` (nullable) |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "container_id": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Container Id"
+    },
+    "container_name": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Container Name"
+    },
+    "docker_logs_tail": {
+      "anyOf": [
+        {
+          "maxLength": 8192,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Docker Logs Tail"
+    },
+    "error_text": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Error Text"
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Exit Code"
+    },
+    "image": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Image"
+    },
+    "oom_killed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Oom Killed"
+    },
+    "pull_policy": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Pull Policy"
+    },
+    "pull_returncode": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Pull Returncode"
+    },
+    "pull_stderr_tail": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Pull Stderr Tail"
+    },
+    "pull_stdout_tail": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Pull Stdout Tail"
+    },
+    "run_returncode": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Run Returncode"
+    },
+    "run_stderr_tail": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Run Stderr Tail"
+    },
+    "run_stdout_tail": {
+      "anyOf": [
+        {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Run Stdout Tail"
+    },
+    "state_error": {
+      "anyOf": [
+        {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "State Error"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Status"
+    }
+  },
+  "title": "SandboxFailureDiagnosticsResponse",
   "type": "object"
 }
 ```
