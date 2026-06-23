@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import logging
 import socket
 
 import pytest
@@ -40,6 +41,29 @@ def test_weight_worker_captures_exception_before_reraising(monkeypatch) -> None:
         worker._tick()
 
     assert [str(exc) for exc in captured] == ["boom"]
+
+
+def test_weight_worker_success_log_includes_submitted_weights(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = WeightSubmissionResult(
+        champion_uid=5,
+        weights={5: 0.6, 1: 0.4},
+        tx_hash="0xabc",
+    )
+    worker = WeightWorker(submission_service=_SequenceSubmissionService([result]))
+
+    with caplog.at_level(logging.INFO, logger="harnyx_validator.weight_worker"):
+        worker._tick()
+
+    record = next(record for record in caplog.records if record.message == "weights submitted")
+    assert record.data == {
+        "event": "validator_weight_worker_submitted",
+        "tx_hash": "0xabc",
+        "weight_count": 2,
+        "champion_uid": 5,
+        "weights": {5: 0.6, 1: 0.4},
+    }
 
 
 def test_weight_worker_suppresses_transient_network_sentry_before_threshold(monkeypatch) -> None:

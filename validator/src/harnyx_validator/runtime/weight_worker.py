@@ -62,9 +62,13 @@ class WeightWorker(BaseWorker):
             self._logger.info(
                 "weights submitted",
                 extra={
-                    "tx_hash": result.tx_hash,
-                    "weight_count": len(result.weights),
-                    "champion_uid": result.champion_uid,
+                    "data": {
+                        "event": "validator_weight_worker_submitted",
+                        "tx_hash": result.tx_hash,
+                        "weight_count": len(result.weights),
+                        "champion_uid": result.champion_uid,
+                        "weights": result.weights,
+                    }
                 },
             )
             if self._status is not None:

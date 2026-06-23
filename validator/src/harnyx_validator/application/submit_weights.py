@@ -61,17 +61,19 @@ class WeightSubmissionService:
         champion_uid = selection.champion_uid
         if not weights:
             raise RuntimeError("platform returned empty weights")
-        weights_logger.debug("submitting weights to subtensor", extra={"weights": weights})
+        weights_logger.debug("submitting weights to subtensor", extra={"data": {"weights": weights}})
         tx_hash = self._subtensor.submit_weights(weights)
         submitted_at = self._clock()
         weights_logger.info(
             "submitted champion weights from platform",
             extra={
-                "event": "champion_weights_submitted",
-                "champion_uid": champion_uid,
-                "weights": weights,
-                "tx_hash": tx_hash,
-                "submitted_at": submitted_at.isoformat(),
+                "data": {
+                    "event": "champion_weights_submitted",
+                    "champion_uid": champion_uid,
+                    "weights": weights,
+                    "tx_hash": tx_hash,
+                    "submitted_at": submitted_at.isoformat(),
+                }
             },
         )
         return WeightSubmissionResult(champion_uid=champion_uid, weights=weights, tx_hash=tx_hash)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -49,6 +50,35 @@ def test_submission_service_submits_platform_weights() -> None:
     assert fake.weight_updates[-1] == result.weights
     assert pytest.approx(result.weights[5], rel=1e-6) == 0.6
     assert pytest.approx(result.weights[1], rel=1e-6) == 0.4
+
+
+def test_submission_service_logs_operator_visible_submitted_weights(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeSubtensorClient()
+    platform = StubPlatform(weights={5: 0.6, 1: 0.4}, champion_uid=5)
+    service = WeightSubmissionService(
+        subtensor=fake,
+        netuid=1,
+        clock=fixed_clock,
+        platform=platform,
+    )
+
+    with caplog.at_level(logging.INFO, logger="harnyx_validator.weights.ranking"):
+        service.submit()
+
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "submitted champion weights from platform"
+    )
+    assert record.data == {
+        "event": "champion_weights_submitted",
+        "champion_uid": 5,
+        "weights": {5: 0.6, 1: 0.4},
+        "tx_hash": "0x00000001",
+        "submitted_at": "2025-10-17T13:00:00+00:00",
+    }
 
 
 def test_submission_service_raises_on_empty_weights() -> None:
