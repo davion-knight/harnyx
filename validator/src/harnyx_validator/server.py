@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -30,6 +31,24 @@ configure_sentry_from_env()
 _settings = Settings.load()
 configure_tracing(service_name="harnyx-validator")
 
+_COMPOSE_SMOKE_MARKER_ENV = "VALIDATOR_COMPOSE_SMOKE"
+_SMOKE_WEIGHT_WORKER_POLL_INTERVAL_ENV = "VALIDATOR_SMOKE_WEIGHT_WORKER_POLL_INTERVAL_SECONDS"
+
+
+def _smoke_weight_worker_poll_interval_seconds() -> float | None:
+    if os.getenv(_COMPOSE_SMOKE_MARKER_ENV) != "1":
+        return None
+    raw_value = os.getenv(_SMOKE_WEIGHT_WORKER_POLL_INTERVAL_ENV)
+    if raw_value is None:
+        return None
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise RuntimeError("smoke weight-worker poll interval must be a number") from exc
+    if value <= 0:
+        raise RuntimeError("smoke weight-worker poll interval must be positive")
+    return value
+
 if _settings.observability.enable_cloud_logging:
     gcp_project = _settings.observability.gcp_project_id
     if gcp_project is None:
@@ -48,10 +67,18 @@ else:
 _runtime = build_runtime(_settings)
 _evaluation_worker = create_evaluation_worker_from_context(_runtime)
 _restore_worker = _runtime.restore_worker
-_weight_worker = create_weight_worker(
-    submission_service=_runtime.weight_submission_service,
-    status_provider=_runtime.status_provider,
-)
+_weight_worker_poll_interval_seconds = _smoke_weight_worker_poll_interval_seconds()
+if _weight_worker_poll_interval_seconds is None:
+    _weight_worker = create_weight_worker(
+        submission_service=_runtime.weight_submission_service,
+        status_provider=_runtime.status_provider,
+    )
+else:
+    _weight_worker = create_weight_worker(
+        submission_service=_runtime.weight_submission_service,
+        status_provider=_runtime.status_provider,
+        poll_interval_seconds=_weight_worker_poll_interval_seconds,
+    )
 _registration_refresh_worker = create_registration_refresh_worker(
     registration_refresh=_runtime.refresh_platform_registration,
     status_provider=_runtime.status_provider,

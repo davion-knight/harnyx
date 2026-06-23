@@ -138,6 +138,100 @@ def test_validator_import_configures_sentry_before_tracing(monkeypatch) -> None:
     assert calls.index("sentry") < calls.index("tracing")
 
 
+def _import_server_with_captured_weight_worker_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    fake_settings = SimpleNamespace(
+        observability=SimpleNamespace(
+            enable_cloud_logging=False,
+            gcp_project_id=None,
+        ),
+        rpc_listen_host="127.0.0.1",
+        rpc_port=8100,
+        platform_api=SimpleNamespace(),
+    )
+    fake_runtime = SimpleNamespace(
+        settings=fake_settings,
+        weight_submission_service=object(),
+        status_provider=object(),
+        tool_route_deps_provider=lambda: object(),
+        control_deps_provider=lambda: object(),
+        restore_worker=object(),
+        register_with_platform=lambda: None,
+        refresh_platform_registration=lambda: None,
+    )
+    fake_worker = SimpleNamespace(start=lambda: None, stop=lambda *args, **kwargs: None)
+    captured: list[dict[str, object]] = []
+
+    def _fake_create_weight_worker(**kwargs: object) -> object:
+        captured.append(kwargs)
+        return fake_worker
+
+    monkeypatch.setattr(settings_mod.Settings, "load", classmethod(lambda cls: fake_settings))
+    monkeypatch.setattr(sentry_mod, "configure_sentry_from_env", lambda: None)
+    monkeypatch.setattr(tracing_mod, "configure_tracing", lambda *, service_name: None)
+    monkeypatch.setattr(logging_mod, "init_logging", lambda: None)
+    monkeypatch.setattr(logging_mod, "configure_logging", lambda **kwargs: None)
+    monkeypatch.setattr(bootstrap_mod, "build_runtime", lambda settings: fake_runtime)
+    monkeypatch.setattr(
+        evaluation_worker_mod,
+        "create_evaluation_worker_from_context",
+        lambda context: fake_worker,
+    )
+    monkeypatch.setattr(weight_worker_mod, "create_weight_worker", _fake_create_weight_worker)
+    monkeypatch.setattr(
+        registration_worker_mod,
+        "create_registration_refresh_worker",
+        lambda **kwargs: fake_worker,
+    )
+    monkeypatch.setattr(routes_mod, "add_tool_routes", lambda app, dependency_provider: None)
+    monkeypatch.setattr(routes_mod, "add_control_routes", lambda app, control_deps_provider: None)
+
+    module_name = "harnyx_validator.server"
+    original_module = sys.modules.pop(module_name, None)
+    try:
+        importlib.import_module(module_name)
+    finally:
+        sys.modules.pop(module_name, None)
+        if original_module is not None:
+            sys.modules[module_name] = original_module
+    return captured
+
+
+def test_validator_import_ignores_smoke_weight_worker_interval_without_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VALIDATOR_COMPOSE_SMOKE", raising=False)
+    monkeypatch.setenv("VALIDATOR_SMOKE_WEIGHT_WORKER_POLL_INTERVAL_SECONDS", "5")
+
+    captured = _import_server_with_captured_weight_worker_kwargs(monkeypatch)
+
+    assert len(captured) == 1
+    assert set(captured[0]) == {"submission_service", "status_provider"}
+    assert "poll_interval_seconds" not in captured[0]
+
+
+def test_validator_import_uses_compose_smoke_weight_worker_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VALIDATOR_COMPOSE_SMOKE", "1")
+    monkeypatch.setenv("VALIDATOR_SMOKE_WEIGHT_WORKER_POLL_INTERVAL_SECONDS", "5")
+
+    captured = _import_server_with_captured_weight_worker_kwargs(monkeypatch)
+
+    assert captured[0]["poll_interval_seconds"] == 5.0
+
+
+def test_validator_import_rejects_invalid_compose_smoke_weight_worker_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VALIDATOR_COMPOSE_SMOKE", "1")
+    monkeypatch.setenv("VALIDATOR_SMOKE_WEIGHT_WORKER_POLL_INTERVAL_SECONDS", "0")
+
+    with pytest.raises(RuntimeError, match="smoke weight-worker poll interval must be positive"):
+        _import_server_with_captured_weight_worker_kwargs(monkeypatch)
+
+
 def test_validator_logging_config_defaults_measurement_logger_to_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VALIDATOR_MEASUREMENT_LOG_LEVEL", raising=False)
 
