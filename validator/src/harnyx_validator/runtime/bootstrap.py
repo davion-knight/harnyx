@@ -95,10 +95,14 @@ logger = logging.getLogger("harnyx_validator.runtime")
 
 _SCORING_LLM_MODEL = "moonshotai/Kimi-K2.5-TEE"
 _SCORING_LLM_REASONING_EFFORT = "high"
-_DUPLICATION_DETECTION_LLM_MODEL = "moonshotai/Kimi-K2.5-TEE"
-_JUDGE_FALLBACK_TAIL_MODELS = (
+_DUPLICATION_DETECTION_LLM_MODEL = "google/gemma-4-31B-turbo-TEE"
+_SCORING_JUDGE_FALLBACK_TAIL_MODELS = (
     "zai-org/GLM-5-TEE",
     "google/gemma-4-31B-turbo-TEE",
+)
+_DUPLICATION_DETECTION_FALLBACK_MODELS = (
+    "moonshotai/Kimi-K2.5-TEE",
+    "zai-org/GLM-5-TEE",
 )
 _SEARCH_PROVIDER_TOOLS = frozenset(("search_web", "search_ai", "fetch_page"))
 _MINER_SELECTED_SEARCH_PROVIDERS = frozenset(get_args(SearchProviderName))
@@ -489,19 +493,27 @@ def _resolve_similarity_judge_route(settings: Settings) -> ResolvedLlmRoute:
 
 
 def _scoring_judge_fallback_models(settings: Settings) -> tuple[str, ...]:
-    return _fallback_tail_after_primary(_effective_scoring_llm_model(settings))
+    return _fallback_tail_after_primary(
+        primary_model=_effective_scoring_llm_model(settings),
+        ordered_models=(_SCORING_LLM_MODEL, *_SCORING_JUDGE_FALLBACK_TAIL_MODELS),
+        fallback_tail=_SCORING_JUDGE_FALLBACK_TAIL_MODELS,
+    )
 
 
 def _similarity_judge_fallback_models() -> tuple[str, ...]:
-    return _fallback_tail_after_primary(_DUPLICATION_DETECTION_LLM_MODEL)
+    return _DUPLICATION_DETECTION_FALLBACK_MODELS
 
 
-def _fallback_tail_after_primary(primary_model: str) -> tuple[str, ...]:
-    ordered_models = (_SCORING_LLM_MODEL, *_JUDGE_FALLBACK_TAIL_MODELS)
+def _fallback_tail_after_primary(
+    *,
+    primary_model: str,
+    ordered_models: tuple[str, ...],
+    fallback_tail: tuple[str, ...],
+) -> tuple[str, ...]:
     try:
         primary_index = ordered_models.index(primary_model)
     except ValueError:
-        return _JUDGE_FALLBACK_TAIL_MODELS
+        return fallback_tail
     return ordered_models[primary_index + 1 :]
 
 

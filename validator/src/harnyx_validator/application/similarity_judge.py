@@ -1,4 +1,4 @@
-"""Validator-owned LLM similarity judge for post-dethrone candidates."""
+"""Validator-owned LLM duplicate judge for miner task candidates."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ _SYSTEM_PROMPT = (
     "Set `verdict` to either `duplicate` or `not_duplicate`."
 )
 _USER_PROMPT_PREFIX = (
-    "Judge whether this dethroning candidate is a semantic/functional duplicate of the original incumbent.\n\n"
+    "Judge whether this candidate artifact is a semantic/functional duplicate of the original incumbent.\n\n"
     "Payload:\n"
 )
 

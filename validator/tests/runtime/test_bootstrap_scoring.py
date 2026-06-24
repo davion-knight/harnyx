@@ -752,15 +752,62 @@ def test_create_scoring_service_uses_effective_route_model_and_default_provider(
 
 
 def test_scoring_fallback_tail_only_uses_candidates_after_primary() -> None:
-    assert bootstrap._fallback_tail_after_primary(bootstrap._SCORING_LLM_MODEL) == (
+    assert bootstrap._fallback_tail_after_primary(
+        primary_model=bootstrap._SCORING_LLM_MODEL,
+        ordered_models=(
+            bootstrap._SCORING_LLM_MODEL,
+            "zai-org/GLM-5-TEE",
+            "google/gemma-4-31B-turbo-TEE",
+        ),
+        fallback_tail=(
+            "zai-org/GLM-5-TEE",
+            "google/gemma-4-31B-turbo-TEE",
+        ),
+    ) == (
         "zai-org/GLM-5-TEE",
         "google/gemma-4-31B-turbo-TEE",
     )
-    assert bootstrap._fallback_tail_after_primary("zai-org/GLM-5-TEE") == (
+    assert bootstrap._fallback_tail_after_primary(
+        primary_model="zai-org/GLM-5-TEE",
+        ordered_models=(
+            bootstrap._SCORING_LLM_MODEL,
+            "zai-org/GLM-5-TEE",
+            "google/gemma-4-31B-turbo-TEE",
+        ),
+        fallback_tail=(
+            "zai-org/GLM-5-TEE",
+            "google/gemma-4-31B-turbo-TEE",
+        ),
+    ) == (
         "google/gemma-4-31B-turbo-TEE",
     )
-    assert bootstrap._fallback_tail_after_primary("google/gemma-4-31B-turbo-TEE") == ()
-    assert bootstrap._fallback_tail_after_primary("custom/internal-model") == (
+    assert (
+        bootstrap._fallback_tail_after_primary(
+            primary_model="google/gemma-4-31B-turbo-TEE",
+            ordered_models=(
+                bootstrap._SCORING_LLM_MODEL,
+                "zai-org/GLM-5-TEE",
+                "google/gemma-4-31B-turbo-TEE",
+            ),
+            fallback_tail=(
+                "zai-org/GLM-5-TEE",
+                "google/gemma-4-31B-turbo-TEE",
+            ),
+        )
+        == ()
+    )
+    assert bootstrap._fallback_tail_after_primary(
+        primary_model="custom/internal-model",
+        ordered_models=(
+            bootstrap._SCORING_LLM_MODEL,
+            "zai-org/GLM-5-TEE",
+            "google/gemma-4-31B-turbo-TEE",
+        ),
+        fallback_tail=(
+            "zai-org/GLM-5-TEE",
+            "google/gemma-4-31B-turbo-TEE",
+        ),
+    ) == (
         "zai-org/GLM-5-TEE",
         "google/gemma-4-31B-turbo-TEE",
     )
@@ -782,15 +829,15 @@ def test_create_similarity_judge_uses_scoring_llm_config() -> None:
         similarity_route=ResolvedLlmRoute(
             surface="duplication_detection",
             provider="bedrock",
-            model="moonshotai/Kimi-K2.5-TEE",
+            model="google/gemma-4-31B-turbo-TEE",
         ),
     )
 
     assert judge._config.provider == "chutes"
-    assert judge._config.model == "moonshotai/Kimi-K2.5-TEE"
+    assert judge._config.model == "google/gemma-4-31B-turbo-TEE"
     assert judge._config.fallback_models == (
+        "moonshotai/Kimi-K2.5-TEE",
         "zai-org/GLM-5-TEE",
-        "google/gemma-4-31B-turbo-TEE",
     )
     assert judge._config.temperature == 0.0
     assert judge._config.max_output_tokens == 4096
