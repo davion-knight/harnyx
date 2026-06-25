@@ -2,6 +2,10 @@
 
 This directory contains the miner-facing CLI tools for the Harnyx Subnet.
 
+For the end-to-end operating workflow from champion context through submit,
+batch monitoring, and score diagnosis, start with the
+[Mining Runbook](mining-runbook.md).
+
 ## How it fits together
 
 ```
@@ -382,6 +386,10 @@ uv run --package harnyx-miner harnyx-miner-hash --agent-path ./agent.py
 
 That command computes the same SHA-256 the platform validates for upload, so it should
 match the response field `content_hash`.
+
+After upload, use the [Mining Runbook](mining-runbook.md) to verify platform
+acceptance, check batch eligibility, inspect completed results, and decide the
+next improvement step.
 
 ## Miner Script Python Subset
 

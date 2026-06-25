@@ -148,6 +148,12 @@ Recommended loop:
 4. Re-run local eval.
 5. Compare the new JSON/Markdown report with the previous run.
 
+After local eval shows a candidate is worth submitting, or after it exposes a
+failure pattern you need to diagnose against platform state, use the
+[Mining Runbook](mining-runbook.md). It covers config checks, submit
+verification, batch eligibility, completed-result inspection, and score
+diagnosis.
+
 ## Fresh Start
 
 If `./agent.py` does not exist yet, create a minimal working stub first and then start the loop:
@@ -162,9 +168,12 @@ async def query(query: Query) -> Response:
     return Response(text=query.text)
 ```
 
-## Public Workflow Skills
+## Optional Public Workflow Skills
 
-If you are using a code agent, use the public step-based skills in [`skills/README.md`](skills/README.md):
+If your code agent supports this repository's public step-based skills, they can
+help with the local improvement loop. They do not replace the
+[Mining Runbook](mining-runbook.md) for submit, monitoring, or post-batch
+diagnosis.
 
 - `prepare-benchmark-context`
 - `improve-artifact`

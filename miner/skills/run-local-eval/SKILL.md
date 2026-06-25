@@ -5,7 +5,15 @@ description: Run miner local batch evaluation and extract the next iteration sig
 
 # Run Local Eval
 
-Goal: run `harnyx-miner-local-eval`, collect the reports, and decide the next move.
+## Goal
+
+Run `harnyx-miner-local-eval`, collect the reports, and decide the next move.
+
+## Inputs
+
+- target artifact path, usually `./agent.py`
+- mode: `vs-champion` or `target-only`
+- optional completed `batch_id`
 
 ## Steps
 
@@ -30,6 +38,12 @@ uv run --package harnyx-miner harnyx-miner-local-eval --agent-path ./agent.py
    - keep iterating on the artifact
    - switch to `target-only`
    - submit the current artifact
+
+## Stop Conditions
+
+- Stop if Docker or required evaluation environment variables are missing.
+- Stop if the artifact cannot load.
+- Stop if the report was not written; inspect the failure bundle before editing.
 
 ## Output
 

@@ -5,7 +5,16 @@ description: Prepare local batch-eval context before editing a miner artifact.
 
 # Prepare Benchmark Context
 
-Goal: understand the current task set and the last local-eval report before changing the artifact.
+## Goal
+
+Understand the current task set and the last local-eval report before changing
+the artifact.
+
+## Inputs
+
+- target artifact path, usually `./agent.py`
+- selected batch or latest completed batch
+- newest local-eval JSON/Markdown report when available
 
 ## Steps
 
@@ -18,6 +27,11 @@ Goal: understand the current task set and the last local-eval report before chan
    - repeated errors or retries
    - places where the champion beat the target in `vs-champion`
 5. Write down 1-3 concrete hypotheses for what to improve.
+
+## Stop Conditions
+
+- Stop if the target artifact path is unclear.
+- Stop if there is no report and no chosen batch context to inspect.
 
 ## Output
 
