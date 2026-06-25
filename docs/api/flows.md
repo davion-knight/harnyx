@@ -25,7 +25,7 @@ These diagrams are intentionally **linear** (no `alt` / `par` / `loop`) to keep 
 |--------|------|------|--------|------|
 | Subnet runtime | Miner config | configure retry count; upload, read, or delete redacted provider credential status | Miner ↔ Platform | `Authorization: Bittensor ...` |
 | Subnet runtime | Miner script upload | upload script artifact | Miner ↔ Platform | `Authorization: Bittensor ...` |
-| Subnet runtime | Miner-task batch | forward batch to allowlisted validators + run sandbox + poll status and drain run pages | Platform ↔ Validator ↔ Sandbox | `Authorization: Bittensor ...` + `x-platform-token` + `x-session-id` + `x-host-container-url` |
+| Subnet runtime | Miner-task batch | materialize platform-owned work, poll assignments, run sandbox, and submit task results | Platform ↔ Validator ↔ Sandbox | `Authorization: Bittensor ...` + `x-platform-token` + `x-session-id` + `x-host-container-url` |
 | Subnet runtime | Tool execution | agent invokes host tools | Sandbox agent ↔ Tool host | `x-platform-token` + `x-session-id` |
 | Subnet ops | Validator registration and weights | register API base URL; read weights | Validator ↔ Platform | `Authorization: Bittensor ...` |
 
@@ -182,11 +182,11 @@ sequenceDiagram
 - Platform:
   - [POST /v1/miner-task-batches/batch](generated/platform.md#endpoint-post-v1-miner-task-batches-batch)
   - [GET /v1/miner-task-batches/{batch_id}/artifacts/{artifact_id}](generated/platform.md#endpoint-get-v1-miner-task-batches-batch_id-artifacts-artifact_id)
-  - `POST /v2/miner-task-work/tasks`
-  - `POST /v2/miner-task-work/results`
+  - [POST /v2/miner-task-work/tasks](generated/platform.md#endpoint-post-v2-miner-task-work-tasks)
+  - [POST /v2/miner-task-work/results](generated/platform.md#endpoint-post-v2-miner-task-work-results)
 - Validator:
-  - [GET /validator/status](generated/validator.md#endpoint-get-validator-status)
-  - [POST /validator/miner-task-batches/{batch_id}/similarity](generated/validator.md#endpoint-post-validator-miner-task-batches-batch_id-similarity)
+  - [GET /validator/status](generated/validator.md#endpoint-get-validator-status) (health snapshot; not miner-task lifecycle progress)
+  - [POST /validator/miner-task-batches/{batch_id}/similarity](generated/validator.md#endpoint-post-validator-miner-task-batches-batch_id-similarity) (similarity judging; not lifecycle dispatch/status/result draining)
   - [POST /v1/tools/execute](generated/validator.md#endpoint-post-v1-tools-execute)
 - Sandbox:
   - [POST /entry/{entrypoint_name}](generated/sandbox.md#endpoint-post-entry-entrypoint_name)

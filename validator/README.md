@@ -40,11 +40,11 @@ Edit `.env` and set at least:
 | `SCORING_LLM_RETRY_MAX_MS` | Optional pairwise scoring LLM request retry maximum backoff; defaults to `300000` |
 | `SCORING_LLM_RETRY_JITTER` | Optional pairwise scoring LLM request retry jitter ratio; defaults to `0.2` |
 
-The defaults in `.env.example` already target mainnet (`finney`) and netuid `67`. Validator sandbox execution defaults to `harnyx/harnyx-subnet-sandbox:finney`; set `SANDBOX_IMAGE=harnyx/harnyx-subnet-sandbox:testnet` for staging/testnet, or use another explicit value only when you intentionally want to test or pin a different sandbox image. Validator batch execution uses fixed runtime concurrency: 4 concurrent artifact sandboxes and 20 batch-wide task sessions across those artifacts.
+The defaults in `.env.example` already target mainnet (`finney`) and netuid `67`. Validator sandbox execution defaults to `harnyx/harnyx-subnet-sandbox:finney`; set `SANDBOX_IMAGE=harnyx/harnyx-subnet-sandbox:testnet` for staging/testnet, or use another explicit value only when you intentionally want to test or pin a different sandbox image. Validator miner-task execution uses fixed runtime concurrency: 4 concurrent artifact sandboxes and 20 task-attempt slots across active artifacts.
 
 Provider-backed miner script tools execute through platform tool proxy with miner-stored credentials. Validators do not need `SEARCH_PROVIDER`, `DESEARCH_API_KEY`, `PARALLEL_API_KEY`, or `TOOL_LLM_PROVIDER` for normal miner task provider-backed tool execution.
 
-Completed-run execution logs are stored under the validator state volume while the platform drains `/runs` pages. `VALIDATOR_RUN_PROGRESS_RETENTION_SECONDS` controls how long terminal batch blobs are retained before cleanup; it defaults to 24 hours. `VALIDATOR_RUN_PROGRESS_CLEANUP_INTERVAL_SECONDS` controls the idle cleanup cadence and defaults to 10 minutes. Operators with intentionally delayed platform sync can increase the retention window.
+Completed-run execution logs are stored under the validator state volume for local audit and troubleshooting. The platform does not drain validator `/runs` pages for active miner-task lifecycle progress; it owns assignment, result acceptance, delivery projection, and finalization. `VALIDATOR_RUN_PROGRESS_RETENTION_SECONDS` controls how long terminal local progress blobs are retained before cleanup; it defaults to 24 hours. `VALIDATOR_RUN_PROGRESS_CLEANUP_INTERVAL_SECONDS` controls the idle cleanup cadence and defaults to 10 minutes.
 
 Validator scoring keeps `SCORING_LLM_PROVIDER` configurable, but the primary scoring model contract is fixed in code to `moonshotai/Kimi-K2.5-TEE` with `reasoning_effort="high"`. Pairwise scoring uses `SCORING_LLM_RETRY_*` for the scoring LLM request retry loop, including retryable provider errors, response verification failures, and structured-output repair retries; exhausting that policy records `scoring_llm_retry_exhausted` and does not schedule a new miner task attempt. If the primary candidate exhausts provider retries, scoring tries `zai-org/GLM-5-TEE` and then `google/gemma-4-31B-turbo-TEE`; non-retryable provider failures fail fast. The pairwise scoring prompt, request shape, fallback loop, and score mapping live in `public/packages/commons/src/harnyx_commons/miner_task_scoring.py`; validator runtime code wires providers, sandbox execution, and submission flow.
 
@@ -89,7 +89,7 @@ bash scripts/operator_logs.sh
 Look for:
 - Successful connection to the platform
 - Validator endpoint registration confirmation
-- Evaluation batches being received and processed
+- Miner-task assignments being polled, executed, and submitted
 
 ## Operations
 
@@ -107,7 +107,7 @@ Watchtower polls Docker Hub every 5 minutes and will pull/restart the validator 
 
 The stack now uses a normal short shutdown budget (`60s`), not a long correctness-critical drain window.
 
-Miner-task restart safety no longer depends on the validator staying alive until every in-flight batch fully finishes. Platform persists completed validator submissions while a batch is still active, and if the validator later restarts and reports `unknown` for that batch, platform can redispatch the same batch back to that same validator with restore data so the validator resumes only the remaining work.
+Miner-task restart safety no longer depends on the validator staying alive until every in-flight batch fully finishes. Platform owns expected work, attempt numbering, accepted results, delivery projection, and finalization. After restart, the validator starts with empty active-task memory and polls Platform for new assignments; unfinished work is resolved by Platform deadline and retry handling rather than validator batch restore.
 
 ## Troubleshooting
 

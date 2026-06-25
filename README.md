@@ -68,7 +68,7 @@ Notes:
 - Candidate totals are aggregated across validators, and ties prefer lower total tool cost.
 
 **Validator flow + gating**
-- The platform sends miner-task batches to validators; validators run script x task combinations and report scored runs.
+- The platform owns the miner-task work ledger; validators poll for assigned task attempts, run script x task combinations, and submit task results.
 - Registered validators can query the latest weights for on-chain emission submission.
 - Miner emission keeps champion emission active and adds the base participant-emission level per distinct miner hotkey whose artifact participated in the latest terminal source batch with artifacts; owner `uid=0` receives the final remainder and unregistered participant shares.
 - The [live benchmark page](https://dashboard.harnyx.ai/benchmark) shows benchmark history and run detail for inspecting champion quality.
@@ -86,11 +86,12 @@ sequenceDiagram
     participant Sandbox
     participant Bittensor
 
-    Platform->>Validator: 1) Run batch (tasks, scripts)
-    Validator->>Sandbox: 2) Execute script x task
-    Sandbox-->>Validator: 3) Miner response
-    Validator-->>Platform: 4) Scored runs
-    Validator->>Bittensor: 5) submit_weights
+    Validator->>Platform: 1) Poll assigned task attempts
+    Platform-->>Validator: 2) Task, script, and attempt metadata
+    Validator->>Sandbox: 3) Execute script x task
+    Sandbox-->>Validator: 4) Miner response
+    Validator-->>Platform: 5) Submit task results
+    Validator->>Bittensor: 6) submit_weights
 ```
 
 ### How champion selection works
