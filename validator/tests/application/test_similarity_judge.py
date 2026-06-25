@@ -137,6 +137,37 @@ async def test_similarity_judge_returns_verdict_and_provider_reasoning() -> None
     assert "When the evidence is borderline or the diff is mostly cosmetic, choose `duplicate`" in system_prompt
 
 
+async def test_similarity_judge_maps_reasoning_effort_to_typed_thinking() -> None:
+    llm = StubLlmProvider()
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(
+            provider="chutes",
+            model="google/gemma-4-31B-turbo-TEE",
+            reasoning_effort="high",
+        ),
+    )
+
+    await service.judge(
+        SimilarityJudgeRequest(
+            batch_id=uuid4(),
+            candidate_artifact_id=uuid4(),
+            incumbent_artifact_id=uuid4(),
+            candidate_miner_uid=20,
+            incumbent_miner_uid=10,
+            incumbent_script="def answer(): return 'old'",
+            candidate_diff="+ def answer(): return 'new'",
+        )
+    )
+
+    llm_request = llm.requests[0]
+    assert llm_request.reasoning_effort == "high"
+    assert llm_request.thinking is not None
+    assert llm_request.thinking.enabled is True
+    assert llm_request.thinking.effort == "high"
+    assert llm_request.thinking.budget is None
+
+
 async def test_similarity_judge_tries_next_candidate_after_true_retry_exhaustion() -> None:
     retry_policy = RetryPolicy(attempts=3, initial_ms=1, max_ms=10, jitter=0.0)
     llm = SequenceLlmProvider(

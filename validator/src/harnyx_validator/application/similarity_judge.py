@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -12,9 +12,17 @@ from harnyx_commons.llm.json_utils import pydantic_postprocessor
 from harnyx_commons.llm.provider import LlmProviderPort, LlmRetryExhaustedError
 from harnyx_commons.llm.provider_types import LlmProviderName, LlmRouteTarget
 from harnyx_commons.llm.retry_utils import RetryPolicy
-from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest, LlmResponse
+from harnyx_commons.llm.schema import (
+    LlmMessage,
+    LlmMessageContentPart,
+    LlmRequest,
+    LlmResponse,
+    LlmThinkingConfig,
+    ReasoningEffort,
+)
 from harnyx_commons.miner_task_similarity import SimilarityJudgeRequest, SimilarityJudgeResult
 
+_TYPED_THINKING_EFFORTS = frozenset(("low", "medium", "high"))
 _SYSTEM_PROMPT = (
     "You are a strict semantic duplicate judge for miner agent scripts.\n\n"
     "You compare the original incumbent script against a candidate patch.\n"
@@ -128,6 +136,7 @@ class SimilarityJudge:
             postprocessor=pydantic_postprocessor(_SimilarityVerdictModel),
             temperature=self._config.temperature,
             max_output_tokens=self._config.max_output_tokens,
+            thinking=_thinking_config_for_reasoning_effort(self._config.reasoning_effort),
             reasoning_effort=self._config.reasoning_effort,
             timeout_seconds=self._config.timeout_seconds,
             retry_policy=self._config.retry_policy,
@@ -149,6 +158,15 @@ def _build_similarity_payload(request: SimilarityJudgeRequest) -> dict[str, obje
             "diff_against_incumbent": request.candidate_diff,
         },
     }
+
+
+def _thinking_config_for_reasoning_effort(reasoning_effort: str | None) -> LlmThinkingConfig | None:
+    if reasoning_effort is None:
+        return None
+    normalized = reasoning_effort.strip().lower()
+    if normalized not in _TYPED_THINKING_EFFORTS:
+        return None
+    return LlmThinkingConfig(enabled=True, effort=cast(ReasoningEffort, normalized))
 
 
 def _extract_reasoning_text(response: LlmResponse) -> str | None:
