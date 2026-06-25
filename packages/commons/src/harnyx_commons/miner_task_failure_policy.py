@@ -44,11 +44,6 @@ class DeliveryRunInput(Protocol):
     def task_id(self) -> UUID: ...
 
 
-class DeliveryValidatorInput(Protocol):
-    @property
-    def uid(self) -> int: ...
-
-
 class DeliverySpecificsInput(Protocol):
     @property
     def error(self) -> EvaluationError | None: ...
@@ -57,9 +52,6 @@ class DeliverySpecificsInput(Protocol):
 class DeliverySubmissionInput(Protocol):
     @property
     def run(self) -> DeliveryRunInput: ...
-
-    @property
-    def validator(self) -> DeliveryValidatorInput: ...
 
     @property
     def specifics(self) -> DeliverySpecificsInput: ...
@@ -71,7 +63,6 @@ class ValidatorDeliveryExclusion:
     occurred_at: datetime
     artifact_id: UUID
     task_id: UUID
-    uid: int
 
 
 def delivery_exclusion_from_completed_pair_results(
@@ -90,7 +81,6 @@ def delivery_exclusion_from_completed_pair_results(
             occurred_at=submission.run.completed_at or observed_at,
             artifact_id=submission.run.artifact_id,
             task_id=submission.run.task_id,
-            uid=submission.validator.uid,
         )
     return None
 
@@ -185,7 +175,6 @@ __all__ = [
     "DeliveryRunInput",
     "DeliverySpecificsInput",
     "DeliverySubmissionInput",
-    "DeliveryValidatorInput",
     "ProviderFailureEvidence",
     "ValidatorDeliveryExclusion",
     "delivery_exclusion_from_completed_pair_results",

@@ -425,7 +425,6 @@ Body: [MinerTaskWorkResultsRequest](#model-minertaskworkresultsrequest)
 |  |  | `session` | req | [SessionModel](#model-sessionmodel) |
 |  |  | `specifics` | req | [EvaluationDetails](#model-evaluationdetails) |
 |  |  | `usage` | req | [UsageModel](#model-usagemodel) |
-|  |  | `validator` | req | [ValidatorSection](#model-validatorsection) |
 |  | `task_id` |  | req | `string` (format: uuid) |
 |  | `terminal_attempt` |  | req | [MinerTaskAttemptAuditPayload](#model-minertaskattemptauditpayload) |
 |  |  | `artifact_id` | req | `string` (format: uuid) |
@@ -3217,8 +3216,6 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `total_completion_tokens` |  | req | `integer` |
 |  | `total_prompt_tokens` |  | req | `integer` |
 |  | `total_tokens` |  | req | `integer` |
-| `validator` |  |  | req | [ValidatorSection](#model-validatorsection) |
-|  | `uid` |  | req | `integer` |
 
 <details>
 <summary>JSON schema</summary>
@@ -3264,14 +3261,10 @@ Body: [WeightsResponse](#model-weightsresponse)
     },
     "usage": {
       "$ref": "#/components/schemas/UsageModel"
-    },
-    "validator": {
-      "$ref": "#/components/schemas/ValidatorSection"
     }
   },
   "required": [
     "batch_id",
-    "validator",
     "run",
     "usage",
     "session",
@@ -3526,8 +3519,6 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `total_completion_tokens` | req | `integer` |
 |  |  | `total_prompt_tokens` | req | `integer` |
 |  |  | `total_tokens` | req | `integer` |
-|  | `validator` |  | req | [ValidatorSection](#model-validatorsection) |
-|  |  | `uid` | req | `integer` |
 | `task_id` |  |  | req | `string` (format: uuid) |
 | `terminal_attempt` |  |  | req | [MinerTaskAttemptAuditPayload](#model-minertaskattemptauditpayload) |
 |  | `artifact_id` |  | req | `string` (format: uuid) |
@@ -3711,7 +3702,6 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `session` | req | [SessionModel](#model-sessionmodel) |
 |  |  | `specifics` | req | [EvaluationDetails](#model-evaluationdetails) |
 |  |  | `usage` | req | [UsageModel](#model-usagemodel) |
-|  |  | `validator` | req | [ValidatorSection](#model-validatorsection) |
 |  | `task_id` |  | req | `string` (format: uuid) |
 |  | `terminal_attempt` |  | req | [MinerTaskAttemptAuditPayload](#model-minertaskattemptauditpayload) |
 |  |  | `artifact_id` | req | `string` (format: uuid) |
@@ -5547,34 +5537,6 @@ Body: [WeightsResponse](#model-weightsresponse)
     "type"
   ],
   "title": "ValidationError",
-  "type": "object"
-}
-```
-
-</details>
-
-<a id="model-validatorsection"></a>
-### Model: ValidatorSection
-
-| 1st level | 2nd level | 3rd level | Req | Notes |
-| --- | --- | --- | --- | --- |
-| `uid` |  |  | req | `integer` |
-
-<details>
-<summary>JSON schema</summary>
-
-```json
-{
-  "properties": {
-    "uid": {
-      "title": "Uid",
-      "type": "integer"
-    }
-  },
-  "required": [
-    "uid"
-  ],
-  "title": "ValidatorSection",
   "type": "object"
 }
 ```

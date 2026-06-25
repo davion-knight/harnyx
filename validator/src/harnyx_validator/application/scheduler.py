@@ -358,9 +358,7 @@ class EvaluationScheduler:
         max_attempts: int,
         assignment_token: str,
     ) -> PlatformOwnedTaskResult:
-        if self._activity is not None:
-            self._activity.mark_batch_started(batch_id)
-            self._activity.mark_artifact_started(batch_id, artifact.artifact_id)
+        self._mark_artifact_activity_started_best_effort(batch_id=batch_id, artifact_id=artifact.artifact_id)
         deployment: SandboxDeployment | None = None
         attempt_started_at = self._clock()
         try:
@@ -410,10 +408,15 @@ class EvaluationScheduler:
             )
         finally:
             if deployment is not None:
-                await _run_blocking_call(self._blocking_executor, self._sandboxes.stop, deployment)
-            if self._activity is not None:
-                self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
-                self._activity.mark_batch_finished(batch_id)
+                await self._stop_deployment_best_effort(
+                    deployment,
+                    batch_id=batch_id,
+                    artifact_id=artifact.artifact_id,
+                )
+            self._mark_artifact_activity_finished_best_effort(
+                batch_id=batch_id,
+                artifact_id=artifact.artifact_id,
+            )
 
     async def run_assigned_artifact_queue(
         self,
@@ -435,9 +438,7 @@ class EvaluationScheduler:
                 artifact_id=artifact.artifact_id,
             )
 
-        if self._activity is not None:
-            self._activity.mark_batch_started(batch_id)
-            self._activity.mark_artifact_started(batch_id, artifact.artifact_id)
+        self._mark_artifact_activity_started_best_effort(batch_id=batch_id, artifact_id=artifact.artifact_id)
         deployment: SandboxDeployment | None = None
         attempt_started_at = self._clock()
         try:
@@ -458,11 +459,7 @@ class EvaluationScheduler:
                 orchestrator=orchestrator,
             )
         except ArtifactExecutionFailedError as exc:
-            affected_assignments = (
-                assignments
-                if exc.error_code is not MinerTaskErrorCode.SCRIPT_VALIDATION_FAILED
-                else (*assignments, *_drain_assignment_queue(assignment_queue))
-            )
+            affected_assignments = (*assignments, *_drain_assignment_queue(assignment_queue))
             if exc.error_code is MinerTaskErrorCode.SCRIPT_VALIDATION_FAILED:
                 results = await self._runner.record_assigned_task_setup_failures(
                     batch_id=batch_id,
@@ -475,24 +472,29 @@ class EvaluationScheduler:
                     await result_queue.put(result)
                 return
 
-            first_assignment = affected_assignments[0]
+            representative = affected_assignments[0]
             await result_queue.put(
                 self._platform_result_from_artifact_setup_failure(
                     batch_id=batch_id,
                     artifact=artifact,
-                    task=first_assignment.task,
-                    attempt_number=first_assignment.attempt_number,
-                    max_attempts=first_assignment.max_attempts,
+                    task=representative.task,
+                    attempt_number=representative.attempt_number,
+                    max_attempts=representative.max_attempts,
                     started_at=attempt_started_at,
                     failure=exc,
                 )
             )
         finally:
             if deployment is not None:
-                await _run_blocking_call(self._blocking_executor, self._sandboxes.stop, deployment)
-            if self._activity is not None:
-                self._activity.mark_artifact_finished(batch_id, artifact.artifact_id)
-                self._activity.mark_batch_finished(batch_id)
+                await self._stop_deployment_best_effort(
+                    deployment,
+                    batch_id=batch_id,
+                    artifact_id=artifact.artifact_id,
+                )
+            self._mark_artifact_activity_finished_best_effort(
+                batch_id=batch_id,
+                artifact_id=artifact.artifact_id,
+            )
 
     async def _run_artifacts(
         self,
@@ -1090,8 +1092,7 @@ class EvaluationScheduler:
             max_attempts=max_attempts,
             execution_log=(),
         )
-        self._progress.record_terminated_attempt(attempt)
-        return PlatformOwnedTaskResult(
+        result = PlatformOwnedTaskResult(
             batch_id=batch_id,
             artifact_id=artifact.artifact_id,
             task_id=task.task_id,
@@ -1099,6 +1100,61 @@ class EvaluationScheduler:
             result=None,
             terminal_attempt=attempt,
         )
+        self._record_terminated_attempt_best_effort(result)
+        return result
+
+    async def _stop_deployment_best_effort(
+        self,
+        deployment: SandboxDeployment,
+        *,
+        batch_id: UUID,
+        artifact_id: UUID,
+    ) -> None:
+        try:
+            await _run_blocking_call(self._blocking_executor, self._sandboxes.stop, deployment)
+        except Exception:
+            logger.exception(
+                "assigned artifact sandbox teardown failed after result construction",
+                extra={"batch_id": str(batch_id), "artifact_id": str(artifact_id)},
+            )
+
+    def _mark_artifact_activity_started_best_effort(self, *, batch_id: UUID, artifact_id: UUID) -> None:
+        if self._activity is None:
+            return
+        try:
+            self._activity.mark_batch_started(batch_id)
+            self._activity.mark_artifact_started(batch_id, artifact_id)
+        except Exception:
+            logger.exception(
+                "assigned artifact activity start marker failed",
+                extra={"batch_id": str(batch_id), "artifact_id": str(artifact_id)},
+            )
+
+    def _mark_artifact_activity_finished_best_effort(self, *, batch_id: UUID, artifact_id: UUID) -> None:
+        if self._activity is None:
+            return
+        try:
+            self._activity.mark_artifact_finished(batch_id, artifact_id)
+            self._activity.mark_batch_finished(batch_id)
+        except Exception:
+            logger.exception(
+                "assigned artifact activity finalizer failed after result construction",
+                extra={"batch_id": str(batch_id), "artifact_id": str(artifact_id)},
+            )
+
+    def _record_terminated_attempt_best_effort(self, result: PlatformOwnedTaskResult) -> None:
+        try:
+            self._progress.record_terminated_attempt(result.terminal_attempt)
+        except Exception:
+            logger.exception(
+                "assigned artifact setup-failure progress write failed after result construction",
+                extra={
+                    "batch_id": str(result.batch_id),
+                    "artifact_id": str(result.artifact_id),
+                    "task_id": str(result.task_id),
+                    "attempt_number": result.attempt_number,
+                },
+            )
 
     def _artifact_execution_failure(
         self,

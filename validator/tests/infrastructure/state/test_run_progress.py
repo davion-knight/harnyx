@@ -116,7 +116,6 @@ def _make_submission(batch: MinerTaskBatchSpec, *, score: float = 1.0) -> MinerT
     )
     return MinerTaskRunSubmission(
         batch_id=batch.batch_id,
-        validator_uid=4,
         run=run,
         score=score,
         usage=TokenUsageSummary.empty(),
@@ -135,7 +134,6 @@ def _make_failed_submission(
     session_id = uuid4()
     return MinerTaskRunSubmission(
         batch_id=batch.batch_id,
-        validator_uid=4,
         run=MinerTaskRun(
             session_id=session_id,
             uid=artifact.uid,

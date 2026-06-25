@@ -29,11 +29,6 @@ class _Run:
 
 
 @dataclass(frozen=True, slots=True)
-class _Validator:
-    uid: int
-
-
-@dataclass(frozen=True, slots=True)
 class _Specifics:
     error: EvaluationError | None
 
@@ -41,7 +36,6 @@ class _Specifics:
 @dataclass(frozen=True, slots=True)
 class _Submission:
     run: _Run
-    validator: _Validator
     specifics: _Specifics
 
 
@@ -83,7 +77,6 @@ def test_delivery_exclusion_selects_first_validator_owned_completed_pair_failure
     completed_at = datetime(2026, 4, 29, 4, 1, tzinfo=UTC)
     validator_owned_artifact_id = uuid4()
     validator_owned_task_id = uuid4()
-    validator_uid = 42
 
     decision = delivery_exclusion_from_completed_pair_results(
         (
@@ -92,12 +85,10 @@ def test_delivery_exclusion_selects_first_validator_owned_completed_pair_failure
                 completed_at=completed_at,
                 artifact_id=validator_owned_artifact_id,
                 task_id=validator_owned_task_id,
-                validator_uid=validator_uid,
             ),
             _submission(
                 code=MinerTaskErrorCode.TIMEOUT_MINER_OWNED,
                 completed_at=completed_at,
-                validator_uid=validator_uid,
             ),
         ),
         observed_at=observed_at,
@@ -107,7 +98,6 @@ def test_delivery_exclusion_selects_first_validator_owned_completed_pair_failure
     assert decision.error.code is MinerTaskErrorCode.SANDBOX_INVOCATION_FAILED
     assert decision.artifact_id == validator_owned_artifact_id
     assert decision.task_id == validator_owned_task_id
-    assert decision.uid == validator_uid
     assert decision.occurred_at == completed_at
 
 
@@ -237,7 +227,6 @@ def _submission(
     completed_at: datetime | None = None,
     artifact_id: UUID | None = None,
     task_id: UUID | None = None,
-    validator_uid: int = 1,
 ) -> _Submission:
     return _Submission(
         run=_Run(
@@ -245,6 +234,5 @@ def _submission(
             artifact_id=artifact_id or uuid4(),
             task_id=task_id or uuid4(),
         ),
-        validator=_Validator(uid=validator_uid),
         specifics=_Specifics(error=EvaluationError(code=code, message=f"{code.value} happened")),
     )

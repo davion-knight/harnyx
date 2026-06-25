@@ -401,7 +401,6 @@ def test_submit_miner_task_work_results_serializes_run_execution_log() -> None:
         attempt_number=1,
         result=MinerTaskRunSubmission(
             batch_id=batch_id,
-            validator_uid=7,
             run=MinerTaskRun(
                 session_id=session_id,
                 uid=7,
@@ -446,6 +445,7 @@ def test_submit_miner_task_work_results_serializes_run_execution_log() -> None:
 
     assert seen_body is not None
     item = seen_body["results"][0]  # type: ignore[index]
+    assert "validator" not in item["result"]
     execution_log = item["result"]["execution_log"]
     assert len(execution_log) == 1
     assert execution_log[0]["receipt_id"] == "receipt-1"

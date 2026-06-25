@@ -107,7 +107,6 @@ def _make_submission_with_execution_log_bytes(
     )
     return MinerTaskRunSubmission(
         batch_id=batch.batch_id,
-        validator_uid=4,
         run=run,
         score=1.0,
         execution_log=(receipt,),

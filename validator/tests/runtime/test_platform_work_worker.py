@@ -377,6 +377,63 @@ async def test_worker_delivery_failure_clears_group_identities_and_frees_capacit
     assert worker._active_artifacts == {}
 
 
+async def test_worker_collects_all_results_before_clearing_closed_artifact_group() -> None:
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignments = tuple(
+        _assignment(batch_id=batch_id, artifact=artifact, task=_task(f"task-{index}"))
+        for index in range(2)
+    )
+    submitted: list[tuple[PlatformOwnedTaskResult, ...]] = []
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.requested = False
+
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[MinerTaskWorkAssignment, ...]:
+            if self.requested:
+                return ()
+            self.requested = True
+            return assignments
+
+        def submit_miner_task_work_results(
+            self,
+            results: tuple[PlatformOwnedTaskResult, ...],
+        ) -> tuple[PlatformTaskResultAcknowledgement, ...]:
+            submitted.append(results)
+            return tuple(_ack(result) for result in results)
+
+    async def finishing_executor(
+        _artifact_id: UUID,
+        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        _close_requested: asyncio.Event,
+        result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        while not assignment_queue.empty():
+            assignment = await assignment_queue.get()
+            await result_queue.put(_platform_result(assignment=assignment))
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=finishing_executor,
+        target_concurrency=2,
+        max_active_artifacts=1,
+    )
+
+    await worker.run_once()
+    await asyncio.wait_for(next(iter(worker._active_artifacts.values())).task, timeout=1)
+    await worker.run_once()
+
+    assert len(submitted) == 1
+    assert {result.task_id for result in submitted[0]} == {assignment.task.task_id for assignment in assignments}
+    assert all(
+        result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+        for result in submitted[0]
+    )
+    assert worker._active_artifacts == {}
+    assert worker._pending_results == []
+
+
 async def _unexpected_execute_artifact_assignments(*args: object, **kwargs: object) -> None:
     raise AssertionError("worker must not execute assignments in this test")
 

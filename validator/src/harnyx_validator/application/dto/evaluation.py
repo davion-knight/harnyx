@@ -183,7 +183,6 @@ class MinerTaskRunSubmission(BaseModel):
     """Payload persisted when a miner task run is recorded."""
 
     batch_id: UUID
-    validator_uid: int = Field(ge=0)
     run: MinerTaskRun
     score: float = Field(ge=0.0, le=1.0)
     execution_log: tuple[ToolCall, ...] = ()

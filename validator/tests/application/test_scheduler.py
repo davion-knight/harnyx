@@ -244,6 +244,11 @@ class DummyProgressRecorder:
         return None
 
 
+class FailingTerminatedAttemptProgressRecorder(DummyProgressRecorder):
+    def record_terminated_attempt(self, attempt: MinerTaskAttemptAuditRecord) -> None:
+        raise RuntimeError("terminated attempt progress write failed")
+
+
 def _task(text: str, *, budget_usd: float = 0.05) -> MinerTask:
     return MinerTask(
         task_id=uuid4(),
@@ -308,7 +313,6 @@ def _llm_receipt(
 def _submission_for_task(
     *,
     batch_id: UUID,
-    validator_uid: int,
     artifact: ScriptArtifactSpec,
     task: MinerTask,
     error: EvaluationError | None = None,
@@ -344,7 +348,6 @@ def _submission_for_task(
         )
         return MinerTaskRunSubmission(
             batch_id=batch_id,
-            validator_uid=validator_uid,
             run=run,
             score=1.0,
             usage=TokenUsageSummary.empty(),
@@ -364,7 +367,6 @@ def _submission_for_task(
     )
     return MinerTaskRunSubmission(
         batch_id=batch_id,
-        validator_uid=validator_uid,
         run=run,
         score=0.0,
         usage=TokenUsageSummary.empty(),
@@ -527,7 +529,6 @@ async def test_scheduler_caps_task_sessions_across_whole_batch(
                 submissions=tuple(
                     _submission_for_task(
                         batch_id=batch_id,
-                        validator_uid=41,
                         artifact=artifact,
                         task=task,
                     )
@@ -590,13 +591,11 @@ async def test_scheduler_flattens_runs_in_requested_artifact_order_when_completi
     second_artifact = ScriptArtifactSpec(uid=5, artifact_id=uuid4(), content_hash="b", size_bytes=0)
     first_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=first_artifact,
         task=task,
     )
     second_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=second_artifact,
         task=task,
     )
@@ -655,19 +654,16 @@ async def test_scheduler_refills_artifact_slots_without_waiting_for_all_started_
     third_artifact = ScriptArtifactSpec(uid=7, artifact_id=uuid4(), content_hash="c", size_bytes=0)
     first_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=first_artifact,
         task=task,
     )
     second_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=second_artifact,
         task=task,
     )
     third_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=third_artifact,
         task=task,
     )
@@ -763,7 +759,6 @@ async def test_scheduler_stops_dequeuing_queued_artifacts_when_validator_failure
         failure_discovered = asyncio.Event()
         successful_submission = _submission_for_task(
             batch_id=batch_id,
-            validator_uid=41,
             artifact=second_artifact,
             task=task,
         )
@@ -939,7 +934,6 @@ async def test_scheduler_logs_teardown_failure_timing_summary(
     batch_id = uuid4()
     successful_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=tasks[0],
     )
@@ -1171,7 +1165,6 @@ async def test_scheduler_logs_partial_progress_for_unexpected_failure(
     batch_id = uuid4()
     completed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=completed_task,
     )
@@ -1309,13 +1302,11 @@ async def test_scheduler_logs_accounted_summary_for_validator_batch_failure_afte
     batch_id = uuid4()
     completed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=completed_task,
     )
     failed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=unresolved_task,
         error=EvaluationError(code="sandbox_invocation_failed", message="sandbox failed"),
@@ -1407,13 +1398,11 @@ async def test_scheduler_preserves_validator_batch_failure_after_partial_progres
     batch_id = uuid4()
     completed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=completed_task,
     )
     failed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=unresolved_task,
         error=EvaluationError(code="sandbox_invocation_failed", message="sandbox failed"),
@@ -1811,6 +1800,243 @@ async def test_scheduler_returns_pair_results_for_assigned_artifact_script_valid
     )
 
 
+async def test_scheduler_returns_single_delivery_failure_for_assigned_artifact_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    tasks = (_task("first"), _task("second"))
+    now = datetime(2025, 10, 27, tzinfo=UTC)
+    progress = DummyProgressRecorder()
+    scheduler = EvaluationScheduler(
+        tasks=tasks,
+        subtensor_client=FakeSubtensorClient(),
+        sandbox_manager=DummySandboxManager(),
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=DummyReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=lambda _client: object(),
+        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        clock=lambda: now,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        progress=progress,
+    )
+    artifact = ScriptArtifactSpec(
+        uid=3,
+        artifact_id=uuid4(),
+        content_hash="a",
+        size_bytes=0,
+        miner_hotkey_ss58="miner-hotkey",
+    )
+    batch_id = uuid4()
+    first_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=tasks[0],
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN_1,
+    )
+    second_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=tasks[1],
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN_2,
+    )
+    assignment_queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
+    assignment_queue.put_nowait(second_assignment)
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    async def fail_setup(**kwargs):
+        _ = kwargs
+        raise ArtifactExecutionFailedError(
+            error_code=MinerTaskErrorCode.SANDBOX_START_FAILED,
+            message="artifact setup failed",
+            failure_detail=ValidatorBatchFailureDetail(
+                error_code="sandbox_start_failed",
+                error_message="artifact setup failed",
+                occurred_at=now,
+                artifact_id=artifact.artifact_id,
+                uid=artifact.uid,
+            ),
+            completed_submissions=(),
+            remaining_tasks=tasks,
+        )
+
+    monkeypatch.setattr(scheduler, "_start_artifact_with_retry", fail_setup)
+
+    await scheduler.run_assigned_artifact_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(first_assignment,),
+        assignment_queue=assignment_queue,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+    )
+
+    result = result_queue.get_nowait()
+    assert result_queue.empty()
+    assert assignment_queue.empty()
+    assert result.task_id in {task.task_id for task in tasks}
+    assert result.result is None
+    assert result.terminal_attempt.error_code == "sandbox_start_failed"
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert progress.next_attempt_number(batch_id, artifact.artifact_id, result.task_id) == 2
+
+
+async def test_scheduler_assigned_setup_failure_survives_progress_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    task = _task("assigned")
+    now = datetime(2025, 10, 27, tzinfo=UTC)
+    scheduler = EvaluationScheduler(
+        tasks=(task,),
+        subtensor_client=FakeSubtensorClient(),
+        sandbox_manager=DummySandboxManager(),
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=DummyReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=lambda _client: object(),
+        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        clock=lambda: now,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        progress=FailingTerminatedAttemptProgressRecorder(),
+    )
+    artifact = ScriptArtifactSpec(
+        uid=3,
+        artifact_id=uuid4(),
+        content_hash="a",
+        size_bytes=0,
+        miner_hotkey_ss58="miner-hotkey",
+    )
+
+    async def fail_setup(**kwargs):
+        _ = kwargs
+        raise ArtifactExecutionFailedError(
+            error_code=MinerTaskErrorCode.SANDBOX_START_FAILED,
+            message="artifact setup failed",
+            failure_detail=ValidatorBatchFailureDetail(
+                error_code="sandbox_start_failed",
+                error_message="artifact setup failed",
+                occurred_at=now,
+                artifact_id=artifact.artifact_id,
+                uid=artifact.uid,
+            ),
+            completed_submissions=(),
+            remaining_tasks=(task,),
+        )
+
+    monkeypatch.setattr(scheduler, "_start_artifact_with_retry", fail_setup)
+
+    result = await scheduler.run_assigned_task(
+        batch_id=uuid4(),
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+
+    assert result.result is None
+    assert result.terminal_attempt.error_code == "sandbox_start_failed"
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+
+
+async def test_scheduler_assigned_results_survive_teardown_and_activity_failures(
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    task = _task("teardown")
+    now = datetime(2025, 10, 27, tzinfo=UTC)
+
+    class FailingStopSandboxManager(DummySandboxManager):
+        def stop(self, deployment: SandboxDeployment) -> None:
+            super().stop(deployment)
+            raise RuntimeError("sandbox stop failed")
+
+    class FailingActivity:
+        def mark_batch_started(self, _batch_id: UUID) -> None:
+            raise RuntimeError("batch start failed")
+
+        def mark_artifact_started(self, _batch_id: UUID, _artifact_id: UUID) -> None:
+            raise RuntimeError("artifact start failed")
+
+        def mark_artifact_finished(self, _batch_id: UUID, _artifact_id: UUID) -> None:
+            raise RuntimeError("artifact finish failed")
+
+        def mark_batch_finished(self, _batch_id: UUID) -> None:
+            raise RuntimeError("batch finish failed")
+
+    def orchestrator_factory(_client: object):
+        class StubOrchestrator:
+            async def evaluate(self, request):
+                return TaskRunOutcome(
+                    run=MinerTaskRun(
+                        session_id=request.session_id,
+                        uid=request.uid,
+                        artifact_id=request.artifact_id,
+                        task_id=request.task.task_id,
+                        response=Response(text="answer"),
+                        details=EvaluationDetails(
+                            score_breakdown=ScoreBreakdown(
+                                comparison_score=1.0,
+                                total_score=1.0,
+                                scoring_version="v1",
+                            ),
+                            total_tool_usage=ToolUsageSummary.zero(),
+                        ),
+                        completed_at=now,
+                    ),
+                    usage=TokenUsageSummary.empty(),
+                )
+
+        return StubOrchestrator()
+
+    scheduler = EvaluationScheduler(
+        tasks=(task,),
+        subtensor_client=FakeSubtensorClient(),
+        sandbox_manager=FailingStopSandboxManager(),
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=DummyReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=orchestrator_factory,
+        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        clock=lambda: now,
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        progress=DummyProgressRecorder(),
+        activity=FailingActivity(),
+    )
+    artifact = ScriptArtifactSpec(uid=3, artifact_id=uuid4(), content_hash="a", size_bytes=0)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=uuid4(),
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+    close_requested = asyncio.Event()
+    close_requested.set()
+
+    await scheduler.run_assigned_artifact_queue(
+        batch_id=assignment.batch_id,
+        artifact=artifact,
+        initial_assignments=(assignment,),
+        assignment_queue=asyncio.Queue(),
+        close_requested=close_requested,
+        result_queue=result_queue,
+    )
+
+    result = result_queue.get_nowait()
+    assert result.result is not None
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+
+
 async def test_scheduler_logs_partial_progress_for_validator_batch_failure(
     monkeypatch: pytest.MonkeyPatch,
     blocking_executor: ThreadPoolExecutor,
@@ -1854,7 +2080,6 @@ async def test_scheduler_logs_partial_progress_for_validator_batch_failure(
     batch_id = uuid4()
     completed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=completed_task,
     )
@@ -2414,20 +2639,17 @@ async def test_scheduler_stops_after_conclusive_failure_outcome_without_running_
     second_artifact = ScriptArtifactSpec(uid=8, artifact_id=uuid4(), content_hash="b", size_bytes=0)
     successful_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=first_artifact,
         task=successful_task,
     )
     failed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=first_artifact,
         task=failed_task,
         error=EvaluationError(code="sandbox_invocation_failed", message="shared sandbox failure"),
     )
     later_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=second_artifact,
         task=successful_task,
     )

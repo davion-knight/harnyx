@@ -122,9 +122,15 @@ class _FailingTerminatedAttemptProgress(FileBackedRunProgress):
         raise RuntimeError("terminated attempt progress write failed")
 
 
+class _ExplodingValidatorInfoSubtensorClient(FakeSubtensorClient):
+    def validator_info(self) -> ValidatorNodeInfo:
+        raise AssertionError("assigned task result construction must not read validator UID")
+
+
 def _assigned_task_test_context(
     tmp_path: Path,
     *,
+    subtensor: FakeSubtensorClient | None = None,
     progress: FileBackedRunProgress | None = None,
     evaluation_records: _RecordingEvaluationStore | None = None,
     clock: _ClockSequence | None = None,
@@ -138,7 +144,7 @@ def _assigned_task_test_context(
     FileBackedRunProgress,
     _RecordingEvaluationStore,
 ]:
-    subtensor = FakeSubtensorClient()
+    subtensor = FakeSubtensorClient() if subtensor is None else subtensor
     subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
     session_registry = FakeSessionRegistry()
     session_manager = SessionManager(session_registry, InMemoryTokenRegistry())
@@ -279,7 +285,6 @@ def _successful_outcome(
 def _submission_for_task(
     *,
     batch_id,
-    validator_uid: int,
     artifact: ScriptArtifactSpec,
     task: MinerTask,
     error: EvaluationError | None = None,
@@ -315,7 +320,6 @@ def _submission_for_task(
         )
         return MinerTaskRunSubmission(
             batch_id=batch_id,
-            validator_uid=validator_uid,
             run=run,
             score=1.0,
             usage=TokenUsageSummary.empty(),
@@ -335,7 +339,6 @@ def _submission_for_task(
     )
     return MinerTaskRunSubmission(
         batch_id=batch_id,
-        validator_uid=validator_uid,
         run=run,
         score=0.0,
         usage=TokenUsageSummary.empty(),
@@ -465,6 +468,178 @@ async def test_evaluate_assigned_task_queue_drains_same_tick_results_before_deli
         MinerTaskAttemptTerminalEffect.TASK_RESULT,
     }
     assert result_queue.empty()
+
+
+async def test_evaluate_assigned_task_queue_converts_task_exception_and_drains_same_tick_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = EvaluationRunner(
+        subtensor_client=FakeSubtensorClient(),
+        session_manager=SessionManager(FakeSessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=_RecordingEvaluationStore(),
+        receipt_log=FakeReceiptLog(),
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=lambda: datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+        progress=_progress(tmp_path),
+    )
+    batch_id = uuid4()
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+    )
+    failed_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="raises"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    completed_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="completed"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    failed_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=failed_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_FAILED_ASSIGNMENT_TOKEN,
+    )
+    completed_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=completed_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_COMPLETED_ASSIGNMENT_TOKEN,
+    )
+
+    async def evaluate_assigned_task(**kwargs):
+        if kwargs["task"].task_id == failed_task.task_id:
+            raise RuntimeError("assignment exploded")
+        return _platform_owned_task_result(
+            completed_assignment,
+            terminal_effect=MinerTaskAttemptTerminalEffect.TASK_RESULT,
+        )
+
+    monkeypatch.setattr(runner, "evaluate_assigned_task", evaluate_assigned_task)
+
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(failed_assignment, completed_assignment),
+        assignment_queue=asyncio.Queue(),
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, object()),
+    )
+
+    results = (result_queue.get_nowait(), result_queue.get_nowait())
+    assert {result.task_id for result in results} == {failed_task.task_id, completed_task.task_id}
+    failure_result = next(result for result in results if result.task_id == failed_task.task_id)
+    assert failure_result.result is None
+    assert failure_result.terminal_attempt.error_code == str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE)
+    assert failure_result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    success_result = next(result for result in results if result.task_id == completed_task.task_id)
+    assert success_result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    assert result_queue.empty()
+
+
+async def test_evaluation_runner_assigned_success_does_not_read_validator_uid(tmp_path: Path) -> None:
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(
+        tmp_path,
+        subtensor=_ExplodingValidatorInfoSubtensorClient(),
+    )
+
+    result = await runner.evaluate_assigned_task(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        orchestrator=cast(TaskRunOrchestrator, _SuccessfulOrchestrator()),
+    )
+
+    assert result.result is not None
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+
+
+async def test_evaluation_runner_assigned_delivery_failure_does_not_read_validator_uid(tmp_path: Path) -> None:
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(
+        tmp_path,
+        subtensor=_ExplodingValidatorInfoSubtensorClient(),
+    )
+
+    result = await runner.evaluate_assigned_task(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        orchestrator=cast(TaskRunOrchestrator, _ScoringRetryExhaustedOrchestrator()),
+    )
+
+    assert result.result is None
+    assert result.terminal_attempt.error_code == "scoring_llm_retry_exhausted"
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+
+
+async def test_evaluation_runner_assigned_pre_session_failure_returns_delivery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(tmp_path)
+
+    def fail_issue_session(**_kwargs):
+        raise RuntimeError("session issue failed")
+
+    monkeypatch.setattr(runner, "_issue_session", fail_issue_session)
+
+    result = await runner.evaluate_assigned_task(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        orchestrator=cast(TaskRunOrchestrator, _SuccessfulOrchestrator()),
+    )
+
+    assert result.result is None
+    assert result.terminal_attempt.status is MinerTaskAttemptStatus.FAILED
+    assert result.terminal_attempt.error_code == str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE)
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+
+
+async def test_evaluation_runner_assigned_result_survives_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(tmp_path)
+
+    def fail_cleanup(_session_id: UUID) -> None:
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(runner, "_cleanup_attempt_session", fail_cleanup)
+
+    result = await runner.evaluate_assigned_task(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        orchestrator=cast(TaskRunOrchestrator, _SuccessfulOrchestrator()),
+    )
+
+    assert result.result is not None
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
 
 
 def test_usage_summarizer_falls_back_to_referenceable_result_count_when_search_cost_is_missing() -> None:
@@ -1653,7 +1828,6 @@ async def test_evaluation_runner_records_exhausted_submission(tmp_path: Path) ->
     )
     assert len(result.submissions) == 1
     submission = result.submissions[0]
-    assert submission.validator_uid == 41
     assert submission.score == 0.0
     assert submission.session.status is SessionStatus.EXHAUSTED
     assert submission.run.response is None
@@ -1833,6 +2007,51 @@ async def test_evaluation_runner_assigned_task_returns_platform_result_when_term
         result=result,
         exception_type="RuntimeError",
         local_write_target="progress.record_terminated_attempt",
+    )
+
+
+async def test_evaluation_runner_assigned_setup_failure_returns_platform_result_when_progress_recording_fails(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="harnyx_validator.scheduler")
+    progress = _FailingSubmissionProgress(storage_root=tmp_path / "run-progress")
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(
+        tmp_path,
+        progress=progress,
+    )
+
+    results = await runner.record_assigned_task_setup_failures(
+        batch_id=batch_id,
+        artifact=artifact,
+        assignments=(
+            MinerTaskWorkAssignment(
+                batch_id=batch_id,
+                artifact=artifact,
+                task=task,
+                attempt_number=1,
+                max_attempts=1,
+                assignment_token=_ASSIGNMENT_TOKEN,
+            ),
+        ),
+        error_code=MinerTaskErrorCode.SCRIPT_VALIDATION_FAILED,
+        error_message="script validation failed",
+    )
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.result is not None
+    assert result.result.run.details.error is not None
+    assert result.result.run.details.error.code == "script_validation_failed"
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    _assert_local_recording_warning(
+        caplog,
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        result=result,
+        exception_type="RuntimeError",
+        local_write_target="progress.record",
     )
 
 
@@ -4344,7 +4563,6 @@ async def test_evaluate_artifact_with_state_preserves_earlier_submissions_for_co
     )
     earlier_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=earlier_task,
     )
@@ -4414,7 +4632,6 @@ async def test_evaluate_artifact_with_state_preserves_partial_submissions_for_va
     )
     completed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=completed_task,
     )
@@ -4490,7 +4707,6 @@ async def test_evaluate_artifact_with_state_preserves_partial_submissions_for_un
     )
     completed_submission = _submission_for_task(
         batch_id=batch_id,
-        validator_uid=41,
         artifact=artifact,
         task=completed_task,
     )

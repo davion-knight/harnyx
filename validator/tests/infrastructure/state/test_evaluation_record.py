@@ -63,7 +63,6 @@ def _make_submission(
 
     return MinerTaskRunSubmission(
         batch_id=batch_id or uuid4(),
-        validator_uid=4,
         run=run,
         score=score,
         execution_log=(

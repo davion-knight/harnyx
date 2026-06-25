@@ -570,7 +570,6 @@ def _platform_task_result_payload(result: PlatformOwnedTaskResult) -> JsonObject
 def _run_submission_payload(submission: Any) -> JsonObject:
     return {
         "batch_id": str(submission.batch_id),
-        "validator": {"uid": submission.validator_uid},
         "run": {
             "artifact_id": str(submission.run.artifact_id),
             "task_id": str(submission.run.task_id),

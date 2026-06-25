@@ -144,7 +144,6 @@ def _submission(
     completed_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
     return MinerTaskRunSubmission(
         batch_id=batch_id,
-        validator_uid=0,
         run=MinerTaskRun(
             session_id=uuid4(),
             uid=artifact.uid,
