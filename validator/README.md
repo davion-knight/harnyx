@@ -9,7 +9,7 @@ Before starting, ensure you have:
 1. **Docker** installed and running (Docker Compose v2+)
 2. **A Bittensor wallet/hotkey** registered on the subnet metagraph
 3. **A public endpoint** reachable by the platform (for registration + evaluation callbacks)
-4. **API key** for validator scoring/similarity LLM calls (see env vars below)
+4. **API key** for validator pairwise scoring and similarity LLM calls (see env vars below)
 
 ### Hardware + networking (quick sizing)
 
@@ -17,7 +17,7 @@ Before starting, ensure you have:
 - RAM: 32 GiB
 - Disk: 20 GB
 - Network: platform must reach your validator on TCP 8100; set `VALIDATOR_PUBLIC_BASE_URL` accordingly
-- Third-party APIs: Chutes (`CHUTES_API_KEY`) for validator scoring/similarity by default; provider-backed miner script tools use miner-stored credentials through platform tool proxy.
+- Third-party APIs: Chutes (`CHUTES_API_KEY`) for validator pairwise scoring and similarity by default; provider-backed miner script tools use miner-stored credentials through platform tool proxy.
 
 ## Step 1: Create your env file
 
@@ -33,12 +33,23 @@ Edit `.env` and set at least:
 |----------|-------------|
 | `PLATFORM_BASE_URL` | Platform API endpoint (finney/mainnet: `https://api.harnyx.ai`, testnet: `https://api.staging.harnyx.ai`) |
 | `VALIDATOR_PUBLIC_BASE_URL` | How the platform can reach your validator |
-| `CHUTES_API_KEY` | API key for the default validator scoring/similarity provider |
-| `SCORING_LLM_PROVIDER` | Optional scoring/similarity provider selector; defaults to `chutes` |
-| `SCORING_LLM_RETRY_ATTEMPTS` | Optional scoring/similarity LLM request retry attempts; defaults to `6` |
-| `SCORING_LLM_RETRY_INITIAL_MS` | Optional scoring/similarity LLM request retry initial backoff; defaults to `30000` |
-| `SCORING_LLM_RETRY_MAX_MS` | Optional scoring/similarity LLM request retry maximum backoff; defaults to `300000` |
-| `SCORING_LLM_RETRY_JITTER` | Optional scoring/similarity LLM request retry jitter ratio; defaults to `0.2` |
+| `CHUTES_API_KEY` | API key for the default validator pairwise scoring and similarity provider |
+| `SCORING_LLM_PROVIDER` | Optional pairwise scoring provider selector; defaults to `chutes` |
+| `SCORING_LLM_TEMPERATURE` | Optional pairwise scoring request temperature; defaults to provider default |
+| `SCORING_LLM_TIMEOUT_SECONDS` | Optional pairwise scoring LLM request timeout; defaults to `300` |
+| `SCORING_LLM_MAX_OUTPUT_TOKENS` | Optional pairwise scoring max output tokens; defaults to `20480` |
+| `SCORING_LLM_RETRY_ATTEMPTS` | Optional pairwise scoring LLM request retry attempts; defaults to `6` |
+| `SCORING_LLM_RETRY_INITIAL_MS` | Optional pairwise scoring LLM request retry initial backoff; defaults to `30000` |
+| `SCORING_LLM_RETRY_MAX_MS` | Optional pairwise scoring LLM request retry maximum backoff; defaults to `300000` |
+| `SCORING_LLM_RETRY_JITTER` | Optional pairwise scoring LLM request retry jitter ratio; defaults to `0.2` |
+| `SIMILARITY_LLM_PROVIDER` | Optional duplicate-preflight similarity provider selector; defaults to `chutes` |
+| `SIMILARITY_LLM_TEMPERATURE` | Optional duplicate-preflight similarity request temperature; defaults to provider default |
+| `SIMILARITY_LLM_TIMEOUT_SECONDS` | Optional duplicate-preflight similarity LLM request timeout; defaults to `300` |
+| `SIMILARITY_LLM_MAX_OUTPUT_TOKENS` | Optional duplicate-preflight similarity max output tokens; defaults to `20480` |
+| `SIMILARITY_LLM_RETRY_ATTEMPTS` | Optional duplicate-preflight similarity LLM request retry attempts; defaults to `1` |
+| `SIMILARITY_LLM_RETRY_INITIAL_MS` | Optional duplicate-preflight similarity LLM request retry initial backoff; defaults to `0` |
+| `SIMILARITY_LLM_RETRY_MAX_MS` | Optional duplicate-preflight similarity LLM request retry maximum backoff; defaults to `0` |
+| `SIMILARITY_LLM_RETRY_JITTER` | Optional duplicate-preflight similarity LLM request retry jitter ratio; defaults to `0.0` |
 
 The defaults in `.env.example` already target mainnet (`finney`) and netuid `67`. Validator sandbox execution defaults to `harnyx/harnyx-subnet-sandbox:finney`; set `SANDBOX_IMAGE=harnyx/harnyx-subnet-sandbox:testnet` for staging/testnet, or use another explicit value only when you intentionally want to test or pin a different sandbox image. Validator miner-task execution uses fixed runtime concurrency: 4 concurrent artifact sandboxes and 20 task-attempt slots across active artifacts.
 
@@ -46,15 +57,11 @@ Provider-backed miner script tools execute through platform tool proxy with mine
 
 Completed-run execution logs are stored under the validator state volume for local audit and troubleshooting. The platform does not drain validator `/runs` pages for active miner-task lifecycle progress; it owns assignment, result acceptance, delivery projection, and finalization. `VALIDATOR_RUN_PROGRESS_RETENTION_SECONDS` controls how long terminal local progress blobs are retained before cleanup; it defaults to 24 hours. `VALIDATOR_RUN_PROGRESS_CLEANUP_INTERVAL_SECONDS` controls the idle cleanup cadence and defaults to 10 minutes.
 
-Validator scoring keeps `SCORING_LLM_PROVIDER` configurable, but the primary scoring model contract is fixed in code to `google/gemma-4-31B-turbo-TEE` with `reasoning_effort="high"`. Scoring/similarity uses `SCORING_LLM_RETRY_*` for the LLM request retry loop, including retryable provider errors, response verification failures, and structured-output repair retries; exhausting that policy records `scoring_llm_retry_exhausted` and does not schedule a new miner task attempt. If the primary candidate exhausts provider retries, scoring tries `moonshotai/Kimi-K2.5-TEE` and then `zai-org/GLM-5-TEE`; non-retryable provider failures fail fast. Validators without `LLM_MODEL_PROVIDER_OVERRIDES_JSON.scoring` use the configured `SCORING_LLM_PROVIDER`, which defaults to Chutes. The pairwise scoring prompt, request shape, fallback loop, and score mapping live in `public/packages/commons/src/harnyx_commons/miner_task_scoring.py`; validator runtime code wires providers, sandbox execution, and submission flow.
+Validator pairwise scoring keeps `SCORING_LLM_PROVIDER` configurable, but the primary scoring model contract is fixed in code to `google/gemma-4-31B-turbo-TEE` with `reasoning_effort="high"`. Pairwise scoring uses `SCORING_LLM_RETRY_*` for the LLM request retry loop, including retryable provider errors, response verification failures, and structured-output repair retries; exhausting that policy records `scoring_llm_retry_exhausted` and does not schedule a new miner task attempt. If the primary candidate exhausts provider retries, scoring tries `moonshotai/Kimi-K2.5-TEE` and then `zai-org/GLM-5-TEE`; non-retryable provider failures fail fast. Validators use the configured `SCORING_LLM_PROVIDER`, which defaults to Chutes. The pairwise scoring prompt, request shape, fallback loop, and score mapping live in `public/packages/commons/src/harnyx_commons/miner_task_scoring.py`; validator runtime code wires providers, sandbox execution, and submission flow.
 
-Post-dethrone similarity judging keeps its existing Gemma 4 -> Kimi K2.5 -> GLM5 order and is routed through the `duplication_detection` surface in `LLM_MODEL_PROVIDER_OVERRIDES_JSON`. The platform computes the dethrone order and sends the original incumbent script plus candidate diff to validators; validators own the similarity prompt internally and return a duplicate/not-duplicate verdict with provider reasoning metadata.
+Duplicate-preflight similarity judging uses `SIMILARITY_LLM_*` for provider, temperature, timeout, output tokens, and retry policy. The default primary model remains `google/gemma-4-31B-turbo-TEE`, followed by `moonshotai/Kimi-K2.5-TEE` and then `zai-org/GLM-5-TEE` if the current candidate exhausts provider retries. The platform computes the duplicate-preflight order and sends the original incumbent script plus candidate diff to validators; validators own the similarity prompt internally and return a duplicate/not-duplicate verdict with provider reasoning metadata.
 
-Shared route override variables may still appear in internal/local tooling deployments, including miner local eval, but they are not validator server miner-task provider credential requirements.
-
-## See also
-
-- Decision: Gemma 4 primary scoring order: [`.docs/decisions/2026-06-25-gemma4-primary-scoring-order.md`](../../.docs/decisions/2026-06-25-gemma4-primary-scoring-order.md)
+Internal route controls may still appear in internal/local tooling deployments, including miner local eval, but they are not validator server miner-task provider credential requirements.
 
 ### Optional Sentry
 

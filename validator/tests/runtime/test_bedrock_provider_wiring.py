@@ -70,6 +70,7 @@ def _settings() -> Settings:
             parallel_api_key=SecretStr("parallel-key"),
             tool_llm_provider="chutes",
             scoring_llm_provider="vertex",
+            similarity_llm_provider="chutes",
             chutes_api_key=SecretStr("test-key"),
         ),
         bedrock=BedrockSettings.model_construct(
@@ -252,7 +253,8 @@ def test_validator_runtime_routes_primary_scoring_gemma_to_custom_endpoint(
     assert clients.scoring_route.model == bootstrap._SCORING_LLM_MODEL
 
 
-def test_validator_runtime_allows_duplication_detection_override_to_bedrock(
+@pytest.mark.anyio("asyncio")
+async def test_validator_runtime_routes_primary_similarity_gemma_to_custom_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _settings()
@@ -260,9 +262,65 @@ def test_validator_runtime_allows_duplication_detection_override_to_bedrock(
         update={
             "llm": settings.llm.model_copy(
                 update={
+                    "similarity_llm_provider": "bedrock",
                     "llm_model_provider_overrides_json": json.dumps(
-                        {"duplication_detection": {bootstrap._DUPLICATION_DETECTION_LLM_MODEL: "bedrock"}}
+                        {
+                            "duplication_detection": {
+                                bootstrap._DUPLICATION_DETECTION_LLM_MODEL: (
+                                    "custom-openai-compatible:gemma4-cloud-run-turbo"
+                                )
+                            }
+                        }
                     ),
+                    "openai_compatible_endpoints_json": json.dumps(
+                        [
+                            {
+                                "id": "gemma4-cloud-run-turbo",
+                                "base_url": "https://gemma-4-31b-turbo-obbrpx3ppa-uc.a.run.app/v1",
+                                "auth": {"type": "none"},
+                            }
+                        ]
+                    ),
+                }
+            )
+        }
+    )
+
+    registry = _FakeRegistry()
+    monkeypatch.setattr(bootstrap, "build_cached_llm_provider_registry", lambda **_: registry)
+
+    clients = _build_llm_clients(settings)
+    response = await clients.similarity_llm_provider.invoke(
+        LlmRequest(
+            provider=settings.llm.similarity_llm_provider,
+            model=bootstrap._DUPLICATION_DETECTION_LLM_MODEL,
+            messages=(),
+            temperature=None,
+            max_output_tokens=128,
+        )
+    )
+
+    assert _routed_surface(clients.similarity_llm_provider) == "duplication_detection"
+    assert clients.similarity_route.provider == "custom-openai-compatible:gemma4-cloud-run-turbo"
+    assert clients.similarity_route.model == bootstrap._DUPLICATION_DETECTION_LLM_MODEL
+    assert registry.provider.requests[0].provider == "custom-openai-compatible:gemma4-cloud-run-turbo"
+    assert registry.provider.requests[0].model == bootstrap._DUPLICATION_DETECTION_LLM_MODEL
+    assert response.metadata is not None
+    assert response.metadata["selected_provider"] == "custom-openai-compatible:gemma4-cloud-run-turbo"
+    assert response.metadata["selected_model"] == bootstrap._DUPLICATION_DETECTION_LLM_MODEL
+
+
+def test_validator_runtime_routes_similarity_default_provider_independently_from_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings()
+    settings = settings.model_copy(
+        update={
+            "llm": settings.llm.model_copy(
+                update={
+                    "scoring_llm_provider": "vertex",
+                    "similarity_llm_provider": "chutes",
+                    "llm_model_provider_overrides_json": None,
                 }
             )
         }
@@ -272,6 +330,7 @@ def test_validator_runtime_allows_duplication_detection_override_to_bedrock(
 
     clients = _build_llm_clients(settings)
 
+    assert _routed_surface(clients.scoring_llm_provider) == "scoring"
     assert _routed_surface(clients.similarity_llm_provider) == "duplication_detection"
-    assert clients.similarity_route.provider == "bedrock"
-    assert clients.similarity_route.model == bootstrap._DUPLICATION_DETECTION_LLM_MODEL
+    assert clients.scoring_route.provider == "vertex"
+    assert clients.similarity_route.provider == "chutes"

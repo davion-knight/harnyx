@@ -525,7 +525,7 @@ def _build_llm_clients(settings: Settings) -> RuntimeLlmClients:
     )
     similarity_provider = build_routed_llm_provider(
         surface="duplication_detection",
-        default_provider=settings.llm.scoring_llm_provider,
+        default_provider=settings.llm.similarity_llm_provider,
         llm_settings=settings.llm,
         allowed_providers={"bedrock", "chutes", "vertex"},
         allow_custom_openai_compatible=True,
@@ -565,12 +565,19 @@ def _effective_scoring_llm_model(settings: Settings) -> str:
 def _resolve_similarity_judge_route(settings: Settings) -> ResolvedLlmRoute:
     return resolve_llm_route(
         surface="duplication_detection",
-        default_provider=settings.llm.scoring_llm_provider,
-        model=_DUPLICATION_DETECTION_LLM_MODEL,
+        default_provider=settings.llm.similarity_llm_provider,
+        model=_effective_similarity_llm_model(settings),
         overrides=settings.llm.llm_model_provider_overrides,
         allowed_providers={"bedrock", "chutes", "vertex"},
         allow_custom_openai_compatible=True,
     )
+
+
+def _effective_similarity_llm_model(settings: Settings) -> str:
+    override = settings.llm.similarity_llm_model_override_value
+    if override is not None:
+        return override
+    return _DUPLICATION_DETECTION_LLM_MODEL
 
 
 def _scoring_judge_fallback_models(settings: Settings) -> tuple[str, ...]:
@@ -581,8 +588,12 @@ def _scoring_judge_fallback_models(settings: Settings) -> tuple[str, ...]:
     )
 
 
-def _similarity_judge_fallback_models() -> tuple[str, ...]:
-    return _DUPLICATION_DETECTION_FALLBACK_MODELS
+def _similarity_judge_fallback_models(settings: Settings) -> tuple[str, ...]:
+    return _fallback_tail_after_primary(
+        primary_model=_effective_similarity_llm_model(settings),
+        ordered_models=(_DUPLICATION_DETECTION_LLM_MODEL, *_DUPLICATION_DETECTION_FALLBACK_MODELS),
+        fallback_tail=_DUPLICATION_DETECTION_FALLBACK_MODELS,
+    )
 
 
 def _fallback_tail_after_primary(
@@ -1073,14 +1084,14 @@ def _create_similarity_judge(
     if provider is None:
         raise ValueError("similarity_llm_provider must be configured")
     config = SimilarityJudgeConfig(
-        provider=settings.llm.scoring_llm_provider,
+        provider=settings.llm.similarity_llm_provider,
         model=similarity_route.model,
-        fallback_models=_similarity_judge_fallback_models(),
-        temperature=settings.llm.scoring_llm_temperature,
-        max_output_tokens=settings.llm.scoring_llm_max_output_tokens,
+        fallback_models=_similarity_judge_fallback_models(settings),
+        temperature=settings.llm.similarity_llm_temperature,
+        max_output_tokens=settings.llm.similarity_llm_max_output_tokens,
         reasoning_effort=_SCORING_LLM_REASONING_EFFORT,
-        timeout_seconds=settings.llm.scoring_llm_timeout_seconds,
-        retry_policy=settings.llm.scoring_llm_retry_policy,
+        timeout_seconds=settings.llm.similarity_llm_timeout_seconds,
+        retry_policy=settings.llm.similarity_llm_retry_policy,
     )
     return SimilarityJudge(
         llm_provider=provider,

@@ -25,6 +25,7 @@ def test_default_llm_timeout_surfaces_are_300_seconds() -> None:
 
     assert settings.llm_timeout_seconds == pytest.approx(300.0)
     assert settings.scoring_llm_timeout_seconds == pytest.approx(300.0)
+    assert settings.similarity_llm_timeout_seconds == pytest.approx(300.0)
     assert VertexSettings(_env_file=None).vertex_timeout_seconds == pytest.approx(300.0)
     assert BedrockSettings(_env_file=None).read_timeout_seconds == pytest.approx(300.0)
     assert provider_factory.CHUTES.timeout_seconds == pytest.approx(300.0)
@@ -32,6 +33,7 @@ def test_default_llm_timeout_surfaces_are_300_seconds() -> None:
 
 def test_default_scoring_llm_max_output_tokens_is_20480() -> None:
     assert LlmSettings(_env_file=None).scoring_llm_max_output_tokens == 20480
+    assert LlmSettings(_env_file=None).similarity_llm_max_output_tokens == 20480
 
 
 def test_default_scoring_llm_retry_policy_uses_capacity_backoff_window() -> None:
@@ -43,6 +45,57 @@ def test_default_scoring_llm_retry_policy_uses_capacity_backoff_window() -> None
         max_ms=300_000,
         jitter=0.2,
     )
+
+
+def test_default_similarity_llm_retry_policy_is_single_attempt() -> None:
+    settings = LlmSettings(_env_file=None)
+
+    assert settings.similarity_llm_retry_policy == RetryPolicy(
+        attempts=1,
+        initial_ms=0,
+        max_ms=0,
+        jitter=0.0,
+    )
+
+
+def test_similarity_llm_retry_policy_uses_similarity_env_aliases() -> None:
+    settings = LlmSettings(
+        SIMILARITY_LLM_RETRY_ATTEMPTS="2",
+        SIMILARITY_LLM_RETRY_INITIAL_MS="10",
+        SIMILARITY_LLM_RETRY_MAX_MS="20",
+        SIMILARITY_LLM_RETRY_JITTER="0.1",
+        _env_file=None,
+    )
+
+    assert settings.similarity_llm_retry_policy == RetryPolicy(
+        attempts=2,
+        initial_ms=10,
+        max_ms=20,
+        jitter=0.1,
+    )
+    assert settings.scoring_llm_retry_policy == RetryPolicy(
+        attempts=6,
+        initial_ms=30_000,
+        max_ms=300_000,
+        jitter=0.2,
+    )
+
+
+def test_similarity_llm_non_retry_config_uses_similarity_env_aliases() -> None:
+    settings = LlmSettings(
+        SIMILARITY_LLM_PROVIDER="vertex",
+        SIMILARITY_LLM_TIMEOUT_SECONDS="123",
+        SIMILARITY_LLM_MAX_OUTPUT_TOKENS="4096",
+        SIMILARITY_LLM_MODEL_OVERRIDE=" moonshotai/Kimi-K2.5-TEE ",
+        _env_file=None,
+    )
+
+    assert settings.similarity_llm_provider == "vertex"
+    assert settings.similarity_llm_timeout_seconds == pytest.approx(123.0)
+    assert settings.similarity_llm_max_output_tokens == 4096
+    assert settings.similarity_llm_model_override_value == "moonshotai/Kimi-K2.5-TEE"
+    assert settings.scoring_llm_provider == "chutes"
+    assert settings.scoring_llm_model_override_value is None
 
 
 def test_build_cached_llm_provider_resolver_caches_by_provider_name(

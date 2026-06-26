@@ -72,7 +72,7 @@ async def test_similarity_judge_live_uses_real_structured_runtime_flow() -> None
     )
     routed_provider = build_routed_llm_provider(
         surface="duplication_detection",
-        default_provider=settings.llm.scoring_llm_provider,
+        default_provider=settings.llm.similarity_llm_provider,
         llm_settings=settings.llm,
         allowed_providers={"bedrock", "chutes", "vertex"},
         allow_custom_openai_compatible=True,
@@ -82,12 +82,13 @@ async def test_similarity_judge_live_uses_real_structured_runtime_flow() -> None
     service = SimilarityJudge(
         llm_provider=llm_provider,
         config=SimilarityJudgeConfig(
-            provider=settings.llm.scoring_llm_provider,
+            provider=settings.llm.similarity_llm_provider,
             model=similarity_route.model,
             reasoning_effort=bootstrap._SCORING_LLM_REASONING_EFFORT,
-            temperature=0.0,
-            max_output_tokens=settings.llm.scoring_llm_max_output_tokens,
-            timeout_seconds=float(settings.llm.scoring_llm_timeout_seconds),
+            temperature=settings.llm.similarity_llm_temperature,
+            max_output_tokens=settings.llm.similarity_llm_max_output_tokens,
+            timeout_seconds=float(settings.llm.similarity_llm_timeout_seconds),
+            retry_policy=settings.llm.similarity_llm_retry_policy,
         ),
     )
     request = SimilarityJudgeRequest(
@@ -119,8 +120,11 @@ async def test_similarity_judge_live_uses_real_structured_runtime_flow() -> None
     assert len(llm_provider.requests) == 1
     llm_request = llm_provider.requests[0]
     assert llm_request.output_mode == "structured"
-    assert llm_request.provider == settings.llm.scoring_llm_provider
+    assert llm_request.provider == settings.llm.similarity_llm_provider
     assert llm_request.model == similarity_route.model
+    assert llm_request.max_output_tokens == settings.llm.similarity_llm_max_output_tokens
+    assert llm_request.timeout_seconds == settings.llm.similarity_llm_timeout_seconds
+    assert llm_request.retry_policy == settings.llm.similarity_llm_retry_policy
     assert llm_request.thinking is not None
     assert llm_request.thinking.enabled is True
     assert llm_request.thinking.effort == "high"

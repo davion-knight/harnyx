@@ -144,6 +144,7 @@ def test_build_llm_clients_uses_shared_provider_registry(monkeypatch: pytest.Mon
             search_provider=None,
             tool_llm_provider="bedrock",
             scoring_llm_provider="vertex",
+            similarity_llm_provider="chutes",
             llm_model_provider_overrides_json=json.dumps({"tool": {"unused-tool-model": "bedrock"}}),
         ),
         vertex=VertexSettings.model_construct(
@@ -183,7 +184,7 @@ def test_build_llm_clients_uses_shared_provider_registry(monkeypatch: pytest.Mon
     )
     assert clients.similarity_route == ResolvedLlmRoute(
         surface="duplication_detection",
-        provider="vertex",
+        provider="chutes",
         model=bootstrap._DUPLICATION_DETECTION_LLM_MODEL,
     )
     assert calls == []
@@ -873,13 +874,21 @@ def test_scoring_fallback_tail_only_uses_candidates_after_primary() -> None:
     )
 
 
-def test_create_similarity_judge_uses_scoring_llm_config() -> None:
+def test_create_similarity_judge_uses_similarity_llm_config() -> None:
     settings = Settings.model_construct(
         llm=LlmSettings.model_construct(
             scoring_llm_provider="chutes",
-            scoring_llm_temperature=0.0,
-            scoring_llm_max_output_tokens=4096,
-            scoring_llm_timeout_seconds=300.0,
+            scoring_llm_temperature=0.9,
+            scoring_llm_max_output_tokens=1024,
+            scoring_llm_timeout_seconds=30.0,
+            similarity_llm_provider="vertex",
+            similarity_llm_temperature=0.0,
+            similarity_llm_max_output_tokens=4096,
+            similarity_llm_timeout_seconds=300.0,
+            similarity_llm_retry_attempts=2,
+            similarity_llm_retry_initial_ms=10,
+            similarity_llm_retry_max_ms=20,
+            similarity_llm_retry_jitter=0.0,
         ),
     )
 
@@ -893,7 +902,7 @@ def test_create_similarity_judge_uses_scoring_llm_config() -> None:
         ),
     )
 
-    assert judge._config.provider == "chutes"
+    assert judge._config.provider == "vertex"
     assert judge._config.model == "google/gemma-4-31B-turbo-TEE"
     assert judge._config.fallback_models == (
         "moonshotai/Kimi-K2.5-TEE",
@@ -903,7 +912,37 @@ def test_create_similarity_judge_uses_scoring_llm_config() -> None:
     assert judge._config.max_output_tokens == 4096
     assert judge._config.reasoning_effort == "high"
     assert judge._config.timeout_seconds == 300.0
-    assert judge._config.retry_policy == settings.llm.scoring_llm_retry_policy
+    assert judge._config.retry_policy == settings.llm.similarity_llm_retry_policy
+
+
+def test_similarity_fallback_tail_only_uses_candidates_after_primary_override() -> None:
+    settings = Settings.model_construct(
+        llm=LlmSettings.model_construct(
+            similarity_llm_model_override="moonshotai/Kimi-K2.5-TEE",
+        ),
+    )
+
+    assert bootstrap._similarity_judge_fallback_models(settings) == ("zai-org/GLM-5-TEE",)
+
+
+def test_similarity_model_override_participates_in_duplication_detection_route_override() -> None:
+    settings = Settings.model_construct(
+        llm=LlmSettings.model_construct(
+            similarity_llm_provider="chutes",
+            similarity_llm_model_override="moonshotai/Kimi-K2.5-TEE",
+            llm_model_provider_overrides_json=json.dumps(
+                {"duplication_detection": {"moonshotai/Kimi-K2.5-TEE": "bedrock"}}
+            ),
+        ),
+    )
+
+    route = bootstrap._resolve_similarity_judge_route(settings)
+
+    assert route == ResolvedLlmRoute(
+        surface="duplication_detection",
+        provider="bedrock",
+        model="moonshotai/Kimi-K2.5-TEE",
+    )
 
 
 def test_build_llm_clients_routes_primary_scoring_gemma_to_custom_endpoint(

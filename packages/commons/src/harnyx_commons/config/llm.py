@@ -20,6 +20,10 @@ DEFAULT_SCORING_LLM_RETRY_ATTEMPTS = 6
 DEFAULT_SCORING_LLM_RETRY_INITIAL_MS = 30_000
 DEFAULT_SCORING_LLM_RETRY_MAX_MS = 300_000
 DEFAULT_SCORING_LLM_RETRY_JITTER = 0.2
+DEFAULT_SIMILARITY_LLM_RETRY_ATTEMPTS = 1
+DEFAULT_SIMILARITY_LLM_RETRY_INITIAL_MS = 0
+DEFAULT_SIMILARITY_LLM_RETRY_MAX_MS = 0
+DEFAULT_SIMILARITY_LLM_RETRY_JITTER = 0.0
 _ENDPOINT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -234,6 +238,7 @@ class LlmSettings(BaseSettings):
     benchmark_llm_timeout_seconds: float | None = Field(default=None, alias="BENCHMARK_LLM_TIMEOUT_SECONDS")
     digest_llm_timeout_seconds: float | None = Field(default=None, alias="DIGEST_LLM_TIMEOUT_SECONDS")
     scoring_llm_timeout_seconds: float = Field(default=300.0, alias="SCORING_LLM_TIMEOUT_SECONDS")
+    similarity_llm_timeout_seconds: float = Field(default=300.0, alias="SIMILARITY_LLM_TIMEOUT_SECONDS")
 
     # --- Scoring (validator) ---
     scoring_llm_provider: LlmProviderName = Field(default="chutes", alias="SCORING_LLM_PROVIDER")
@@ -260,6 +265,35 @@ class LlmSettings(BaseSettings):
     scoring_llm_retry_jitter: float = Field(
         default=DEFAULT_SCORING_LLM_RETRY_JITTER,
         alias="SCORING_LLM_RETRY_JITTER",
+        ge=0.0,
+        le=1.0,
+    )
+
+    # --- Similarity / duplicate preflight (validator) ---
+    similarity_llm_provider: LlmProviderName = Field(default="chutes", alias="SIMILARITY_LLM_PROVIDER")
+    similarity_llm_temperature: float | None = Field(default=None, alias="SIMILARITY_LLM_TEMPERATURE")
+    similarity_llm_max_output_tokens: int = Field(
+        default=DEFAULT_SCORING_MAX_OUTPUT_TOKENS, alias="SIMILARITY_LLM_MAX_OUTPUT_TOKENS"
+    )
+    similarity_llm_model_override: str | None = Field(default=None, alias="SIMILARITY_LLM_MODEL_OVERRIDE")
+    similarity_llm_retry_attempts: int = Field(
+        default=DEFAULT_SIMILARITY_LLM_RETRY_ATTEMPTS,
+        alias="SIMILARITY_LLM_RETRY_ATTEMPTS",
+        ge=1,
+    )
+    similarity_llm_retry_initial_ms: int = Field(
+        default=DEFAULT_SIMILARITY_LLM_RETRY_INITIAL_MS,
+        alias="SIMILARITY_LLM_RETRY_INITIAL_MS",
+        ge=0,
+    )
+    similarity_llm_retry_max_ms: int = Field(
+        default=DEFAULT_SIMILARITY_LLM_RETRY_MAX_MS,
+        alias="SIMILARITY_LLM_RETRY_MAX_MS",
+        ge=0,
+    )
+    similarity_llm_retry_jitter: float = Field(
+        default=DEFAULT_SIMILARITY_LLM_RETRY_JITTER,
+        alias="SIMILARITY_LLM_RETRY_JITTER",
         ge=0.0,
         le=1.0,
     )
@@ -324,12 +358,28 @@ class LlmSettings(BaseSettings):
         return normalized or None
 
     @property
+    def similarity_llm_model_override_value(self) -> str | None:
+        if self.similarity_llm_model_override is None:
+            return None
+        normalized = self.similarity_llm_model_override.strip()
+        return normalized or None
+
+    @property
     def scoring_llm_retry_policy(self) -> RetryPolicy:
         return RetryPolicy(
             attempts=self.scoring_llm_retry_attempts,
             initial_ms=self.scoring_llm_retry_initial_ms,
             max_ms=self.scoring_llm_retry_max_ms,
             jitter=self.scoring_llm_retry_jitter,
+        )
+
+    @property
+    def similarity_llm_retry_policy(self) -> RetryPolicy:
+        return RetryPolicy(
+            attempts=self.similarity_llm_retry_attempts,
+            initial_ms=self.similarity_llm_retry_initial_ms,
+            max_ms=self.similarity_llm_retry_max_ms,
+            jitter=self.similarity_llm_retry_jitter,
         )
 
     @property
