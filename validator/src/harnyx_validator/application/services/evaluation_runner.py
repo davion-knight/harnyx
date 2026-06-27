@@ -258,11 +258,24 @@ class UnexpectedArtifactExecutionError(RuntimeError):
         self.remaining_tasks = remaining_tasks
 
 
+class _PartialSessionIssueError(RuntimeError):
+    def __init__(self, *, issued: SessionIssued, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.issued = issued
+        self.cause = cause
+
+
 @dataclass(slots=True)
 class _ArtifactDispatchState:
     submissions_by_index: list[MinerTaskRunSubmission | None]
     validator_failure: ValidatorBatchFailedError | None = None
     unexpected_failure: Exception | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveAssignedTask:
+    assignment: MinerTaskWorkAssignment
+    session_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,24 +346,86 @@ class EvaluationRunner:
         on_session_started: SessionStartedCallback | None = None,
     ) -> PlatformOwnedTaskResult:
         session_started_at = time.monotonic()
-        terminal_outcome = "unexpected"
-        error_code: str | None = None
         issued: SessionIssued | None = None
         attempt_started_at = self._clock()
         try:
-            issued = self._begin_session_attempt(
-                self._issue_session(
-                    batch_id=batch_id,
-                    uid=artifact.uid,
-                    artifact_id=artifact.artifact_id,
-                    task=task,
-                    attempt_number=attempt_number,
-                    assignment_token=assignment_token,
-                ).session.session_id
+            issued = self._issue_session(
+                batch_id=batch_id,
+                uid=artifact.uid,
+                artifact_id=artifact.artifact_id,
+                task=task,
+                attempt_number=attempt_number,
+                assignment_token=assignment_token,
             )
+            issued = self._begin_session_attempt(issued.session.session_id)
             if on_session_started is not None:
                 on_session_started(issued.session.session_id)
             attempt_started_at = self._clock()
+        except Exception as exc:
+            if isinstance(exc, _PartialSessionIssueError):
+                issued = exc.issued
+                exc = exc.cause
+            result = self._assigned_task_unexpected_failure_result(
+                batch_id=batch_id,
+                artifact=artifact,
+                task=task,
+                issued=issued,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                started_at=attempt_started_at,
+                exc=exc,
+            )
+            _log_session_finished(
+                batch_id=batch_id,
+                session_id=issued.session.session_id if issued is not None else UUID(int=0),
+                artifact_id=artifact.artifact_id,
+                task_id=task.task_id,
+                uid=artifact.uid,
+                attempt_count=attempt_number,
+                session_ms=_monotonic_elapsed_ms(
+                    started_at=session_started_at,
+                    completed_at=time.monotonic(),
+                ),
+                terminal_outcome=AttemptControlKind.VALIDATOR_BATCH_FAILURE.value,
+                error_code=str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE),
+            )
+            if issued is not None:
+                self._cleanup_attempt_session_best_effort(
+                    session_id=issued.session.session_id,
+                    batch_id=batch_id,
+                    artifact_id=artifact.artifact_id,
+                    task_id=task.task_id,
+                )
+            return result
+
+        return await self._evaluate_issued_assigned_task(
+            batch_id=batch_id,
+            artifact=artifact,
+            task=task,
+            issued=issued,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+            started_at=attempt_started_at,
+            session_started_at=session_started_at,
+            orchestrator=orchestrator,
+        )
+
+    async def _evaluate_issued_assigned_task(
+        self,
+        *,
+        batch_id: UUID,
+        artifact: ScriptArtifactSpec,
+        task: MinerTask,
+        issued: SessionIssued,
+        attempt_number: int,
+        max_attempts: int,
+        started_at: datetime,
+        session_started_at: float,
+        orchestrator: TaskRunOrchestrator,
+    ) -> PlatformOwnedTaskResult:
+        terminal_outcome = "unexpected"
+        error_code: str | None = None
+        try:
             decision = await self._evaluate_task_attempt(
                 batch_id=batch_id,
                 artifact=artifact,
@@ -366,7 +441,7 @@ class EvaluationRunner:
                 issued=issued,
                 attempt_number=attempt_number,
                 max_attempts=max_attempts,
-                started_at=attempt_started_at,
+                started_at=started_at,
                 decision=decision,
             )
             terminal_outcome = finalization.terminal_outcome
@@ -382,37 +457,20 @@ class EvaluationRunner:
         except Exception as exc:
             terminal_outcome = AttemptControlKind.VALIDATOR_BATCH_FAILURE.value
             error_code = str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE)
-            logger.exception(
-                "assigned miner task failed unexpectedly",
-                extra={
-                    "batch_id": str(batch_id),
-                    "artifact_id": str(artifact.artifact_id),
-                    "task_id": str(task.task_id),
-                    "attempt_number": attempt_number,
-                },
-            )
-            result = self._platform_result_from_assigned_unexpected_failure(
+            return self._assigned_task_unexpected_failure_result(
                 batch_id=batch_id,
                 artifact=artifact,
                 task=task,
                 issued=issued,
                 attempt_number=attempt_number,
                 max_attempts=max_attempts,
-                started_at=attempt_started_at,
+                started_at=started_at,
                 exc=exc,
             )
-            self._record_assigned_task_local_side_effects_best_effort(
-                batch_id=batch_id,
-                artifact=artifact,
-                task=task,
-                result=result,
-                local_submission=None,
-            )
-            return result
         finally:
             _log_session_finished(
                 batch_id=batch_id,
-                session_id=issued.session.session_id if issued is not None else UUID(int=0),
+                session_id=issued.session.session_id,
                 artifact_id=artifact.artifact_id,
                 task_id=task.task_id,
                 uid=artifact.uid,
@@ -424,13 +482,12 @@ class EvaluationRunner:
                 terminal_outcome=terminal_outcome,
                 error_code=error_code,
             )
-            if issued is not None:
-                self._cleanup_attempt_session_best_effort(
-                    session_id=issued.session.session_id,
-                    batch_id=batch_id,
-                    artifact_id=artifact.artifact_id,
-                    task_id=task.task_id,
-                )
+            self._cleanup_attempt_session_best_effort(
+                session_id=issued.session.session_id,
+                batch_id=batch_id,
+                artifact_id=artifact.artifact_id,
+                task_id=task.task_id,
+            )
 
     async def evaluate_assigned_task_queue(
         self,
@@ -443,38 +500,120 @@ class EvaluationRunner:
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
         orchestrator: TaskRunOrchestrator,
     ) -> None:
-        active: dict[asyncio.Task[PlatformOwnedTaskResult], MinerTaskWorkAssignment] = {}
+        active: dict[asyncio.Task[PlatformOwnedTaskResult], _ActiveAssignedTask] = {}
         queue_waiter: asyncio.Task[MinerTaskWorkAssignment] | None = None
         close_waiter = asyncio.create_task(close_requested.wait())
 
-        def start_assignment(assignment: MinerTaskWorkAssignment) -> None:
-            def on_session_started(session_id: UUID) -> None:
-                assigned_work.mark_started(assignment, session_id)
+        def start_assignment(assignment: MinerTaskWorkAssignment) -> bool:
+            session_started_at = time.monotonic()
+            issued: SessionIssued | None = None
+            attempt_started_at = self._clock()
+            try:
+                issued = self._issue_session(
+                    batch_id=batch_id,
+                    uid=artifact.uid,
+                    artifact_id=artifact.artifact_id,
+                    task=assignment.task,
+                    attempt_number=assignment.attempt_number,
+                    assignment_token=assignment.assignment_token,
+                )
+                issued = self._begin_session_attempt(issued.session.session_id)
+                attempt_started_at = self._clock()
+                if not assigned_work.mark_started(assignment, issued.session.session_id):
+                    raise RuntimeError("assigned work start mark failed")
+            except Exception as exc:
+                if isinstance(exc, _PartialSessionIssueError):
+                    issued = exc.issued
+                    exc = exc.cause
+                result = self._assigned_task_unexpected_failure_result(
+                    batch_id=batch_id,
+                    artifact=artifact,
+                    task=assignment.task,
+                    issued=issued,
+                    attempt_number=assignment.attempt_number,
+                    max_attempts=assignment.max_attempts,
+                    started_at=attempt_started_at,
+                    exc=exc,
+                )
+                _log_session_finished(
+                    batch_id=batch_id,
+                    session_id=issued.session.session_id if issued is not None else UUID(int=0),
+                    artifact_id=artifact.artifact_id,
+                    task_id=assignment.task.task_id,
+                    uid=artifact.uid,
+                    attempt_count=assignment.attempt_number,
+                    session_ms=_monotonic_elapsed_ms(
+                        started_at=session_started_at,
+                        completed_at=time.monotonic(),
+                    ),
+                    terminal_outcome=AttemptControlKind.VALIDATOR_BATCH_FAILURE.value,
+                    error_code=str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE),
+                )
+                if issued is not None:
+                    self._cleanup_attempt_session_best_effort(
+                        session_id=issued.session.session_id,
+                        batch_id=batch_id,
+                        artifact_id=artifact.artifact_id,
+                        task_id=assignment.task.task_id,
+                    )
+                result_queue.put_nowait(result)
+                return result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
 
-            active[
-                asyncio.create_task(
-                    self.evaluate_assigned_task(
+            execution_task = asyncio.create_task(
+                self._evaluate_issued_assigned_task(
+                    batch_id=batch_id,
+                    artifact=artifact,
+                    task=assignment.task,
+                    issued=issued,
+                    attempt_number=assignment.attempt_number,
+                    max_attempts=assignment.max_attempts,
+                    started_at=attempt_started_at,
+                    session_started_at=session_started_at,
+                    orchestrator=orchestrator,
+                )
+            )
+            active[execution_task] = _ActiveAssignedTask(
+                assignment=assignment,
+                session_id=issued.session.session_id,
+            )
+            return False
+
+        async def drain_completed_active(done: set[asyncio.Task[object]]) -> bool:
+            delivery_failure_seen = False
+            for task in tuple(active):
+                if task not in done:
+                    continue
+                active_task = active.pop(task)
+                try:
+                    result = task.result()
+                except Exception as exc:
+                    result = self._platform_result_from_assignment_task_exception(
                         batch_id=batch_id,
                         artifact=artifact,
-                        task=assignment.task,
-                        attempt_number=assignment.attempt_number,
-                        max_attempts=assignment.max_attempts,
-                        assignment_token=assignment.assignment_token,
-                        orchestrator=orchestrator,
-                        on_session_started=on_session_started,
+                        assignment=active_task.assignment,
+                        exc=exc,
                     )
-                )
-            ] = assignment
+                await result_queue.put(result)
+                if result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE:
+                    delivery_failure_seen = True
+            return delivery_failure_seen
 
-        for assignment in initial_assignments:
-            if assigned_work.claim_initial_for_dispatch(assignment):
-                start_assignment(assignment)
+        async def cancel_remaining_active() -> None:
+            for remaining in active:
+                remaining.cancel()
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
 
         try:
+            for assignment in initial_assignments:
+                if assigned_work.claim_initial_for_dispatch(assignment) and start_assignment(assignment):
+                    return
+
             while active or not close_requested.is_set():
                 while not close_requested.is_set():
                     try:
-                        start_assignment(assigned_work.claim_nowait_for_dispatch())
+                        if start_assignment(assigned_work.claim_nowait_for_dispatch()):
+                            return
                     except asyncio.QueueEmpty:
                         break
 
@@ -487,7 +626,8 @@ class EvaluationRunner:
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if queue_waiter in done:
-                        start_assignment(queue_waiter.result())
+                        if start_assignment(queue_waiter.result()):
+                            return
                         queue_waiter = None
                     continue
 
@@ -499,41 +639,34 @@ class EvaluationRunner:
                     wait_for.add(close_waiter)
                 done, _pending = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
 
-                if queue_waiter is not None and queue_waiter in done:
-                    start_assignment(queue_waiter.result())
-                    queue_waiter = None
-
-                delivery_failure_seen = False
-                for task in tuple(active):
-                    if task not in done:
-                        continue
-                    assignment = active.pop(task)
-                    try:
-                        result = task.result()
-                    except Exception as exc:
-                        result = self._platform_result_from_assignment_task_exception(
-                            batch_id=batch_id,
-                            artifact=artifact,
-                            assignment=assignment,
-                            exc=exc,
-                        )
-                    await result_queue.put(result)
-                    if result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE:
-                        delivery_failure_seen = True
-                if delivery_failure_seen:
-                    for remaining in active:
-                        remaining.cancel()
-                    if active:
-                        await asyncio.gather(*active, return_exceptions=True)
+                if await drain_completed_active(done):
+                    await cancel_remaining_active()
                     return
+
+                if queue_waiter is not None and queue_waiter in done:
+                    if start_assignment(queue_waiter.result()):
+                        await cancel_remaining_active()
+                        return
+                    queue_waiter = None
         finally:
             if queue_waiter is not None and not queue_waiter.done():
                 queue_waiter.cancel()
             close_waiter.cancel()
+            for task in active:
+                task.cancel()
             await asyncio.gather(
                 *(task for task in (queue_waiter, close_waiter) if task is not None),
                 return_exceptions=True,
             )
+            if active:
+                await asyncio.gather(*active, return_exceptions=True)
+                for active_task in active.values():
+                    self._cleanup_attempt_session_best_effort(
+                        session_id=active_task.session_id,
+                        batch_id=batch_id,
+                        artifact_id=artifact.artifact_id,
+                        task_id=active_task.assignment.task.task_id,
+                    )
 
     async def record_assigned_task_setup_failures(
         self,
@@ -599,6 +732,9 @@ class EvaluationRunner:
                         local_submission=submission,
                     )
                 except Exception as exc:
+                    if isinstance(exc, _PartialSessionIssueError):
+                        issued = exc.issued
+                        exc = exc.cause
                     logger.exception(
                         "assigned miner task setup-failure result construction failed unexpectedly",
                         extra={
@@ -663,6 +799,46 @@ class EvaluationRunner:
             started_at=self._clock(),
             exc=exc,
         )
+
+    def _assigned_task_unexpected_failure_result(
+        self,
+        *,
+        batch_id: UUID,
+        artifact: ScriptArtifactSpec,
+        task: MinerTask,
+        issued: SessionIssued | None,
+        attempt_number: int,
+        max_attempts: int,
+        started_at: datetime,
+        exc: Exception,
+    ) -> PlatformOwnedTaskResult:
+        logger.exception(
+            "assigned miner task failed unexpectedly",
+            extra={
+                "batch_id": str(batch_id),
+                "artifact_id": str(artifact.artifact_id),
+                "task_id": str(task.task_id),
+                "attempt_number": attempt_number,
+            },
+        )
+        result = self._platform_result_from_assigned_unexpected_failure(
+            batch_id=batch_id,
+            artifact=artifact,
+            task=task,
+            issued=issued,
+            attempt_number=attempt_number,
+            max_attempts=max_attempts,
+            started_at=started_at,
+            exc=exc,
+        )
+        self._record_assigned_task_local_side_effects_best_effort(
+            batch_id=batch_id,
+            artifact=artifact,
+            task=task,
+            result=result,
+            local_submission=None,
+        )
+        return result
 
     def _platform_result_from_assigned_unexpected_failure(
         self,
@@ -2182,23 +2358,38 @@ class EvaluationRunner:
             token=token,
         )
         issued = self._sessions.issue(request)
-        self._progress.register_task_session(
-            batch_id=batch_id,
-            session_id=issued.session.session_id,
-        )
-        if (
-            artifact_id is not None
-            and assignment_token is not None
-            and self._platform_tool_proxy_scopes is not None
-        ):
-            self._platform_tool_proxy_scopes.register_session(
+        try:
+            self._progress.register_task_session(
                 batch_id=batch_id,
                 session_id=issued.session.session_id,
-                artifact_id=artifact_id,
-                task_id=task.task_id,
-                assignment_token=assignment_token,
-                attempt_number=attempt_number,
             )
+            if (
+                artifact_id is not None
+                and assignment_token is not None
+                and self._platform_tool_proxy_scopes is not None
+            ):
+                self._platform_tool_proxy_scopes.register_session(
+                    batch_id=batch_id,
+                    session_id=issued.session.session_id,
+                    artifact_id=artifact_id,
+                    task_id=task.task_id,
+                    assignment_token=assignment_token,
+                    attempt_number=attempt_number,
+                )
+        except Exception as exc:
+            try:
+                self._cleanup_attempt_session(issued.session.session_id)
+            except Exception:
+                logger.exception(
+                    "session cleanup failed after partial issue",
+                    extra={
+                        "batch_id": str(batch_id),
+                        "session_id": str(issued.session.session_id),
+                        "artifact_id": str(artifact_id) if artifact_id is not None else None,
+                        "task_id": str(task.task_id),
+                    },
+                )
+            raise _PartialSessionIssueError(issued=issued, cause=exc) from exc
         return issued
 
     def _cleanup_attempt_session(self, session_id: UUID) -> None:

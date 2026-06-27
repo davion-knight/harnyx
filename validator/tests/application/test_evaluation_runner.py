@@ -52,6 +52,8 @@ from harnyx_validator.application.invoke_entrypoint import (
     MinerResponseValidationError,
     SandboxInvocationError,
 )
+from harnyx_validator.application.platform_tool_proxy import PlatformToolProxyScopeRegistry
+from harnyx_validator.application.ports.platform import PlatformToolProxyControlError
 from harnyx_validator.application.ports.subtensor import ValidatorNodeInfo
 from harnyx_validator.application.scheduler import SchedulerConfig
 from harnyx_validator.application.services.evaluation_runner import (
@@ -484,10 +486,10 @@ async def test_evaluate_assigned_task_queue_drains_same_tick_results_before_deli
         ),
     }
 
-    async def evaluate_assigned_task(**kwargs):
+    async def evaluate_issued_assigned_task(**kwargs):
         return results_by_task[kwargs["task"].task_id]
 
-    monkeypatch.setattr(runner, "evaluate_assigned_task", evaluate_assigned_task)
+    monkeypatch.setattr(runner, "_evaluate_issued_assigned_task", evaluate_issued_assigned_task)
 
     assigned_work = _AssignedWork()
     result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
@@ -564,7 +566,7 @@ async def test_evaluate_assigned_task_queue_converts_task_exception_and_drains_s
         assignment_token=_COMPLETED_ASSIGNMENT_TOKEN,
     )
 
-    async def evaluate_assigned_task(**kwargs):
+    async def evaluate_issued_assigned_task(**kwargs):
         if kwargs["task"].task_id == failed_task.task_id:
             raise RuntimeError("assignment exploded")
         return _platform_owned_task_result(
@@ -572,7 +574,7 @@ async def test_evaluate_assigned_task_queue_converts_task_exception_and_drains_s
             terminal_effect=MinerTaskAttemptTerminalEffect.TASK_RESULT,
         )
 
-    monkeypatch.setattr(runner, "evaluate_assigned_task", evaluate_assigned_task)
+    monkeypatch.setattr(runner, "_evaluate_issued_assigned_task", evaluate_issued_assigned_task)
 
     assigned_work = _AssignedWork()
     result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
@@ -596,6 +598,203 @@ async def test_evaluate_assigned_task_queue_converts_task_exception_and_drains_s
     assert success_result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
     assert assigned_work.initial_claims == [failed_assignment, completed_assignment]
     assert result_queue.empty()
+
+
+async def test_evaluate_assigned_task_queue_drains_active_failure_before_ready_queue_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, delivery_task, _, _, _, _ = _assigned_task_test_context(tmp_path)
+    completed_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="completed active"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    queued_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="ready queued"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    delivery_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=delivery_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_FAILED_ASSIGNMENT_TOKEN,
+    )
+    completed_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=completed_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_COMPLETED_ASSIGNMENT_TOKEN,
+    )
+    queued_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=queued_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    real_wait = asyncio.wait
+    issued_task_ids: list[UUID] = []
+    original_issue_session = runner._issue_session
+
+    async def wait_after_ready_tick(wait_for, *, return_when=asyncio.ALL_COMPLETED):
+        await asyncio.sleep(0)
+        done = {task for task in wait_for if task.done()}
+        if done:
+            return done, set(wait_for) - done
+        return await real_wait(wait_for, return_when=return_when)
+
+    def issue_session_with_task_record(**kwargs):
+        issued_task_ids.append(kwargs["task"].task_id)
+        return original_issue_session(**kwargs)
+
+    async def evaluate_issued_assigned_task(**kwargs):
+        if kwargs["task"].task_id == delivery_task.task_id:
+            return _platform_owned_task_result(
+                delivery_assignment,
+                terminal_effect=MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE,
+            )
+        if kwargs["task"].task_id == completed_task.task_id:
+            return _platform_owned_task_result(
+                completed_assignment,
+                terminal_effect=MinerTaskAttemptTerminalEffect.TASK_RESULT,
+            )
+        raise AssertionError("queued assignment should not start after active delivery failure")
+
+    class _ReadyQueuedAssignedWork(_AssignedWork):
+        def claim_nowait_for_dispatch(self) -> MinerTaskWorkAssignment:
+            raise asyncio.QueueEmpty
+
+    monkeypatch.setattr(evaluation_runner_module.asyncio, "wait", wait_after_ready_tick)
+    monkeypatch.setattr(runner, "_issue_session", issue_session_with_task_record)
+    monkeypatch.setattr(runner, "_evaluate_issued_assigned_task", evaluate_issued_assigned_task)
+
+    assigned_work = _ReadyQueuedAssignedWork(queued=(queued_assignment,))
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(delivery_assignment, completed_assignment),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, object()),
+    )
+
+    results = (result_queue.get_nowait(), result_queue.get_nowait())
+    assert {result.task_id for result in results} == {delivery_task.task_id, completed_task.task_id}
+    assert result_queue.empty()
+    assert queued_assignment in assigned_work.dispatch_claims
+    assert queued_assignment not in [assignment for assignment, _session_id in assigned_work.started]
+    assert queued_task.task_id not in issued_task_ids
+
+
+async def test_evaluate_assigned_task_queue_drains_active_result_before_queue_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, completed_task, session_registry, _, _, _ = _assigned_task_test_context(tmp_path)
+    blocking_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="blocking active"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    queued_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="queued start failure"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    completed_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=completed_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_COMPLETED_ASSIGNMENT_TOKEN,
+    )
+    blocking_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=blocking_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    queued_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=queued_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_FAILED_ASSIGNMENT_TOKEN,
+    )
+    real_wait = asyncio.wait
+
+    async def wait_after_ready_tick(wait_for, *, return_when=asyncio.ALL_COMPLETED):
+        await asyncio.sleep(0)
+        done = {task for task in wait_for if task.done()}
+        if done:
+            return done, set(wait_for) - done
+        return await real_wait(wait_for, return_when=return_when)
+
+    async def evaluate_issued_assigned_task(**kwargs):
+        if kwargs["task"].task_id == completed_task.task_id:
+            return _platform_owned_task_result(
+                completed_assignment,
+                terminal_effect=MinerTaskAttemptTerminalEffect.TASK_RESULT,
+            )
+        if kwargs["task"].task_id == blocking_task.task_id:
+            await asyncio.Event().wait()
+        raise AssertionError("unexpected assignment execution")
+
+    class _QueueStartFailureAssignedWork(_AssignedWork):
+        def claim_nowait_for_dispatch(self) -> MinerTaskWorkAssignment:
+            raise asyncio.QueueEmpty
+
+        def mark_started(self, assignment: MinerTaskWorkAssignment, validator_session_id: UUID) -> bool:
+            if assignment is queued_assignment:
+                self.started.append((assignment, validator_session_id))
+                return False
+            return super().mark_started(assignment, validator_session_id)
+
+    monkeypatch.setattr(evaluation_runner_module.asyncio, "wait", wait_after_ready_tick)
+    monkeypatch.setattr(runner, "_evaluate_issued_assigned_task", evaluate_issued_assigned_task)
+
+    assigned_work = _QueueStartFailureAssignedWork(queued=(queued_assignment,))
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(completed_assignment, blocking_assignment),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, object()),
+    )
+
+    completed_result = result_queue.get_nowait()
+    queued_failure = result_queue.get_nowait()
+    assert completed_result.task_id == completed_task.task_id
+    assert completed_result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    assert queued_failure.task_id == queued_task.task_id
+    assert queued_failure.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert result_queue.empty()
+    blocking_session_id = next(
+        session_id for assignment, session_id in assigned_work.started if assignment is blocking_assignment
+    )
+    queued_session_id = next(
+        session_id for assignment, session_id in assigned_work.started if assignment is queued_assignment
+    )
+    assert session_registry.get(blocking_session_id) is None
+    assert session_registry.get(queued_session_id) is None
 
 
 async def test_evaluate_assigned_task_calls_session_start_callback_after_session_issuance(tmp_path: Path) -> None:
@@ -682,6 +881,411 @@ async def test_evaluate_assigned_task_queue_marks_started_after_session_issuance
     await asyncio.wait_for(execution, timeout=1.0)
     result = result_queue.get_nowait()
     assert result.terminal_attempt.validator_session_id == assigned_work.started[0][1]
+
+
+async def test_evaluate_assigned_task_queue_marks_started_before_spawning_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, session_registry, _, _, _ = _assigned_task_test_context(tmp_path)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    evaluate_entered = asyncio.Event()
+    release_evaluation = asyncio.Event()
+    close_requested = asyncio.Event()
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+    real_create_task = asyncio.create_task
+
+    def create_task_with_start_boundary_check(coro, *args, **kwargs):
+        code = getattr(coro, "cr_code", None)
+        if code is not None and code.co_name == "_evaluate_issued_assigned_task":
+            assert len(assigned_work.started) == 1
+            started_assignment, session_id = assigned_work.started[0]
+            assert started_assignment is assignment
+            assert session_registry.get(session_id) is not None
+        return real_create_task(coro, *args, **kwargs)
+
+    monkeypatch.setattr(evaluation_runner_module.asyncio, "create_task", create_task_with_start_boundary_check)
+
+    class _BlockingOrchestrator:
+        async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+            evaluate_entered.set()
+            await release_evaluation.wait()
+            return _successful_outcome(request, score=1.0)
+
+    execution = real_create_task(
+        runner.evaluate_assigned_task_queue(
+            batch_id=batch_id,
+            artifact=artifact,
+            initial_assignments=(assignment,),
+            assigned_work=assigned_work,
+            close_requested=close_requested,
+            result_queue=result_queue,
+            orchestrator=cast(TaskRunOrchestrator, _BlockingOrchestrator()),
+        )
+    )
+
+    try:
+        await asyncio.wait_for(evaluate_entered.wait(), timeout=1.0)
+    finally:
+        close_requested.set()
+        release_evaluation.set()
+
+    await asyncio.wait_for(execution, timeout=1.0)
+    result = result_queue.get_nowait()
+    assert result.terminal_attempt.validator_session_id == assigned_work.started[0][1]
+
+
+async def test_evaluate_assigned_task_queue_cancels_active_children_on_queue_cancellation(
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, session_registry, _, _, _ = _assigned_task_test_context(tmp_path)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    evaluate_entered = asyncio.Event()
+    release_evaluation = asyncio.Event()
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    class _BlockingOrchestrator:
+        async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+            evaluate_entered.set()
+            await release_evaluation.wait()
+            return _successful_outcome(request, score=1.0)
+
+    execution = asyncio.create_task(
+        runner.evaluate_assigned_task_queue(
+            batch_id=batch_id,
+            artifact=artifact,
+            initial_assignments=(assignment,),
+            assigned_work=assigned_work,
+            close_requested=asyncio.Event(),
+            result_queue=result_queue,
+            orchestrator=cast(TaskRunOrchestrator, _BlockingOrchestrator()),
+        )
+    )
+
+    try:
+        await asyncio.wait_for(evaluate_entered.wait(), timeout=1.0)
+        session_id = assigned_work.started[0][1]
+        assert session_registry.get(session_id) is not None
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(execution, timeout=1.0)
+        assert session_registry.get(session_id) is None
+    finally:
+        release_evaluation.set()
+
+
+async def test_evaluate_assigned_task_queue_session_issue_failure_returns_delivery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(tmp_path)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    def fail_issue_session(**_kwargs):
+        raise RuntimeError("session issue failed")
+
+    monkeypatch.setattr(runner, "_issue_session", fail_issue_session)
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(assignment,),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, _SuccessfulOrchestrator()),
+    )
+
+    result = result_queue.get_nowait()
+    assert result.result is None
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert assigned_work.started == []
+
+
+async def test_evaluate_assigned_task_queue_partial_session_issue_failure_cleans_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    token_registry = InMemoryTokenRegistry()
+    progress = _progress(tmp_path)
+    platform_tool_proxy_scopes = PlatformToolProxyScopeRegistry()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=SessionManager(session_registry, token_registry),
+        evaluation_records=_RecordingEvaluationStore(),
+        receipt_log=FakeReceiptLog(),
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=_ClockSequence(datetime(2025, 10, 17, 12, 0, tzinfo=UTC)),
+        progress=progress,
+        platform_tool_proxy_scopes=platform_tool_proxy_scopes,
+    )
+    batch_id = uuid4()
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="partial issue failure"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+    issued_session_ids: list[UUID] = []
+
+    def fail_begin_session_attempt(session_id: UUID):
+        issued_session_ids.append(session_id)
+        raise RuntimeError("begin session failed")
+
+    monkeypatch.setattr(runner, "_begin_session_attempt", fail_begin_session_attempt)
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(assignment,),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, _SuccessfulOrchestrator()),
+    )
+
+    issued_session_id = issued_session_ids[0]
+    result = result_queue.get_nowait()
+    assert result.result is None
+    assert result.terminal_attempt.validator_session_id == issued_session_id
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert assigned_work.started == []
+    assert session_registry.get(issued_session_id) is None
+    assert token_registry.get_hash(issued_session_id) is None
+    assert issued_session_id not in progress.session_context_by_id
+    with pytest.raises(PlatformToolProxyControlError):
+        platform_tool_proxy_scopes.require_session(issued_session_id)
+
+
+async def test_evaluate_assigned_task_queue_mark_started_failure_cleans_issued_session(
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, session_registry, _, progress, _ = _assigned_task_test_context(tmp_path)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    class _RejectingAssignedWork(_AssignedWork):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rejected: list[tuple[MinerTaskWorkAssignment, UUID]] = []
+
+        def mark_started(self, assignment: MinerTaskWorkAssignment, validator_session_id: UUID) -> bool:
+            self.rejected.append((assignment, validator_session_id))
+            return False
+
+    class _UnexpectedOrchestrator:
+        async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+            raise AssertionError("execution should not spawn when mark_started fails")
+
+    assigned_work = _RejectingAssignedWork()
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(assignment,),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, _UnexpectedOrchestrator()),
+    )
+
+    rejected_assignment, issued_session_id = assigned_work.rejected[0]
+    result = result_queue.get_nowait()
+    assert rejected_assignment is assignment
+    assert result.result is None
+    assert result.terminal_attempt.validator_session_id == issued_session_id
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert assigned_work.started == []
+    assert session_registry.get(issued_session_id) is None
+    assert issued_session_id not in progress.session_context_by_id
+
+
+async def test_evaluate_assigned_task_queue_initial_start_failure_cleans_prior_child(
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, first_task, session_registry, _, _, _ = _assigned_task_test_context(tmp_path)
+    second_task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="second initial assignment"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    first_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=first_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    second_assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=second_task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_FAILED_ASSIGNMENT_TOKEN,
+    )
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    class _RejectSecondAssignedWork(_AssignedWork):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rejected: list[tuple[MinerTaskWorkAssignment, UUID]] = []
+
+        def mark_started(self, assignment: MinerTaskWorkAssignment, validator_session_id: UUID) -> bool:
+            if assignment is second_assignment:
+                self.rejected.append((assignment, validator_session_id))
+                return False
+            return super().mark_started(assignment, validator_session_id)
+
+    class _BlockingOrchestrator:
+        async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+            await asyncio.Event().wait()
+            raise AssertionError("blocked evaluation should be cancelled before completion")
+
+    assigned_work = _RejectSecondAssignedWork()
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(first_assignment, second_assignment),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, _BlockingOrchestrator()),
+    )
+
+    first_session_id = assigned_work.started[0][1]
+    second_session_id = assigned_work.rejected[0][1]
+    result = result_queue.get_nowait()
+    assert result.task_id == second_task.task_id
+    assert result.terminal_attempt.validator_session_id == second_session_id
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert session_registry.get(first_session_id) is None
+    assert session_registry.get(second_session_id) is None
+
+
+async def test_evaluate_assigned_task_queue_internal_issue_registration_failure_cleans_session(tmp_path: Path) -> None:
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    session_registry = FakeSessionRegistry()
+    token_registry = InMemoryTokenRegistry()
+    progress = _progress(tmp_path)
+
+    class _FailingPlatformToolProxyScopeRegistry(PlatformToolProxyScopeRegistry):
+        def __init__(self) -> None:
+            super().__init__()
+            self.issued_session_ids: list[UUID] = []
+
+        def register_session(self, **kwargs: object) -> None:
+            self.issued_session_ids.append(cast(UUID, kwargs["session_id"]))
+            raise RuntimeError("proxy scope registration failed")
+
+    platform_tool_proxy_scopes = _FailingPlatformToolProxyScopeRegistry()
+    runner = EvaluationRunner(
+        subtensor_client=subtensor,
+        session_manager=SessionManager(session_registry, token_registry),
+        evaluation_records=_RecordingEvaluationStore(),
+        receipt_log=FakeReceiptLog(),
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        clock=_ClockSequence(datetime(2025, 10, 17, 12, 0, tzinfo=UTC)),
+        progress=progress,
+        platform_tool_proxy_scopes=platform_tool_proxy_scopes,
+    )
+    batch_id = uuid4()
+    artifact = ScriptArtifactSpec(
+        uid=7,
+        artifact_id=uuid4(),
+        content_hash="artifact-hash",
+        size_bytes=128,
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="internal issue registration failure"),
+        reference_answer=ReferenceAnswer(text="reference"),
+    )
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    await runner.evaluate_assigned_task_queue(
+        batch_id=batch_id,
+        artifact=artifact,
+        initial_assignments=(assignment,),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=result_queue,
+        orchestrator=cast(TaskRunOrchestrator, _SuccessfulOrchestrator()),
+    )
+
+    issued_session_id = platform_tool_proxy_scopes.issued_session_ids[0]
+    result = result_queue.get_nowait()
+    assert result.result is None
+    assert result.terminal_attempt.validator_session_id == issued_session_id
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+    assert assigned_work.started == []
+    assert session_registry.get(issued_session_id) is None
+    assert token_registry.get_hash(issued_session_id) is None
+    assert issued_session_id not in progress.session_context_by_id
+    with pytest.raises(PlatformToolProxyControlError):
+        platform_tool_proxy_scopes.require_session(issued_session_id)
 
 
 async def test_evaluation_runner_assigned_success_does_not_read_validator_uid(tmp_path: Path) -> None:

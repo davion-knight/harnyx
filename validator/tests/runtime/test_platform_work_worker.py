@@ -243,66 +243,6 @@ async def test_worker_does_not_release_reservations_while_artifact_startup_is_in
     await worker._cancel_artifact_group_tasks()
 
 
-async def test_worker_does_not_release_dispatching_assignment_when_dispatch_lease_expires() -> None:
-    clock = _MonotonicClock()
-    batch_id = uuid4()
-    artifact = _artifact(uid=1)
-    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("dispatching"))
-    dispatch_claimed = asyncio.Event()
-
-    class _Platform:
-        def __init__(self) -> None:
-            self.request_count = 0
-
-        def request_miner_task_work(self, **_kwargs: object) -> tuple[MinerTaskWorkAssignment, ...]:
-            self.request_count += 1
-            return (assignment,) if self.request_count == 1 else ()
-
-        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
-            return ()
-
-    async def dispatching_executor(
-        _artifact_id: UUID,
-        assigned_work,
-        close_requested: asyncio.Event,
-        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
-    ) -> None:
-        assigned_work.mark_dispatch_ready()
-        await assigned_work.claim_for_dispatch()
-        dispatch_claimed.set()
-        await close_requested.wait()
-
-    worker = PlatformWorkWorker(
-        platform=_Platform(),  # type: ignore[arg-type]
-        execute_artifact_assignments=dispatching_executor,
-        target_concurrency=1,
-        max_active_artifacts=1,
-        dispatch_start_lease_seconds=10.0,
-        monotonic_clock=clock,
-    )
-
-    await worker.run_once()
-    await asyncio.wait_for(dispatch_claimed.wait(), timeout=1.0)
-    clock.advance(11.0)
-    await worker.run_once()
-
-    group = next(iter(worker._active_artifacts.values()))
-    record = next(iter(group.assignment_records.values()))
-    assert record.state is _AssignmentState.DISPATCHING
-    assert worker._active_attempts() == (
-        PlatformTaskAttemptIdentity(
-            batch_id=assignment.batch_id,
-            artifact_id=assignment.artifact.artifact_id,
-            task_id=assignment.task.task_id,
-            attempt_number=assignment.attempt_number,
-            validator_session_id=None,
-        ),
-    )
-
-    worker._request_all_artifact_groups_close()
-    await worker._cancel_artifact_group_tasks()
-
-
 async def test_mark_started_does_not_resurrect_released_dispatchable_assignment() -> None:
     clock = _MonotonicClock()
     batch_id = uuid4()
@@ -757,6 +697,7 @@ async def test_worker_delivery_failure_clears_group_identities_and_frees_capacit
         for index in range(3)
     )
     emitted = asyncio.Event()
+    submitted: list[tuple[PlatformOwnedTaskResult, ...]] = []
 
     class _Platform:
         def __init__(self) -> None:
@@ -772,6 +713,7 @@ async def test_worker_delivery_failure_clears_group_identities_and_frees_capacit
             self,
             results: tuple[PlatformOwnedTaskResult, ...],
         ) -> tuple[PlatformTaskResultAcknowledgement, ...]:
+            submitted.append(results)
             return tuple(_ack(result) for result in results)
 
     async def delivery_failure_executor(
@@ -781,13 +723,24 @@ async def test_worker_delivery_failure_clears_group_identities_and_frees_capacit
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
         assigned_work.mark_dispatch_ready()
-        assignment = await assigned_work.claim_for_dispatch()
+        delivery_failure_assignment = await assigned_work.claim_for_dispatch()
+        assigned_work.mark_started(delivery_failure_assignment, uuid4())
+        completed_assignment = await assigned_work.claim_for_dispatch()
+        assigned_work.mark_started(completed_assignment, uuid4())
+        ignored_assignment = await assigned_work.claim_for_dispatch()
         await result_queue.put(
             _platform_result(
-                assignment=assignment,
+                assignment=completed_assignment,
+                terminal_effect=MinerTaskAttemptTerminalEffect.TASK_RESULT,
+            )
+        )
+        await result_queue.put(
+            _platform_result(
+                assignment=delivery_failure_assignment,
                 terminal_effect=MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE,
             )
         )
+        assert ignored_assignment is assignments[2]
         emitted.set()
 
     worker = PlatformWorkWorker(
@@ -798,10 +751,16 @@ async def test_worker_delivery_failure_clears_group_identities_and_frees_capacit
     )
     await worker.run_once()
     assert len(worker._active_attempts()) == 3
+    assert any(attempt.validator_session_id is None for attempt in worker._active_attempts())
 
     await asyncio.wait_for(emitted.wait(), timeout=1)
     await worker.run_once()
 
+    assert len(submitted) == 1
+    assert {result.task_id for result in submitted[0]} == {
+        assignments[0].task.task_id,
+        assignments[1].task.task_id,
+    }
     assert worker._active_attempts() == ()
     assert worker._active_artifacts == {}
 
