@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from harnyx_validator.application.assigned_work import AssignedArtifactWork
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptTerminalEffect,
     MinerTaskWorkAssignment,
@@ -20,11 +22,17 @@ from harnyx_validator.application.ports.platform import PlatformPort, PlatformTa
 from harnyx_validator.infrastructure.observability.sentry import capture_exception
 
 logger = logging.getLogger("harnyx_validator.platform_work_worker")
+_PLATFORM_WORK_DISPATCH_START_LEASE_SECONDS = 300.0
+"""Bounded dispatch-start lease.
+
+This applies only after an assigned artifact has started and a specific
+assignment is dispatchable but still queued.
+"""
 
 ArtifactAssignmentExecutor = Callable[
     [
         UUID,
-        asyncio.Queue[MinerTaskWorkAssignment],
+        AssignedArtifactWork,
         asyncio.Event,
         asyncio.Queue[PlatformOwnedTaskResult],
     ],
@@ -39,18 +47,125 @@ class _ArtifactGroupState(StrEnum):
     CLOSING = "closing"
 
 
+class _AssignmentState(StrEnum):
+    STARTUP_RESERVED = "startup_reserved"
+    DISPATCHABLE_QUEUED = "dispatchable_queued"
+    DISPATCHING = "dispatching"
+    STARTED = "started"
+
+
 @dataclass(slots=True)
-class _ActiveArtifactGroup:
+class _AssignmentRecord:
+    assignment: MinerTaskWorkAssignment
+    reserved_at: float
+    state: _AssignmentState
+    dispatchable_at: float | None = None
+    session_id: UUID | None = None
+
+
+@dataclass(slots=True)
+class _AssignedArtifactGroup:
     artifact_id: UUID
     state: _ArtifactGroupState
     assignment_queue: asyncio.Queue[MinerTaskWorkAssignment]
     close_requested: asyncio.Event
     result_queue: asyncio.Queue[PlatformOwnedTaskResult]
-    active_assignments: dict[_AssignmentKey, MinerTaskWorkAssignment]
-    task: asyncio.Task[None]
+    assignment_records: dict[_AssignmentKey, _AssignmentRecord]
+    monotonic_clock: Callable[[], float]
+    task: asyncio.Task[None] | None = None
+    dispatch_ready: bool = False
 
-    def identities(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
-        return tuple(_assignment_identity(assignment) for assignment in self.active_assignments.values())
+    def put_nowait(self, assignment: MinerTaskWorkAssignment) -> bool:
+        key = _assignment_key(assignment)
+        if key in self.assignment_records:
+            return False
+        now = self.monotonic_clock()
+        state = _AssignmentState.DISPATCHABLE_QUEUED if self.dispatch_ready else _AssignmentState.STARTUP_RESERVED
+        self.assignment_records[key] = _AssignmentRecord(
+            assignment=assignment,
+            reserved_at=now,
+            state=state,
+            dispatchable_at=now if self.dispatch_ready else None,
+        )
+        self.assignment_queue.put_nowait(assignment)
+        return True
+
+    async def take_for_startup(self) -> MinerTaskWorkAssignment:
+        return await self.assignment_queue.get()
+
+    def take_nowait_for_startup(self) -> MinerTaskWorkAssignment:
+        return self.assignment_queue.get_nowait()
+
+    def drain_for_setup_failure(self) -> tuple[MinerTaskWorkAssignment, ...]:
+        return _drain_assignment_queue(self.assignment_queue)
+
+    def mark_dispatch_ready(self) -> None:
+        if self.dispatch_ready:
+            return
+        self.dispatch_ready = True
+        now = self.monotonic_clock()
+        for record in self.assignment_records.values():
+            if record.state is _AssignmentState.STARTUP_RESERVED:
+                record.state = _AssignmentState.DISPATCHABLE_QUEUED
+                record.dispatchable_at = now
+
+    def claim_initial_for_dispatch(self, assignment: MinerTaskWorkAssignment) -> bool:
+        return self._claim_for_dispatch(assignment)
+
+    async def claim_for_dispatch(self) -> MinerTaskWorkAssignment:
+        while True:
+            assignment = await self.assignment_queue.get()
+            if self._claim_for_dispatch(assignment):
+                return assignment
+
+    def claim_nowait_for_dispatch(self) -> MinerTaskWorkAssignment:
+        while True:
+            assignment = self.assignment_queue.get_nowait()
+            if self._claim_for_dispatch(assignment):
+                return assignment
+
+    def mark_started(self, assignment: MinerTaskWorkAssignment, validator_session_id: UUID) -> bool:
+        record = self.assignment_records.get(_assignment_key(assignment))
+        if record is None or record.state is not _AssignmentState.DISPATCHING:
+            return False
+        record.state = _AssignmentState.STARTED
+        record.session_id = validator_session_id
+        return True
+
+    def release_expired_queued(self, *, now: float, dispatch_start_lease_seconds: float) -> int:
+        expired_keys = frozenset(
+            key
+            for key, record in self.assignment_records.items()
+            if record.state is _AssignmentState.DISPATCHABLE_QUEUED
+            and record.dispatchable_at is not None
+            and now - record.dispatchable_at > dispatch_start_lease_seconds
+        )
+        if not expired_keys:
+            return 0
+        removed_keys = _remove_assignments_from_queue(self.assignment_queue, expired_keys)
+        for key in removed_keys:
+            self.assignment_records.pop(key, None)
+        return len(removed_keys)
+
+    def reportable_identities(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
+        return tuple(
+            _assignment_identity(record.assignment, session_id=record.session_id)
+            for record in self.assignment_records.values()
+        )
+
+    def local_inflight_count(self) -> int:
+        return len(self.assignment_records)
+
+    def clear_assignments(self) -> None:
+        self.assignment_records.clear()
+        _drain_assignment_queue(self.assignment_queue)
+
+    def _claim_for_dispatch(self, assignment: MinerTaskWorkAssignment) -> bool:
+        record = self.assignment_records.get(_assignment_key(assignment))
+        if record is None or record.state is not _AssignmentState.DISPATCHABLE_QUEUED:
+            return False
+        record.state = _AssignmentState.DISPATCHING
+        return True
 
 
 class PlatformWorkWorker:
@@ -64,6 +179,8 @@ class PlatformWorkWorker:
         target_concurrency: int,
         max_active_artifacts: int,
         poll_interval_seconds: float = 1.0,
+        dispatch_start_lease_seconds: float = _PLATFORM_WORK_DISPATCH_START_LEASE_SECONDS,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if target_concurrency < 1:
             raise ValueError("target_concurrency must be positive")
@@ -71,12 +188,16 @@ class PlatformWorkWorker:
             raise ValueError("max_active_artifacts must be positive")
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
+        if dispatch_start_lease_seconds <= 0:
+            raise ValueError("dispatch_start_lease_seconds must be positive")
         self._platform = platform
         self._execute_artifact_assignments = execute_artifact_assignments
         self._target_concurrency = target_concurrency
         self._max_active_artifacts = max_active_artifacts
         self._poll_interval_seconds = poll_interval_seconds
-        self._active_artifacts: dict[_ArtifactGroupKey, _ActiveArtifactGroup] = {}
+        self._dispatch_start_lease_seconds = dispatch_start_lease_seconds
+        self._monotonic_clock = monotonic_clock
+        self._active_artifacts: dict[_ArtifactGroupKey, _AssignedArtifactGroup] = {}
         self._pending_results: list[PlatformOwnedTaskResult] = []
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -118,11 +239,12 @@ class PlatformWorkWorker:
 
     async def run_once(self) -> None:
         self._collect_artifact_group_results()
+        self._release_expired_dispatchable_assignments()
         self._collect_closed_artifact_groups()
         if self._pending_results:
             if not await self._submit_pending_results():
                 return
-        free_slots = self._target_concurrency - len(self._active_attempts())
+        free_slots = self._target_concurrency - self._local_inflight_count()
         if free_slots <= 0:
             return
         assignments = await asyncio.to_thread(
@@ -160,55 +282,74 @@ class PlatformWorkWorker:
         self,
         group_key: _ArtifactGroupKey,
         artifact_id: UUID,
-    ) -> _ActiveArtifactGroup:
+    ) -> _AssignedArtifactGroup:
         assignment_queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
         close_requested = asyncio.Event()
         result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
-        group = _ActiveArtifactGroup(
+
+        group = _AssignedArtifactGroup(
             artifact_id=artifact_id,
             state=_ArtifactGroupState.OPEN,
             assignment_queue=assignment_queue,
             close_requested=close_requested,
             result_queue=result_queue,
-            active_assignments={},
-            task=asyncio.create_task(
-                self._execute_artifact_assignments(
-                    artifact_id,
-                    assignment_queue,
-                    close_requested,
-                    result_queue,
-                ),
-                name=f"platform-work-artifact-{artifact_id}",
+            assignment_records={},
+            monotonic_clock=self._monotonic_clock,
+        )
+        group.task = asyncio.create_task(
+            self._execute_artifact_assignments(
+                artifact_id,
+                group,
+                close_requested,
+                result_queue,
             ),
+            name=f"platform-work-artifact-{artifact_id}",
         )
         self._active_artifacts[group_key] = group
         return group
 
     def _enqueue_into_group(
         self,
-        group: _ActiveArtifactGroup,
+        group: _AssignedArtifactGroup,
         assignments: Sequence[MinerTaskWorkAssignment],
     ) -> bool:
         enqueued = False
         for assignment in assignments:
-            key = _assignment_key(assignment)
-            if key in group.active_assignments:
-                continue
-            group.active_assignments[key] = assignment
-            group.assignment_queue.put_nowait(assignment)
-            enqueued = True
+            enqueued = group.put_nowait(assignment) or enqueued
         return enqueued
 
     def _request_idle_artifact_groups_close(self, refilled_group_keys: set[_ArtifactGroupKey]) -> None:
         for group_key, group in tuple(self._active_artifacts.items()):
             if group.state is not _ArtifactGroupState.OPEN:
                 continue
-            if group.active_assignments:
+            if group.local_inflight_count():
                 continue
             if group_key in refilled_group_keys:
                 continue
             group.state = _ArtifactGroupState.CLOSING
             group.close_requested.set()
+
+    def _release_expired_dispatchable_assignments(self) -> None:
+        now = self._monotonic_clock()
+        for group_key, group in tuple(self._active_artifacts.items()):
+            if group.state is not _ArtifactGroupState.OPEN:
+                continue
+            if group.task is not None and group.task.done():
+                continue
+            removed_count = group.release_expired_queued(
+                now=now,
+                dispatch_start_lease_seconds=self._dispatch_start_lease_seconds,
+            )
+            if removed_count:
+                logger.warning(
+                    "released platform artifact assignments that stayed queued after dispatch readiness",
+                    extra={
+                        "batch_id": str(group_key[0]),
+                        "artifact_id": str(group_key[1]),
+                        "assignment_count": removed_count,
+                        "dispatch_start_lease_seconds": self._dispatch_start_lease_seconds,
+                    },
+                )
 
     def _request_all_artifact_groups_close(self) -> None:
         for group in self._active_artifacts.values():
@@ -216,7 +357,11 @@ class PlatformWorkWorker:
             group.close_requested.set()
 
     async def _cancel_artifact_group_tasks(self) -> None:
-        tasks = tuple(group.task for group in self._active_artifacts.values() if not group.task.done())
+        tasks = tuple(
+            group.task
+            for group in self._active_artifacts.values()
+            if group.task is not None and not group.task.done()
+        )
         for task in tasks:
             task.cancel()
         if tasks:
@@ -227,7 +372,7 @@ class PlatformWorkWorker:
         for group in tuple(self._active_artifacts.values()):
             self._collect_results_for_group(group)
 
-    def _collect_results_for_group(self, group: _ActiveArtifactGroup) -> None:
+    def _collect_results_for_group(self, group: _AssignedArtifactGroup) -> None:
         while True:
             try:
                 result = group.result_queue.get_nowait()
@@ -235,19 +380,22 @@ class PlatformWorkWorker:
                 break
             self._pending_results.append(result)
             if _is_delivery_failure_result(result):
-                group.active_assignments.clear()
+                group.clear_assignments()
                 group.state = _ArtifactGroupState.CLOSING
                 group.close_requested.set()
                 continue
-            group.active_assignments.pop(_result_key(result), None)
+            key = _result_key(result)
+            group.assignment_records.pop(key, None)
 
     def _collect_closed_artifact_groups(self) -> None:
         for group_key, group in tuple(self._active_artifacts.items()):
-            if not group.task.done():
+            if group.task is None or not group.task.done():
                 continue
             self._collect_results_for_group(group)
             try:
                 group.task.result()
+            except asyncio.CancelledError:
+                pass
             except Exception as exc:
                 logger.exception(
                     "platform artifact assignment executor failed",
@@ -257,16 +405,17 @@ class PlatformWorkWorker:
                     },
                 )
                 capture_exception(exc)
-            if group.active_assignments:
+            local_inflight_count = group.local_inflight_count()
+            if local_inflight_count:
                 logger.warning(
                     "clearing platform artifact assignments after executor closed",
                     extra={
                         "batch_id": str(group_key[0]),
                         "artifact_id": str(group_key[1]),
-                        "assignment_count": len(group.active_assignments),
+                        "assignment_count": local_inflight_count,
                     },
                 )
-                group.active_assignments.clear()
+                group.clear_assignments()
             del self._active_artifacts[group_key]
 
     async def _submit_pending_results(self) -> bool:
@@ -305,9 +454,14 @@ class PlatformWorkWorker:
         active = tuple(
             identity
             for group in self._active_artifacts.values()
-            for identity in group.identities()
+            for identity in group.reportable_identities()
         )
         return active + pending
+
+    def _local_inflight_count(self) -> int:
+        return sum(group.local_inflight_count() for group in self._active_artifacts.values()) + len(
+            self._pending_results
+        )
 
 
 def _group_assignments_by_batch_artifact(
@@ -328,14 +482,53 @@ def _assignment_key(assignment: MinerTaskWorkAssignment) -> _AssignmentKey:
     )
 
 
-def _assignment_identity(assignment: MinerTaskWorkAssignment) -> PlatformTaskAttemptIdentity:
+def _assignment_identity(
+    assignment: MinerTaskWorkAssignment,
+    *,
+    session_id: UUID | None,
+) -> PlatformTaskAttemptIdentity:
     return PlatformTaskAttemptIdentity(
         batch_id=assignment.batch_id,
         artifact_id=assignment.artifact.artifact_id,
         task_id=assignment.task.task_id,
         attempt_number=assignment.attempt_number,
-        validator_session_id=None,
+        validator_session_id=session_id,
     )
+
+
+def _drain_assignment_queue(
+    assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+    removed_keys: frozenset[_AssignmentKey] | None = None,
+) -> tuple[MinerTaskWorkAssignment, ...]:
+    assignments: list[MinerTaskWorkAssignment] = []
+    while True:
+        try:
+            assignment = assignment_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return tuple(assignments)
+        if removed_keys is None or _assignment_key(assignment) in removed_keys:
+            assignments.append(assignment)
+
+
+def _remove_assignments_from_queue(
+    assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+    removed_keys: frozenset[_AssignmentKey],
+) -> frozenset[_AssignmentKey]:
+    removed: set[_AssignmentKey] = set()
+    retained: list[MinerTaskWorkAssignment] = []
+    while True:
+        try:
+            assignment = assignment_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        key = _assignment_key(assignment)
+        if key in removed_keys:
+            removed.add(key)
+        else:
+            retained.append(assignment)
+    for assignment in retained:
+        assignment_queue.put_nowait(assignment)
+    return frozenset(removed)
 
 
 def _result_key(result: PlatformOwnedTaskResult) -> _AssignmentKey:

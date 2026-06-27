@@ -21,10 +21,21 @@ from harnyx_validator.application.ports.platform import (
     PlatformTaskResultAcknowledgement,
 )
 from harnyx_validator.runtime import platform_work_worker as platform_work_worker_module
-from harnyx_validator.runtime.platform_work_worker import PlatformWorkWorker
+from harnyx_validator.runtime.platform_work_worker import PlatformWorkWorker, _AssignmentState
 
 pytestmark = pytest.mark.anyio("asyncio")
 _ASSIGNMENT_TOKEN_PREFIX = "assignment-token"  # noqa: S105 - fixed test-only assignment token prefix
+
+
+class _MonotonicClock:
+    def __init__(self) -> None:
+        self.current = 0.0
+
+    def __call__(self) -> float:
+        return self.current
+
+    def advance(self, seconds: float) -> None:
+        self.current += seconds
 
 
 async def test_platform_work_worker_offloads_pending_result_submission(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,7 +140,7 @@ async def test_worker_groups_assignments_by_artifact_and_reports_all_active_atte
 
     async def idle_executor(
         _artifact_id: UUID,
-        _assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        _assigned_work,
         close_requested: asyncio.Event,
         _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
@@ -148,8 +159,419 @@ async def test_worker_groups_assignments_by_artifact_and_reports_all_active_atte
     }
     assert len(worker._active_attempts()) == 20
     for (_batch_id, artifact_id), group in worker._active_artifacts.items():
-        assert len(group.active_assignments) == 5
-        assert all(assignment.artifact.artifact_id == artifact_id for assignment in group.active_assignments.values())
+        assert group.local_inflight_count() == 5
+        assert all(
+            record.assignment.artifact.artifact_id == artifact_id
+            for record in group.assignment_records.values()
+        )
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_worker_does_not_release_reservations_while_artifact_startup_is_in_flight() -> None:
+    clock = _MonotonicClock()
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("never-started"))
+    request_active_attempts: list[tuple[PlatformTaskAttemptIdentity, ...]] = []
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(
+            self,
+            *,
+            active_attempts: tuple[PlatformTaskAttemptIdentity, ...],
+            **_kwargs: object,
+        ) -> tuple[MinerTaskWorkAssignment, ...]:
+            request_active_attempts.append(active_attempts)
+            self.request_count += 1
+            return (assignment,) if self.request_count == 1 else ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    startup_assignment_seen = asyncio.Event()
+
+    async def slow_startup_executor(
+        _artifact_id: UUID,
+        assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        await assigned_work.take_for_startup()
+        startup_assignment_seen.set()
+        await close_requested.wait()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=slow_startup_executor,
+        target_concurrency=1,
+        max_active_artifacts=1,
+        dispatch_start_lease_seconds=10.0,
+        monotonic_clock=clock,
+    )
+
+    await worker.run_once()
+    await asyncio.wait_for(startup_assignment_seen.wait(), timeout=1.0)
+    group = next(iter(worker._active_artifacts.values()))
+    record = next(iter(group.assignment_records.values()))
+    assert record.state is _AssignmentState.STARTUP_RESERVED
+    assert record.dispatchable_at is None
+    assert worker._local_inflight_count() == 1
+
+    clock.advance(11.0)
+    await worker.run_once()
+
+    assert group.task is not None
+    assert not group.task.done()
+    assert worker._local_inflight_count() == 1
+    assert request_active_attempts[-1] == ()
+    assert worker._active_attempts() == (
+        PlatformTaskAttemptIdentity(
+            batch_id=assignment.batch_id,
+            artifact_id=assignment.artifact.artifact_id,
+            task_id=assignment.task.task_id,
+            attempt_number=assignment.attempt_number,
+            validator_session_id=None,
+        ),
+    )
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_worker_does_not_release_dispatching_assignment_when_dispatch_lease_expires() -> None:
+    clock = _MonotonicClock()
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("dispatching"))
+    dispatch_claimed = asyncio.Event()
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[MinerTaskWorkAssignment, ...]:
+            self.request_count += 1
+            return (assignment,) if self.request_count == 1 else ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    async def dispatching_executor(
+        _artifact_id: UUID,
+        assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        assigned_work.mark_dispatch_ready()
+        await assigned_work.claim_for_dispatch()
+        dispatch_claimed.set()
+        await close_requested.wait()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=dispatching_executor,
+        target_concurrency=1,
+        max_active_artifacts=1,
+        dispatch_start_lease_seconds=10.0,
+        monotonic_clock=clock,
+    )
+
+    await worker.run_once()
+    await asyncio.wait_for(dispatch_claimed.wait(), timeout=1.0)
+    clock.advance(11.0)
+    await worker.run_once()
+
+    group = next(iter(worker._active_artifacts.values()))
+    record = next(iter(group.assignment_records.values()))
+    assert record.state is _AssignmentState.DISPATCHING
+    assert worker._active_attempts() == (
+        PlatformTaskAttemptIdentity(
+            batch_id=assignment.batch_id,
+            artifact_id=assignment.artifact.artifact_id,
+            task_id=assignment.task.task_id,
+            attempt_number=assignment.attempt_number,
+            validator_session_id=None,
+        ),
+    )
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_mark_started_does_not_resurrect_released_dispatchable_assignment() -> None:
+    clock = _MonotonicClock()
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("released"))
+    dispatch_ready = asyncio.Event()
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[MinerTaskWorkAssignment, ...]:
+            self.request_count += 1
+            return (assignment,) if self.request_count == 1 else ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    async def queued_executor(
+        _artifact_id: UUID,
+        assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        assigned_work.mark_dispatch_ready()
+        dispatch_ready.set()
+        await close_requested.wait()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=queued_executor,
+        target_concurrency=1,
+        max_active_artifacts=1,
+        dispatch_start_lease_seconds=10.0,
+        monotonic_clock=clock,
+    )
+
+    await worker.run_once()
+    await asyncio.wait_for(dispatch_ready.wait(), timeout=1.0)
+    group = next(iter(worker._active_artifacts.values()))
+
+    clock.advance(11.0)
+    await worker.run_once()
+
+    assert group.mark_started(assignment, uuid4()) is False
+    assert group.assignment_records == {}
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_worker_counts_startup_reservations_against_capacity_without_time_expiry() -> None:
+    clock = _MonotonicClock()
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("capacity"))
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[MinerTaskWorkAssignment, ...]:
+            self.request_count += 1
+            return (assignment,) if self.request_count == 1 else ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    async def never_starting_executor(
+        _artifact_id: UUID,
+        _assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        await close_requested.wait()
+
+    platform = _Platform()
+    worker = PlatformWorkWorker(
+        platform=platform,  # type: ignore[arg-type]
+        execute_artifact_assignments=never_starting_executor,
+        target_concurrency=1,
+        max_active_artifacts=1,
+        dispatch_start_lease_seconds=10.0,
+        monotonic_clock=clock,
+    )
+
+    await worker.run_once()
+    await worker.run_once()
+    assert platform.request_count == 1
+
+    clock.advance(11.0)
+    await worker.run_once()
+
+    assert platform.request_count == 1
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_worker_does_not_release_started_assignment_when_pre_start_lease_expires() -> None:
+    clock = _MonotonicClock()
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("started"))
+    session_id = uuid4()
+    request_active_attempts: list[tuple[PlatformTaskAttemptIdentity, ...]] = []
+    started = asyncio.Event()
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(
+            self,
+            *,
+            active_attempts: tuple[PlatformTaskAttemptIdentity, ...],
+            **_kwargs: object,
+        ) -> tuple[MinerTaskWorkAssignment, ...]:
+            request_active_attempts.append(active_attempts)
+            self.request_count += 1
+            return (assignment,) if self.request_count == 1 else ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    async def starting_executor(
+        _artifact_id: UUID,
+        assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        assigned_work.mark_dispatch_ready()
+        queued = await assigned_work.claim_for_dispatch()
+        assigned_work.mark_started(queued, session_id)
+        started.set()
+        await close_requested.wait()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=starting_executor,
+        target_concurrency=2,
+        max_active_artifacts=1,
+        dispatch_start_lease_seconds=10.0,
+        monotonic_clock=clock,
+    )
+
+    await worker.run_once()
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    clock.advance(11.0)
+    await worker.run_once()
+
+    group = next(iter(worker._active_artifacts.values()))
+    assert next(iter(group.assignment_records.values())).state is _AssignmentState.STARTED
+    assert group.task is not None
+    assert not group.task.done()
+    assert request_active_attempts[-1] == (
+        PlatformTaskAttemptIdentity(
+            batch_id=assignment.batch_id,
+            artifact_id=assignment.artifact.artifact_id,
+            task_id=assignment.task.task_id,
+            attempt_number=assignment.attempt_number,
+            validator_session_id=session_id,
+        ),
+    )
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_worker_expires_queued_reservation_inside_started_group_without_dropping_reassignment() -> None:
+    clock = _MonotonicClock()
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    started_assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("started"))
+    queued_assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("queued"))
+    session_id = uuid4()
+    request_active_attempts: list[tuple[PlatformTaskAttemptIdentity, ...]] = []
+    started = asyncio.Event()
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(
+            self,
+            *,
+            active_attempts: tuple[PlatformTaskAttemptIdentity, ...],
+            **_kwargs: object,
+        ) -> tuple[MinerTaskWorkAssignment, ...]:
+            request_active_attempts.append(active_attempts)
+            self.request_count += 1
+            if self.request_count == 1:
+                return (started_assignment, queued_assignment)
+            if self.request_count == 2:
+                return (queued_assignment,)
+            return ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    async def starts_only_first_assignment(
+        _artifact_id: UUID,
+        assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        assigned_work.mark_dispatch_ready()
+        assignment = await assigned_work.claim_for_dispatch()
+        assert assignment.task.task_id == started_assignment.task.task_id
+        assigned_work.mark_started(assignment, session_id)
+        started.set()
+        await close_requested.wait()
+
+    platform = _Platform()
+    worker = PlatformWorkWorker(
+        platform=platform,  # type: ignore[arg-type]
+        execute_artifact_assignments=starts_only_first_assignment,
+        target_concurrency=2,
+        max_active_artifacts=1,
+        dispatch_start_lease_seconds=10.0,
+        monotonic_clock=clock,
+    )
+
+    await worker.run_once()
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    group = next(iter(worker._active_artifacts.values()))
+    assert group.assignment_queue.qsize() == 1
+    assert group.local_inflight_count() == 2
+
+    clock.advance(11.0)
+    await worker.run_once()
+
+    assert platform.request_count == 2
+    assert request_active_attempts[-1] == (
+        PlatformTaskAttemptIdentity(
+            batch_id=started_assignment.batch_id,
+            artifact_id=started_assignment.artifact.artifact_id,
+            task_id=started_assignment.task.task_id,
+            attempt_number=started_assignment.attempt_number,
+            validator_session_id=session_id,
+        ),
+    )
+    assert group.local_inflight_count() == 2
+    assert {
+        record.assignment.task.task_id
+        for record in group.assignment_records.values()
+        if record.state is _AssignmentState.DISPATCHABLE_QUEUED
+    } == {queued_assignment.task.task_id}
+    assert group.assignment_queue.qsize() == 1
+
+    await worker.run_once()
+
+    assert group.local_inflight_count() == 2
+    assert {
+        record.assignment.task.task_id
+        for record in group.assignment_records.values()
+        if record.state is _AssignmentState.DISPATCHABLE_QUEUED
+    } == {queued_assignment.task.task_id}
+    assert group.assignment_queue.qsize() == 1
+
+    clock.advance(11.0)
+    await worker.run_once()
+
+    assert group.local_inflight_count() == 1
+    assert {
+        record.assignment.task.task_id
+        for record in group.assignment_records.values()
+    } == {started_assignment.task.task_id}
+    assert group.assignment_queue.empty()
 
     worker._request_all_artifact_groups_close()
     await worker._cancel_artifact_group_tasks()
@@ -180,11 +602,12 @@ async def test_worker_submits_finished_task_results_without_waiting_for_artifact
 
     async def partial_executor(
         _artifact_id: UUID,
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work,
         close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
-        assignment = await assignment_queue.get()
+        assigned_work.mark_dispatch_ready()
+        assignment = await assigned_work.claim_for_dispatch()
         await result_queue.put(_platform_result(assignment=assignment))
         result_ready.set()
         await close_requested.wait()
@@ -237,11 +660,13 @@ async def test_worker_keeps_same_artifact_assignments_separate_across_batches() 
 
     async def idle_executor(
         _artifact_id: UUID,
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work,
         close_requested: asyncio.Event,
         _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
-        assignment = await assignment_queue.get()
+        assigned_work.mark_dispatch_ready()
+        assignment = await assigned_work.claim_for_dispatch()
+        assigned_work.mark_started(assignment, uuid4())
         started_batches.append(assignment.batch_id)
         await close_requested.wait()
 
@@ -298,11 +723,12 @@ async def test_worker_collects_result_from_group_that_finishes_before_cleanup() 
 
     async def finishing_executor(
         _artifact_id: UUID,
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work,
         _close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
-        queued = await assignment_queue.get()
+        assigned_work.mark_dispatch_ready()
+        queued = await assigned_work.claim_for_dispatch()
         await result_queue.put(_platform_result(assignment=queued))
 
     worker = PlatformWorkWorker(
@@ -312,7 +738,9 @@ async def test_worker_collects_result_from_group_that_finishes_before_cleanup() 
         max_active_artifacts=1,
     )
     await worker.run_once()
-    await asyncio.wait_for(next(iter(worker._active_artifacts.values())).task, timeout=1)
+    task = next(iter(worker._active_artifacts.values())).task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
     await worker.run_once()
 
     assert submitted
@@ -348,11 +776,12 @@ async def test_worker_delivery_failure_clears_group_identities_and_frees_capacit
 
     async def delivery_failure_executor(
         _artifact_id: UUID,
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work,
         _close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
-        assignment = await assignment_queue.get()
+        assigned_work.mark_dispatch_ready()
+        assignment = await assigned_work.claim_for_dispatch()
         await result_queue.put(
             _platform_result(
                 assignment=assignment,
@@ -405,12 +834,16 @@ async def test_worker_collects_all_results_before_clearing_closed_artifact_group
 
     async def finishing_executor(
         _artifact_id: UUID,
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work,
         _close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
-        while not assignment_queue.empty():
-            assignment = await assignment_queue.get()
+        assigned_work.mark_dispatch_ready()
+        while True:
+            try:
+                assignment = assigned_work.claim_nowait_for_dispatch()
+            except asyncio.QueueEmpty:
+                break
             await result_queue.put(_platform_result(assignment=assignment))
 
     worker = PlatformWorkWorker(
@@ -421,7 +854,9 @@ async def test_worker_collects_all_results_before_clearing_closed_artifact_group
     )
 
     await worker.run_once()
-    await asyncio.wait_for(next(iter(worker._active_artifacts.values())).task, timeout=1)
+    task = next(iter(worker._active_artifacts.values())).task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
     await worker.run_once()
 
     assert len(submitted) == 1

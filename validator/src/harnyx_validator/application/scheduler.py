@@ -27,6 +27,7 @@ from harnyx_commons.domain.miner_task import (
 from harnyx_commons.sandbox.client import SandboxClient
 from harnyx_commons.sandbox.manager import SandboxDeployment, SandboxManager
 from harnyx_commons.sandbox.options import SandboxOptions
+from harnyx_validator.application.assigned_work import AssignedArtifactWork
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptAuditRecord,
     MinerTaskAttemptRetryDecision,
@@ -424,7 +425,7 @@ class EvaluationScheduler:
         batch_id: UUID,
         artifact: ScriptArtifactSpec,
         initial_assignments: Sequence[MinerTaskWorkAssignment],
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work: AssignedArtifactWork,
         close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
@@ -449,17 +450,18 @@ class EvaluationScheduler:
                 blocking_executor=self._blocking_executor,
             )
             orchestrator = self._make_orchestrator(deployment.client)
+            assigned_work.mark_dispatch_ready()
             await self._runner.evaluate_assigned_task_queue(
                 batch_id=batch_id,
                 artifact=artifact,
                 initial_assignments=assignments,
-                assignment_queue=assignment_queue,
+                assigned_work=assigned_work,
                 close_requested=close_requested,
                 result_queue=result_queue,
                 orchestrator=orchestrator,
             )
         except ArtifactExecutionFailedError as exc:
-            affected_assignments = (*assignments, *_drain_assignment_queue(assignment_queue))
+            affected_assignments = (*assignments, *assigned_work.drain_for_setup_failure())
             if exc.error_code is MinerTaskErrorCode.SCRIPT_VALIDATION_FAILED:
                 results = await self._runner.record_assigned_task_setup_failures(
                     batch_id=batch_id,
@@ -1296,17 +1298,6 @@ def _require_assignment_for_artifact(
         raise ValueError("assigned task batch_id does not match artifact queue")
     if assignment.artifact.artifact_id != artifact_id:
         raise ValueError("assigned task artifact_id does not match artifact queue")
-
-
-def _drain_assignment_queue(
-    assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
-) -> tuple[MinerTaskWorkAssignment, ...]:
-    assignments: list[MinerTaskWorkAssignment] = []
-    while True:
-        try:
-            assignments.append(assignment_queue.get_nowait())
-        except asyncio.QueueEmpty:
-            return tuple(assignments)
 
 
 def _sandbox_failure_diagnostics_from_options(options: object | None) -> SandboxFailureDiagnostics | None:

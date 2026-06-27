@@ -66,6 +66,47 @@ _ASSIGNMENT_TOKEN_1 = "assignment-token-1"  # noqa: S105 - fixed test-only assig
 _ASSIGNMENT_TOKEN_2 = "assignment-token-2"  # noqa: S105 - fixed test-only assignment token
 
 
+class _AssignedWork:
+    def __init__(self, queued: tuple[MinerTaskWorkAssignment, ...] = ()) -> None:
+        self.dispatch_ready = False
+        self.queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
+        for assignment in queued:
+            self.queue.put_nowait(assignment)
+        self.initial_claims: list[MinerTaskWorkAssignment] = []
+        self.started: list[tuple[MinerTaskWorkAssignment, UUID]] = []
+
+    async def take_for_startup(self) -> MinerTaskWorkAssignment:
+        return await self.queue.get()
+
+    def take_nowait_for_startup(self) -> MinerTaskWorkAssignment:
+        return self.queue.get_nowait()
+
+    def drain_for_setup_failure(self) -> tuple[MinerTaskWorkAssignment, ...]:
+        drained: list[MinerTaskWorkAssignment] = []
+        while True:
+            try:
+                drained.append(self.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return tuple(drained)
+
+    def mark_dispatch_ready(self) -> None:
+        self.dispatch_ready = True
+
+    def claim_initial_for_dispatch(self, assignment: MinerTaskWorkAssignment) -> bool:
+        self.initial_claims.append(assignment)
+        return True
+
+    async def claim_for_dispatch(self) -> MinerTaskWorkAssignment:
+        return await self.queue.get()
+
+    def claim_nowait_for_dispatch(self) -> MinerTaskWorkAssignment:
+        return self.queue.get_nowait()
+
+    def mark_started(self, assignment: MinerTaskWorkAssignment, validator_session_id: UUID) -> bool:
+        self.started.append((assignment, validator_session_id))
+        return True
+
+
 def _runner_for(func: Callable[..., Awaitable[ArtifactEvaluationOutcome]]) -> object:
     class _Runner:
         async def evaluate_artifact_with_state(self, **kwargs: Any) -> ArtifactEvaluationOutcome:
@@ -1686,7 +1727,7 @@ async def test_scheduler_runs_multiple_platform_assignments_in_one_artifact_sand
         batch_id=batch_id,
         artifact=artifact,
         initial_assignments=assignments,
-        assignment_queue=asyncio.Queue(),
+        assigned_work=_AssignedWork(),
         close_requested=close_requested,
         result_queue=result_queue,
     )
@@ -1750,8 +1791,7 @@ async def test_scheduler_returns_pair_results_for_assigned_artifact_script_valid
         max_attempts=2,
         assignment_token=_ASSIGNMENT_TOKEN_2,
     )
-    assignment_queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
-    assignment_queue.put_nowait(second_assignment)
+    assigned_work = _AssignedWork((second_assignment,))
     result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
 
     async def fail_setup(**kwargs):
@@ -1776,7 +1816,7 @@ async def test_scheduler_returns_pair_results_for_assigned_artifact_script_valid
         batch_id=batch_id,
         artifact=artifact,
         initial_assignments=(first_assignment,),
-        assignment_queue=assignment_queue,
+        assigned_work=assigned_work,
         close_requested=asyncio.Event(),
         result_queue=result_queue,
     )
@@ -1798,6 +1838,114 @@ async def test_scheduler_returns_pair_results_for_assigned_artifact_script_valid
         result.terminal_attempt.retry_decision is MinerTaskAttemptRetryDecision.WILL_NOT_RETRY
         for result in results
     )
+
+
+async def test_scheduler_marks_assigned_work_dispatch_ready_before_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    task = _task("assigned")
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    scheduler = EvaluationScheduler(
+        tasks=(task,),
+        subtensor_client=subtensor,
+        sandbox_manager=DummySandboxManager(),
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=DummyReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=lambda client: client,
+        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        clock=lambda: datetime(2025, 10, 27, tzinfo=UTC),
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        progress=DummyProgressRecorder(),
+    )
+    artifact = ScriptArtifactSpec(uid=3, artifact_id=uuid4(), content_hash="a", size_bytes=0)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=uuid4(),
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    observed_dispatch_ready: bool | None = None
+
+    async def fake_assigned_queue_runner(**kwargs: object) -> None:
+        nonlocal observed_dispatch_ready
+        observed_dispatch_ready = kwargs["assigned_work"].dispatch_ready
+
+    monkeypatch.setattr(scheduler._runner, "evaluate_assigned_task_queue", fake_assigned_queue_runner)
+
+    await scheduler.run_assigned_artifact_queue(
+        batch_id=assignment.batch_id,
+        artifact=artifact,
+        initial_assignments=(assignment,),
+        assigned_work=assigned_work,
+        close_requested=asyncio.Event(),
+        result_queue=asyncio.Queue(),
+    )
+
+    assert observed_dispatch_ready is True
+
+
+async def test_scheduler_stops_assigned_artifact_sandbox_when_queue_execution_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    blocking_executor: ThreadPoolExecutor,
+) -> None:
+    task = _task("assigned")
+    sandbox_manager = DummySandboxManager()
+    subtensor = FakeSubtensorClient()
+    subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
+    scheduler = EvaluationScheduler(
+        tasks=(task,),
+        subtensor_client=subtensor,
+        sandbox_manager=sandbox_manager,
+        session_manager=SessionManager(InMemorySessionRegistry(), InMemoryTokenRegistry()),
+        evaluation_records=DummyEvaluationRecordStore(),
+        receipt_log=DummyReceiptLog(),
+        blocking_executor=blocking_executor,
+        orchestrator_factory=lambda client: client,
+        sandbox_options_factory=lambda artifact: {"uid": artifact.uid, "artifact_id": artifact.artifact_id},
+        clock=lambda: datetime(2025, 10, 27, tzinfo=UTC),
+        config=SchedulerConfig(token_secret_bytes=8, session_ttl=timedelta(minutes=5)),
+        progress=DummyProgressRecorder(),
+    )
+    artifact = ScriptArtifactSpec(uid=3, artifact_id=uuid4(), content_hash="a", size_bytes=0)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=uuid4(),
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    runner_started = asyncio.Event()
+
+    async def blocked_assigned_queue_runner(**_kwargs: object) -> None:
+        runner_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(scheduler._runner, "evaluate_assigned_task_queue", blocked_assigned_queue_runner)
+    execution = asyncio.create_task(
+        scheduler.run_assigned_artifact_queue(
+            batch_id=assignment.batch_id,
+            artifact=artifact,
+            initial_assignments=(assignment,),
+            assigned_work=_AssignedWork(),
+            close_requested=asyncio.Event(),
+            result_queue=asyncio.Queue(),
+        )
+    )
+
+    await asyncio.wait_for(runner_started.wait(), timeout=1.0)
+    execution.cancel()
+    result = await asyncio.gather(execution, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert len(sandbox_manager.stops) == 1
 
 
 async def test_scheduler_returns_single_delivery_failure_for_assigned_artifact_setup_failure(
@@ -1845,8 +1993,7 @@ async def test_scheduler_returns_single_delivery_failure_for_assigned_artifact_s
         max_attempts=2,
         assignment_token=_ASSIGNMENT_TOKEN_2,
     )
-    assignment_queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
-    assignment_queue.put_nowait(second_assignment)
+    assigned_work = _AssignedWork((second_assignment,))
     result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
 
     async def fail_setup(**kwargs):
@@ -1871,14 +2018,14 @@ async def test_scheduler_returns_single_delivery_failure_for_assigned_artifact_s
         batch_id=batch_id,
         artifact=artifact,
         initial_assignments=(first_assignment,),
-        assignment_queue=assignment_queue,
+        assigned_work=assigned_work,
         close_requested=asyncio.Event(),
         result_queue=result_queue,
     )
 
     result = result_queue.get_nowait()
     assert result_queue.empty()
-    assert assignment_queue.empty()
+    assert assigned_work.queue.empty()
     assert result.task_id in {task.task_id for task in tasks}
     assert result.result is None
     assert result.terminal_attempt.error_code == "sandbox_start_failed"
@@ -2027,7 +2174,7 @@ async def test_scheduler_assigned_results_survive_teardown_and_activity_failures
         batch_id=assignment.batch_id,
         artifact=artifact,
         initial_assignments=(assignment,),
-        assignment_queue=asyncio.Queue(),
+        assigned_work=_AssignedWork(),
         close_requested=close_requested,
         result_queue=result_queue,
     )

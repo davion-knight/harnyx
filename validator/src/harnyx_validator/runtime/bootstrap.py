@@ -48,9 +48,9 @@ from harnyx_commons.tools.runtime_invoker import (
 from harnyx_commons.tools.search_models import SearchProviderName
 from harnyx_commons.tools.token_semaphore import DEFAULT_TOOL_CONCURRENCY_LIMITS, ToolConcurrencyLimiter
 from harnyx_commons.tools.usage_tracker import UsageTracker
+from harnyx_validator.application.assigned_work import AssignedArtifactWork
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskBatchSpec,
-    MinerTaskWorkAssignment,
     PlatformOwnedTaskResult,
 )
 from harnyx_validator.application.dto.registration import ValidatorRegistrationMetadata
@@ -416,17 +416,17 @@ def _build_platform_work_worker(
 
     async def execute_artifact_assignments(
         artifact_id: UUID,
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work: AssignedArtifactWork,
         close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
     ) -> None:
-        first_assignment = await assignment_queue.get()
+        first_assignment = await assigned_work.take_for_startup()
         if first_assignment.artifact.artifact_id != artifact_id:
             raise ValueError("platform work artifact queue received mismatched first assignment")
         initial_assignments = [first_assignment]
         while True:
             try:
-                assignment = assignment_queue.get_nowait()
+                assignment = assigned_work.take_nowait_for_startup()
             except asyncio.QueueEmpty:
                 break
             if assignment.artifact.artifact_id != artifact_id:
@@ -445,7 +445,7 @@ def _build_platform_work_worker(
             batch_id=first_assignment.batch_id,
             artifact=first_assignment.artifact,
             initial_assignments=tuple(initial_assignments),
-            assignment_queue=assignment_queue,
+            assigned_work=assigned_work,
             close_requested=close_requested,
             result_queue=result_queue,
         )

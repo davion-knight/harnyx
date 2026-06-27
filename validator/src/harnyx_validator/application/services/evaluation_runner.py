@@ -45,6 +45,7 @@ from harnyx_commons.miner_task_failure_policy import (
     provider_batch_failure_message,
 )
 from harnyx_commons.tools.types import is_search_tool
+from harnyx_validator.application.assigned_work import AssignedArtifactWork
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptAuditRecord,
     MinerTaskAttemptRetryDecision,
@@ -74,6 +75,7 @@ if TYPE_CHECKING:
 
 Clock = Callable[[], datetime]
 SubmissionFactory = Callable[[MinerTask, SessionIssued], Awaitable[MinerTaskRunSubmission]]
+SessionStartedCallback = Callable[[UUID], None]
 TaskSessionLimiter = AbstractAsyncContextManager[None]
 
 logger = logging.getLogger("harnyx_validator.scheduler")
@@ -328,6 +330,7 @@ class EvaluationRunner:
         max_attempts: int,
         assignment_token: str,
         orchestrator: TaskRunOrchestrator,
+        on_session_started: SessionStartedCallback | None = None,
     ) -> PlatformOwnedTaskResult:
         session_started_at = time.monotonic()
         terminal_outcome = "unexpected"
@@ -345,6 +348,8 @@ class EvaluationRunner:
                     assignment_token=assignment_token,
                 ).session.session_id
             )
+            if on_session_started is not None:
+                on_session_started(issued.session.session_id)
             attempt_started_at = self._clock()
             decision = await self._evaluate_task_attempt(
                 batch_id=batch_id,
@@ -433,7 +438,7 @@ class EvaluationRunner:
         batch_id: UUID,
         artifact: ScriptArtifactSpec,
         initial_assignments: Sequence[MinerTaskWorkAssignment],
-        assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
+        assigned_work: AssignedArtifactWork,
         close_requested: asyncio.Event,
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
         orchestrator: TaskRunOrchestrator,
@@ -443,6 +448,9 @@ class EvaluationRunner:
         close_waiter = asyncio.create_task(close_requested.wait())
 
         def start_assignment(assignment: MinerTaskWorkAssignment) -> None:
+            def on_session_started(session_id: UUID) -> None:
+                assigned_work.mark_started(assignment, session_id)
+
             active[
                 asyncio.create_task(
                     self.evaluate_assigned_task(
@@ -453,25 +461,27 @@ class EvaluationRunner:
                         max_attempts=assignment.max_attempts,
                         assignment_token=assignment.assignment_token,
                         orchestrator=orchestrator,
+                        on_session_started=on_session_started,
                     )
                 )
             ] = assignment
 
         for assignment in initial_assignments:
-            start_assignment(assignment)
+            if assigned_work.claim_initial_for_dispatch(assignment):
+                start_assignment(assignment)
 
         try:
             while active or not close_requested.is_set():
                 while not close_requested.is_set():
                     try:
-                        start_assignment(assignment_queue.get_nowait())
+                        start_assignment(assigned_work.claim_nowait_for_dispatch())
                     except asyncio.QueueEmpty:
                         break
 
                 if not active:
                     if close_requested.is_set():
                         break
-                    queue_waiter = asyncio.create_task(assignment_queue.get())
+                    queue_waiter = asyncio.create_task(assigned_work.claim_for_dispatch())
                     done, _pending = await asyncio.wait(
                         {queue_waiter, close_waiter},
                         return_when=asyncio.FIRST_COMPLETED,
@@ -484,7 +494,7 @@ class EvaluationRunner:
                 wait_for: set[asyncio.Task[object]] = set(active)
                 if not close_requested.is_set():
                     if queue_waiter is None:
-                        queue_waiter = asyncio.create_task(assignment_queue.get())
+                        queue_waiter = asyncio.create_task(assigned_work.claim_for_dispatch())
                     wait_for.add(queue_waiter)
                     wait_for.add(close_waiter)
                 done, _pending = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)

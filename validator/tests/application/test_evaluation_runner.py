@@ -73,6 +73,51 @@ _FAILED_ASSIGNMENT_TOKEN = "failed-assignment-token"  # noqa: S105 - fixed test-
 _COMPLETED_ASSIGNMENT_TOKEN = "completed-assignment-token"  # noqa: S105 - fixed test-only assignment token
 
 
+class _AssignedWork:
+    def __init__(self, queued: tuple[MinerTaskWorkAssignment, ...] = ()) -> None:
+        self.queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
+        for assignment in queued:
+            self.queue.put_nowait(assignment)
+        self.initial_claims: list[MinerTaskWorkAssignment] = []
+        self.dispatch_claims: list[MinerTaskWorkAssignment] = []
+        self.started: list[tuple[MinerTaskWorkAssignment, UUID]] = []
+
+    async def take_for_startup(self) -> MinerTaskWorkAssignment:
+        return await self.queue.get()
+
+    def take_nowait_for_startup(self) -> MinerTaskWorkAssignment:
+        return self.queue.get_nowait()
+
+    def drain_for_setup_failure(self) -> tuple[MinerTaskWorkAssignment, ...]:
+        drained: list[MinerTaskWorkAssignment] = []
+        while True:
+            try:
+                drained.append(self.queue.get_nowait())
+            except asyncio.QueueEmpty:
+                return tuple(drained)
+
+    def mark_dispatch_ready(self) -> None:
+        return None
+
+    def claim_initial_for_dispatch(self, assignment: MinerTaskWorkAssignment) -> bool:
+        self.initial_claims.append(assignment)
+        return True
+
+    async def claim_for_dispatch(self) -> MinerTaskWorkAssignment:
+        assignment = await self.queue.get()
+        self.dispatch_claims.append(assignment)
+        return assignment
+
+    def claim_nowait_for_dispatch(self) -> MinerTaskWorkAssignment:
+        assignment = self.queue.get_nowait()
+        self.dispatch_claims.append(assignment)
+        return assignment
+
+    def mark_started(self, assignment: MinerTaskWorkAssignment, validator_session_id: UUID) -> bool:
+        self.started.append((assignment, validator_session_id))
+        return True
+
+
 def _progress(tmp_path: Path) -> FileBackedRunProgress:
     return FileBackedRunProgress(storage_root=tmp_path / "run-progress")
 
@@ -444,12 +489,13 @@ async def test_evaluate_assigned_task_queue_drains_same_tick_results_before_deli
 
     monkeypatch.setattr(runner, "evaluate_assigned_task", evaluate_assigned_task)
 
+    assigned_work = _AssignedWork()
     result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
     await runner.evaluate_assigned_task_queue(
         batch_id=batch_id,
         artifact=artifact,
         initial_assignments=(failed_assignment, completed_assignment),
-        assignment_queue=asyncio.Queue(),
+        assigned_work=assigned_work,
         close_requested=asyncio.Event(),
         result_queue=result_queue,
         orchestrator=cast(TaskRunOrchestrator, object()),
@@ -467,6 +513,7 @@ async def test_evaluate_assigned_task_queue_drains_same_tick_results_before_deli
         MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE,
         MinerTaskAttemptTerminalEffect.TASK_RESULT,
     }
+    assert assigned_work.initial_claims == [failed_assignment, completed_assignment]
     assert result_queue.empty()
 
 
@@ -527,12 +574,13 @@ async def test_evaluate_assigned_task_queue_converts_task_exception_and_drains_s
 
     monkeypatch.setattr(runner, "evaluate_assigned_task", evaluate_assigned_task)
 
+    assigned_work = _AssignedWork()
     result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
     await runner.evaluate_assigned_task_queue(
         batch_id=batch_id,
         artifact=artifact,
         initial_assignments=(failed_assignment, completed_assignment),
-        assignment_queue=asyncio.Queue(),
+        assigned_work=assigned_work,
         close_requested=asyncio.Event(),
         result_queue=result_queue,
         orchestrator=cast(TaskRunOrchestrator, object()),
@@ -546,7 +594,94 @@ async def test_evaluate_assigned_task_queue_converts_task_exception_and_drains_s
     assert failure_result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
     success_result = next(result for result in results if result.task_id == completed_task.task_id)
     assert success_result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    assert assigned_work.initial_claims == [failed_assignment, completed_assignment]
     assert result_queue.empty()
+
+
+async def test_evaluate_assigned_task_calls_session_start_callback_after_session_issuance(tmp_path: Path) -> None:
+    runner, batch_id, artifact, task, session_registry, _, _, _ = _assigned_task_test_context(tmp_path)
+    started_session_ids: list[UUID] = []
+    evaluate_entered = asyncio.Event()
+    release_evaluation = asyncio.Event()
+
+    class _BlockingOrchestrator:
+        async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+            evaluate_entered.set()
+            await release_evaluation.wait()
+            return _successful_outcome(request, score=1.0)
+
+    execution = asyncio.create_task(
+        runner.evaluate_assigned_task(
+            batch_id=batch_id,
+            artifact=artifact,
+            task=task,
+            attempt_number=1,
+            max_attempts=2,
+            assignment_token=_ASSIGNMENT_TOKEN,
+            orchestrator=cast(TaskRunOrchestrator, _BlockingOrchestrator()),
+            on_session_started=started_session_ids.append,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(evaluate_entered.wait(), timeout=1.0)
+        assert len(started_session_ids) == 1
+        assert session_registry.get(started_session_ids[0]) is not None
+    finally:
+        release_evaluation.set()
+
+    result = await asyncio.wait_for(execution, timeout=1.0)
+    assert result.terminal_attempt.validator_session_id == started_session_ids[0]
+
+
+async def test_evaluate_assigned_task_queue_marks_started_after_session_issuance(tmp_path: Path) -> None:
+    runner, batch_id, artifact, task, session_registry, _, _, _ = _assigned_task_test_context(tmp_path)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    assigned_work = _AssignedWork()
+    evaluate_entered = asyncio.Event()
+    release_evaluation = asyncio.Event()
+    close_requested = asyncio.Event()
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+
+    class _BlockingOrchestrator:
+        async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+            evaluate_entered.set()
+            await release_evaluation.wait()
+            return _successful_outcome(request, score=1.0)
+
+    execution = asyncio.create_task(
+        runner.evaluate_assigned_task_queue(
+            batch_id=batch_id,
+            artifact=artifact,
+            initial_assignments=(assignment,),
+            assigned_work=assigned_work,
+            close_requested=close_requested,
+            result_queue=result_queue,
+            orchestrator=cast(TaskRunOrchestrator, _BlockingOrchestrator()),
+        )
+    )
+
+    try:
+        await asyncio.wait_for(evaluate_entered.wait(), timeout=1.0)
+        assert assigned_work.initial_claims == [assignment]
+        assert len(assigned_work.started) == 1
+        started_assignment, session_id = assigned_work.started[0]
+        assert started_assignment is assignment
+        assert session_registry.get(session_id) is not None
+    finally:
+        close_requested.set()
+        release_evaluation.set()
+
+    await asyncio.wait_for(execution, timeout=1.0)
+    result = result_queue.get_nowait()
+    assert result.terminal_attempt.validator_session_id == assigned_work.started[0][1]
 
 
 async def test_evaluation_runner_assigned_success_does_not_read_validator_uid(tmp_path: Path) -> None:
