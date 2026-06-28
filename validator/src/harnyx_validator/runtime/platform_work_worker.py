@@ -278,8 +278,11 @@ class PlatformWorkWorker:
         if self._pending_results:
             if not await self._submit_pending_results():
                 return
+        self._request_idle_artifact_groups_close(set())
         free_slots = self._target_concurrency - self._local_inflight_count()
         if free_slots <= 0:
+            return
+        if not self._can_request_platform_work():
             return
         assignments = await asyncio.to_thread(
             self._platform.request_miner_task_work,
@@ -352,6 +355,12 @@ class PlatformWorkWorker:
         for assignment in assignments:
             enqueued = group.put_nowait(assignment) or enqueued
         return enqueued
+
+    def _can_request_platform_work(self) -> bool:
+        return not any(
+            group.state is _ArtifactGroupState.CLOSING or bool(group.starting_records)
+            for group in self._active_artifacts.values()
+        )
 
     def _request_idle_artifact_groups_close(self, refilled_group_keys: set[_ArtifactGroupKey]) -> None:
         for group_key, group in tuple(self._active_artifacts.items()):

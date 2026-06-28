@@ -21,7 +21,11 @@ from harnyx_validator.application.ports.platform import (
     PlatformTaskResultAcknowledgement,
 )
 from harnyx_validator.runtime import platform_work_worker as platform_work_worker_module
-from harnyx_validator.runtime.platform_work_worker import PlatformWorkWorker, _AssignedArtifactGroup, _AssignmentState
+from harnyx_validator.runtime.platform_work_worker import (
+    PlatformWorkWorker,
+    _AssignedArtifactGroup,
+    _AssignmentState,
+)
 
 pytestmark = pytest.mark.anyio("asyncio")
 _ASSIGNMENT_TOKEN_PREFIX = "assignment-token"  # noqa: S105 - fixed test-only assignment token prefix
@@ -390,6 +394,202 @@ async def test_worker_counts_startup_reservations_against_capacity_without_time_
     await worker.run_once()
 
     assert platform.request_count == 1
+
+    worker._request_all_artifact_groups_close()
+    await worker._cancel_artifact_group_tasks()
+
+
+async def test_worker_does_not_poll_platform_while_artifact_group_is_closing() -> None:
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    group = _assigned_group(artifact_id=artifact.artifact_id)
+    group.state = platform_work_worker_module._ArtifactGroupState.CLOSING
+
+    class _Platform:
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[object, ...]:
+            raise AssertionError("worker must not request work while an artifact group is closing")
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=_unexpected_execute_artifact_assignments,
+        target_concurrency=1,
+        max_active_artifacts=1,
+    )
+    worker._active_artifacts[(batch_id, artifact.artifact_id)] = group
+
+    await worker.run_once()
+
+    assert group.state is platform_work_worker_module._ArtifactGroupState.CLOSING
+
+
+async def test_worker_requests_idle_group_close_after_result_collection_before_polling_platform() -> None:
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("finished"))
+    result = _platform_result(assignment=assignment)
+    group = _assigned_group(artifact_id=artifact.artifact_id)
+    assert group.put_nowait(assignment)
+    group.result_queue.put_nowait(result)
+    submitted: list[tuple[PlatformOwnedTaskResult, ...]] = []
+
+    class _Platform:
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[object, ...]:
+            raise AssertionError("worker must close idle artifact groups before requesting work")
+
+        def submit_miner_task_work_results(
+            self,
+            results: tuple[PlatformOwnedTaskResult, ...],
+        ) -> tuple[PlatformTaskResultAcknowledgement, ...]:
+            submitted.append(results)
+            return tuple(_ack(item) for item in results)
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=_unexpected_execute_artifact_assignments,
+        target_concurrency=1,
+        max_active_artifacts=1,
+    )
+    worker._active_artifacts[(batch_id, artifact.artifact_id)] = group
+
+    await worker.run_once()
+
+    assert submitted == [(result,)]
+    assert group.state is platform_work_worker_module._ArtifactGroupState.CLOSING
+    assert group.close_requested.is_set()
+    assert group.local_inflight_count() == 0
+
+
+async def test_worker_does_not_poll_platform_while_claimed_assignment_is_unreportable() -> None:
+    batch_id = uuid4()
+    artifact = _artifact(uid=1)
+    assignment = _assignment(batch_id=batch_id, artifact=artifact, task=_task("claimed"))
+    group = _assigned_group(artifact_id=artifact.artifact_id)
+    assert group.put_nowait(assignment)
+    group.mark_dispatch_ready()
+    claimed = group.claim_initial_for_dispatch(assignment)
+    assert claimed is not None
+    assert group.local_inflight_count() == 1
+    assert group.reportable_identities() == ()
+
+    class _Platform:
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[object, ...]:
+            raise AssertionError("worker must not request work while claimed assignments are unreportable")
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=_unexpected_execute_artifact_assignments,
+        target_concurrency=2,
+        max_active_artifacts=1,
+    )
+    worker._active_artifacts[(batch_id, artifact.artifact_id)] = group
+
+    await worker.run_once()
+
+    assert group.starting_records
+    assert worker._local_inflight_count() == 1
+
+
+async def test_worker_can_poll_when_full_artifact_capacity_is_open_and_reportable() -> None:
+    batch_id = uuid4()
+    artifacts = (_artifact(uid=1), _artifact(uid=2))
+    first_assignment = _assignment(batch_id=batch_id, artifact=artifacts[0], task=_task("first"))
+    second_assignment = _assignment(batch_id=batch_id, artifact=artifacts[1], task=_task("second"))
+    request_active_attempts: list[tuple[PlatformTaskAttemptIdentity, ...]] = []
+
+    class _Platform:
+        def request_miner_task_work(
+            self,
+            *,
+            active_attempts: tuple[PlatformTaskAttemptIdentity, ...],
+            **_kwargs: object,
+        ) -> tuple[object, ...]:
+            request_active_attempts.append(active_attempts)
+            return ()
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    worker = PlatformWorkWorker(
+        platform=_Platform(),  # type: ignore[arg-type]
+        execute_artifact_assignments=_unexpected_execute_artifact_assignments,
+        target_concurrency=3,
+        max_active_artifacts=2,
+    )
+    for index, assignment in enumerate((first_assignment, second_assignment), start=1):
+        group = _assigned_group(artifact_id=assignment.artifact.artifact_id)
+        assert group.put_nowait(assignment)
+        group.mark_dispatch_ready()
+        claimed = group.claim_initial_for_dispatch(assignment)
+        assert claimed is not None
+        claimed.mark_started(UUID(int=index))
+        worker._active_artifacts[(batch_id, assignment.artifact.artifact_id)] = group
+
+    await worker.run_once()
+
+    assert len(request_active_attempts) == 1
+    assert {
+        (attempt.artifact_id, attempt.task_id, attempt.validator_session_id)
+        for attempt in request_active_attempts[0]
+    } == {
+        (first_assignment.artifact.artifact_id, first_assignment.task.task_id, UUID(int=1)),
+        (second_assignment.artifact.artifact_id, second_assignment.task.task_id, UUID(int=2)),
+    }
+
+
+async def test_worker_resumes_polling_after_closed_artifact_group_is_collected() -> None:
+    old_batch_id = uuid4()
+    old_artifact = _artifact(uid=1)
+    new_batch_id = uuid4()
+    new_artifact = _artifact(uid=2)
+    new_assignment = _assignment(batch_id=new_batch_id, artifact=new_artifact, task=_task("new"))
+
+    class _Platform:
+        def __init__(self) -> None:
+            self.request_count = 0
+
+        def request_miner_task_work(self, **_kwargs: object) -> tuple[MinerTaskWorkAssignment, ...]:
+            self.request_count += 1
+            return (new_assignment,)
+
+        def submit_miner_task_work_results(self, _results: object) -> tuple[object, ...]:
+            return ()
+
+    async def completed_executor() -> None:
+        return
+
+    async def idle_executor(
+        _artifact_id: UUID,
+        _assigned_work,
+        close_requested: asyncio.Event,
+        _result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+    ) -> None:
+        await close_requested.wait()
+
+    platform = _Platform()
+    worker = PlatformWorkWorker(
+        platform=platform,  # type: ignore[arg-type]
+        execute_artifact_assignments=idle_executor,
+        target_concurrency=1,
+        max_active_artifacts=1,
+    )
+    old_group = _assigned_group(artifact_id=old_artifact.artifact_id)
+    old_group.state = platform_work_worker_module._ArtifactGroupState.CLOSING
+    old_group.task = asyncio.create_task(completed_executor())
+    await old_group.task
+    worker._active_artifacts[(old_batch_id, old_artifact.artifact_id)] = old_group
+
+    await worker.run_once()
+
+    assert platform.request_count == 1
+    assert set(worker._active_artifacts) == {(new_batch_id, new_artifact.artifact_id)}
+    new_group = worker._active_artifacts[(new_batch_id, new_artifact.artifact_id)]
+    assert new_group.local_inflight_count() == 1
 
     worker._request_all_artifact_groups_close()
     await worker._cancel_artifact_group_tasks()
