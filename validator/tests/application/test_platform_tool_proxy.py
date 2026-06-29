@@ -36,6 +36,18 @@ class _RecordingLocalInvoker:
         return {"local": True}
 
 
+class _RecordingPhaseRecorder:
+    def __init__(self) -> None:
+        self.phase = "entrypoint_invocation"
+        self.marks: list[str] = []
+
+    def mark(self, phase: str) -> str:
+        previous = self.phase
+        self.phase = phase
+        self.marks.append(phase)
+        return previous
+
+
 @dataclass(slots=True)
 class _RecordingPlatformToolProxyPlatform:
     calls: list[dict[str, object]]
@@ -172,6 +184,50 @@ async def test_platform_tool_proxy_proxy_forwards_provider_tool_with_session_sco
     assert result.actual_cost_provider == "parallel"
     scope = scopes.require_session(session_id)
     assert scope.grants_by_attempt[2].token == f"{_GRANT_VALUE}-2"
+
+
+async def test_platform_tool_proxy_successful_proxy_call_restores_attempt_phase() -> None:
+    """Keep later sandbox timeouts attributed to miner invocation after a successful tool call."""
+
+    batch_id = uuid4()
+    session_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    phase_recorder = _RecordingPhaseRecorder()
+    scopes = PlatformToolProxyScopeRegistry()
+    scopes.register_session(
+        batch_id=batch_id,
+        session_id=session_id,
+        artifact_id=artifact_id,
+        task_id=task_id,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        phase_recorder=phase_recorder,
+    )
+    invoker = PlatformToolProxyProxyToolInvoker(
+        local_invoker=_RecordingLocalInvoker(),
+        platform_tool_proxy_platform=_RecordingPlatformToolProxyPlatform(calls=[], grants=[]),
+        scopes=scopes,
+    )
+
+    await invoker.invoke(
+        "search_web",
+        args=(),
+        kwargs={"provider": "parallel", "search_queries": ["harnyx"]},
+        context=ToolInvocationContext(
+            receipt_id=str(uuid4()),
+            session_id=session_id,
+            active_attempt=1,
+            uid=7,
+        ),
+    )
+
+    assert phase_recorder.marks == [
+        "platform_tool_proxy_grant_create",
+        "entrypoint_invocation",
+        "platform_tool_proxy_execute",
+        "entrypoint_invocation",
+    ]
+    assert phase_recorder.phase == "entrypoint_invocation"
 
 
 async def test_platform_tool_proxy_proxy_uses_fixed_execute_transport_timeout() -> None:

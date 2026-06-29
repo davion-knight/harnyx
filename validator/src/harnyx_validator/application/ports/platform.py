@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from harnyx_commons.domain.tool_call import ToolExecutionFacts
@@ -132,7 +132,7 @@ class PlatformTaskResultAcknowledgement:
     artifact_id: UUID
     task_id: UUID
     attempt_number: int
-    outcome: str
+    outcome: Literal["accepted", "rejected"]
     canonical: bool
     reason_code: str | None = None
     reason: str | None = None

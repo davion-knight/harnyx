@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -15,7 +16,7 @@ class ClaimedAssignedTask(Protocol):
     def assignment(self) -> MinerTaskWorkAssignment:
         """The platform-owned assignment carried by this claim."""
 
-    def mark_started(self, validator_session_id: UUID) -> None:
+    def mark_started(self, validator_session_id: UUID, *, started_at: datetime) -> None:
         """Attach the issued validator session and make the claim reportable."""
 
     def fail_before_start(self, result: PlatformOwnedTaskResult) -> None:
@@ -47,4 +48,11 @@ class AssignedArtifactWork(Protocol):
         """Claim a queued assignment before validator session start without waiting."""
 
 
-__all__ = ["AssignedArtifactWork", "ClaimedAssignedTask"]
+class PhaseRecorder(Protocol):
+    """Records the currently awaited assigned-attempt phase."""
+
+    def mark(self, phase: str) -> str:
+        """Record that a named awaited phase is about to run."""
+
+
+__all__ = ["AssignedArtifactWork", "ClaimedAssignedTask", "PhaseRecorder"]

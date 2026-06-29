@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -60,6 +61,7 @@ class _AssignmentRecord:
     state: _AssignmentState
     dispatchable_at: float | None = None
     session_id: UUID | None = None
+    started_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -73,8 +75,10 @@ class _ClaimedAssignment:
     def assignment(self) -> MinerTaskWorkAssignment:
         return self.record.assignment
 
-    def mark_started(self, validator_session_id: UUID) -> None:
-        self.group._finish_starting_claim(self, validator_session_id)
+    def mark_started(self, validator_session_id: UUID, *, started_at: datetime | None = None) -> None:
+        if started_at is None:
+            started_at = datetime.now(UTC)
+        self.group._finish_starting_claim(self, validator_session_id, started_at=started_at)
 
     def fail_before_start(self, result: PlatformOwnedTaskResult) -> None:
         self.group._fail_starting_claim(self, result)
@@ -92,6 +96,7 @@ class _AssignedArtifactGroup:
     monotonic_clock: Callable[[], float]
     task: asyncio.Task[None] | None = None
     dispatch_ready: bool = False
+    deferred_delivery_failure: PlatformOwnedTaskResult | None = None
 
     def put_nowait(self, assignment: MinerTaskWorkAssignment) -> bool:
         key = _assignment_key(assignment)
@@ -160,9 +165,14 @@ class _AssignedArtifactGroup:
         return len(removed_keys)
 
     def reportable_identities(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
-        return tuple(
+        active_identities = tuple(
             _assignment_identity(record.assignment, session_id=record.session_id)
             for record in self.assignment_records.values()
+        )
+        if self.deferred_delivery_failure is None:
+            return active_identities
+        return active_identities + (
+            _result_identity(self.deferred_delivery_failure),
         )
 
     def local_inflight_count(self) -> int:
@@ -173,6 +183,23 @@ class _AssignedArtifactGroup:
         self.starting_records.clear()
         _drain_assignment_queue(self.assignment_queue)
 
+    def close_for_delivery_failure(self, result: PlatformOwnedTaskResult) -> None:
+        self.deferred_delivery_failure = result
+        self.state = _ArtifactGroupState.CLOSING
+        self.close_requested.set()
+        self.assignment_records.pop(_result_key(result), None)
+        self._clear_not_started_assignments()
+
+    def flush_deferred_delivery_failure_if_idle(self) -> PlatformOwnedTaskResult | None:
+        if self.local_inflight_count():
+            return None
+        return self.pop_deferred_delivery_failure()
+
+    def pop_deferred_delivery_failure(self) -> PlatformOwnedTaskResult | None:
+        result = self.deferred_delivery_failure
+        self.deferred_delivery_failure = None
+        return result
+
     def _claim_for_dispatch(self, assignment: MinerTaskWorkAssignment) -> _ClaimedAssignment | None:
         key = _assignment_key(assignment)
         record = self.assignment_records.get(key)
@@ -182,7 +209,13 @@ class _AssignedArtifactGroup:
         self.starting_records[key] = record
         return _ClaimedAssignment(group=self, key=key, record=record)
 
-    def _finish_starting_claim(self, claimed: _ClaimedAssignment, validator_session_id: UUID) -> None:
+    def _finish_starting_claim(
+        self,
+        claimed: _ClaimedAssignment,
+        validator_session_id: UUID,
+        *,
+        started_at: datetime,
+    ) -> None:
         if claimed.closed:
             raise RuntimeError("claimed assignment already closed")
         record = self.starting_records.get(claimed.key)
@@ -190,6 +223,7 @@ class _AssignedArtifactGroup:
             raise RuntimeError("claimed assignment is no longer starting")
         record.state = _AssignmentState.STARTED
         record.session_id = validator_session_id
+        record.started_at = started_at
         self.assignment_records[claimed.key] = record
         self.starting_records.pop(claimed.key, None)
         claimed.closed = True
@@ -200,6 +234,15 @@ class _AssignedArtifactGroup:
         self.result_queue.put_nowait(result)
         self.starting_records.pop(claimed.key, None)
         claimed.closed = True
+
+    def _clear_not_started_assignments(self) -> None:
+        self.starting_records.clear()
+        self.assignment_records = {
+            key: record
+            for key, record in self.assignment_records.items()
+            if record.state is _AssignmentState.STARTED
+        }
+        _drain_assignment_queue(self.assignment_queue)
 
 
 class PlatformWorkWorker:
@@ -306,7 +349,7 @@ class PlatformWorkWorker:
                         refilled_group_keys.add(group_key)
                 continue
 
-            if len(self._active_artifacts) >= self._max_active_artifacts:
+            if self._active_artifact_capacity_count() >= self._max_active_artifacts:
                 continue
 
             _batch_id, artifact_id = group_key
@@ -357,10 +400,11 @@ class PlatformWorkWorker:
         return enqueued
 
     def _can_request_platform_work(self) -> bool:
-        return not any(
-            group.state is _ArtifactGroupState.CLOSING or bool(group.starting_records)
-            for group in self._active_artifacts.values()
-        )
+        if any(group.starting_records for group in self._active_artifacts.values()):
+            return False
+        if any(group.state is _ArtifactGroupState.OPEN for group in self._active_artifacts.values()):
+            return True
+        return self._active_artifact_capacity_count() < self._max_active_artifacts
 
     def _request_idle_artifact_groups_close(self, refilled_group_keys: set[_ArtifactGroupKey]) -> None:
         for group_key, group in tuple(self._active_artifacts.items()):
@@ -422,14 +466,15 @@ class PlatformWorkWorker:
                 result = group.result_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            self._pending_results.append(result)
             if _is_delivery_failure_result(result):
-                group.clear_assignments()
-                group.state = _ArtifactGroupState.CLOSING
-                group.close_requested.set()
+                group.close_for_delivery_failure(result)
                 continue
             key = _result_key(result)
             group.assignment_records.pop(key, None)
+            self._pending_results.append(result)
+        deferred_delivery_failure = group.flush_deferred_delivery_failure_if_idle()
+        if deferred_delivery_failure is not None:
+            self._pending_results.append(deferred_delivery_failure)
 
     def _collect_closed_artifact_groups(self) -> None:
         for group_key, group in tuple(self._active_artifacts.items()):
@@ -460,6 +505,9 @@ class PlatformWorkWorker:
                     },
                 )
                 group.clear_assignments()
+                deferred_delivery_failure = group.pop_deferred_delivery_failure()
+                if deferred_delivery_failure is not None:
+                    self._pending_results.append(deferred_delivery_failure)
             del self._active_artifacts[group_key]
 
     async def _submit_pending_results(self) -> bool:
@@ -472,15 +520,28 @@ class PlatformWorkWorker:
             logger.warning("platform result submission failed; will retry", exc_info=exc)
             return False
 
-        terminal = {
+        for ack in acknowledgements:
+            if ack.outcome == "rejected":
+                logger.warning(
+                    "platform rejected miner task result",
+                    extra={
+                        "batch_id": str(ack.batch_id),
+                        "artifact_id": str(ack.artifact_id),
+                        "task_id": str(ack.task_id),
+                        "attempt_number": ack.attempt_number,
+                        "reason_code": ack.reason_code,
+                        "reason": ack.reason,
+                    },
+                )
+
+        acknowledged = {
             (ack.batch_id, ack.artifact_id, ack.task_id, ack.attempt_number)
             for ack in acknowledgements
-            if ack.outcome != "retry_later"
         }
         self._pending_results = [
             result
             for result in self._pending_results
-            if (result.batch_id, result.artifact_id, result.task_id, result.attempt_number) not in terminal
+            if (result.batch_id, result.artifact_id, result.task_id, result.attempt_number) not in acknowledged
         ]
         return not self._pending_results
 
@@ -505,6 +566,13 @@ class PlatformWorkWorker:
     def _local_inflight_count(self) -> int:
         return sum(group.local_inflight_count() for group in self._active_artifacts.values()) + len(
             self._pending_results
+        )
+
+    def _active_artifact_capacity_count(self) -> int:
+        return sum(
+            1
+            for group in self._active_artifacts.values()
+            if group.state is _ArtifactGroupState.OPEN or group.local_inflight_count()
         )
 
 
@@ -537,6 +605,16 @@ def _assignment_identity(
         task_id=assignment.task.task_id,
         attempt_number=assignment.attempt_number,
         validator_session_id=session_id,
+    )
+
+
+def _result_identity(result: PlatformOwnedTaskResult) -> PlatformTaskAttemptIdentity:
+    return PlatformTaskAttemptIdentity(
+        batch_id=result.batch_id,
+        artifact_id=result.artifact_id,
+        task_id=result.task_id,
+        attempt_number=result.attempt_number,
+        validator_session_id=result.terminal_attempt.validator_session_id,
     )
 
 

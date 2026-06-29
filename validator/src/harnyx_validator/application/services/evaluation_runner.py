@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import secrets
 import time
@@ -45,9 +46,10 @@ from harnyx_commons.miner_task_failure_policy import (
     provider_batch_failure_message,
 )
 from harnyx_commons.tools.types import is_search_tool
-from harnyx_validator.application.assigned_work import AssignedArtifactWork, ClaimedAssignedTask
+from harnyx_validator.application.assigned_work import AssignedArtifactWork, ClaimedAssignedTask, PhaseRecorder
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptAuditRecord,
+    MinerTaskAttemptDiagnostics,
     MinerTaskAttemptRetryDecision,
     MinerTaskAttemptStatus,
     MinerTaskAttemptTerminalEffect,
@@ -154,6 +156,7 @@ class TaskAttemptDecision:
     submission: MinerTaskRunSubmission | None = None
     attempt_execution_log: tuple[ToolCall, ...] = ()
     attempt_error_code: MinerTaskErrorCode | str | None = None
+    timeout_owner: str | None = None
     retry_exc: Exception | None = None
     timeout_exc: SandboxInvocationError | None = None
     validator_failure: ValidatorBatchFailedError | None = None
@@ -275,7 +278,167 @@ class _ArtifactDispatchState:
 @dataclass(frozen=True, slots=True)
 class _ActiveAssignedTask:
     assignment: MinerTaskWorkAssignment
-    session_id: UUID
+    session_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AssignedAttemptRunOutcome:
+    result_to_queue: PlatformOwnedTaskResult | None = None
+    result_already_queued: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedAssignedAttempt:
+    assignment: MinerTaskWorkAssignment
+    issued: SessionIssued
+    attempt_started_at: datetime
+    session_started_at: float
+    phase_recorder: _AssignedAttemptPhaseRecorder
+
+
+class _AssignmentStartFailedError(Exception):
+    def __init__(self, outcome: _AssignedAttemptRunOutcome) -> None:
+        super().__init__("assigned attempt start failed")
+        self.outcome = outcome
+
+
+@dataclass(slots=True)
+class _AssignedAttemptPhaseRecorder:
+    started_at: float
+    phase: str = "session_start"
+    platform_tool_activity_observed: bool = False
+
+    def mark(self, phase: str) -> str:
+        previous = self.phase
+        self.phase = phase
+        if phase.startswith("platform_tool_proxy_"):
+            self.platform_tool_activity_observed = True
+        return previous
+
+    def diagnostics(
+        self,
+        *,
+        timeout_owner: str | None = None,
+        failure_owner: str | None = None,
+    ) -> MinerTaskAttemptDiagnostics:
+        return MinerTaskAttemptDiagnostics(
+            phase=self.phase,
+            timeout_owner=timeout_owner,
+            failure_owner=failure_owner,
+            elapsed_ms=_monotonic_elapsed_ms(
+                started_at=self.started_at,
+                completed_at=time.monotonic(),
+            ),
+            platform_tool_activity_observed=self.platform_tool_activity_observed,
+        )
+
+
+@dataclass(slots=True)
+class _AssignedAttemptLifecycle:
+    runner: EvaluationRunner
+    batch_id: UUID
+    artifact: ScriptArtifactSpec
+    claimed: ClaimedAssignedTask
+    phase_recorder: _AssignedAttemptPhaseRecorder
+    issued: SessionIssued | None = None
+
+    def start(self) -> _AssignedAttemptStartContext:
+        return _AssignedAttemptStartContext(self)
+
+    def build_failure_result(
+        self,
+        *,
+        exc: Exception,
+        attempt_started_at: datetime,
+    ) -> PlatformOwnedTaskResult:
+        return self.runner._assigned_task_unexpected_failure_result(
+            batch_id=self.batch_id,
+            artifact=self.artifact,
+            task=self.claimed.assignment.task,
+            issued=self.issued,
+            attempt_number=self.claimed.assignment.attempt_number,
+            max_attempts=self.claimed.assignment.max_attempts,
+            started_at=attempt_started_at,
+            exc=exc,
+            diagnostics=self.phase_recorder.diagnostics(
+                failure_owner=_exception_type_name(exc),
+            ),
+        )
+
+
+@dataclass(slots=True)
+class _AssignedAttemptStartContext:
+    lifecycle: _AssignedAttemptLifecycle
+
+    async def __aenter__(self) -> _IssuedAssignedAttempt:
+        assignment = self.lifecycle.claimed.assignment
+        session_started_at = time.monotonic()
+        attempt_started_at = self.lifecycle.runner._clock()
+        try:
+            issued = self.lifecycle.runner._issue_session(
+                batch_id=self.lifecycle.batch_id,
+                uid=self.lifecycle.artifact.uid,
+                artifact_id=self.lifecycle.artifact.artifact_id,
+                task=assignment.task,
+                attempt_number=assignment.attempt_number,
+                assignment_token=assignment.assignment_token,
+                phase_recorder=self.lifecycle.phase_recorder,
+            )
+            self.lifecycle.issued = issued
+            issued = self.lifecycle.runner._begin_session_attempt(issued.session.session_id)
+            self.lifecycle.issued = issued
+            attempt_started_at = self.lifecycle.runner._clock()
+            self.lifecycle.claimed.mark_started(
+                issued.session.session_id,
+                started_at=attempt_started_at,
+            )
+            return _IssuedAssignedAttempt(
+                assignment=assignment,
+                issued=issued,
+                attempt_started_at=attempt_started_at,
+                session_started_at=session_started_at,
+                phase_recorder=self.lifecycle.phase_recorder,
+            )
+        except Exception as exc:
+            if isinstance(exc, _PartialSessionIssueError):
+                self.lifecycle.issued = exc.issued
+                exc = exc.cause
+            result = self.lifecycle.build_failure_result(
+                exc=exc,
+                attempt_started_at=attempt_started_at,
+            )
+            if self.lifecycle.issued is None:
+                self.lifecycle.claimed.fail_before_start(result)
+                raise _AssignmentStartFailedError(
+                    _AssignedAttemptRunOutcome(
+                        result_to_queue=result,
+                        result_already_queued=True,
+                    )
+                ) from exc
+            self.lifecycle.runner._cleanup_attempt_session_best_effort(
+                session_id=self.lifecycle.issued.session.session_id,
+                batch_id=self.lifecycle.batch_id,
+                artifact_id=self.lifecycle.artifact.artifact_id,
+                task_id=assignment.task.task_id,
+            )
+            self.lifecycle.claimed.fail_before_start(result)
+            raise _AssignmentStartFailedError(
+                _AssignedAttemptRunOutcome(
+                    result_to_queue=result,
+                    result_already_queued=True,
+                )
+            ) from exc
+
+    async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> bool:
+        issued = self.lifecycle.issued
+        if issued is not None:
+            self.lifecycle.runner._cleanup_attempt_session_best_effort(
+                session_id=issued.session.session_id,
+                batch_id=self.lifecycle.batch_id,
+                artifact_id=self.lifecycle.artifact.artifact_id,
+                task_id=self.lifecycle.claimed.assignment.task.task_id,
+            )
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,6 +585,8 @@ class EvaluationRunner:
         started_at: datetime,
         session_started_at: float,
         orchestrator: TaskRunOrchestrator,
+        phase_recorder: PhaseRecorder | None = None,
+        cleanup_on_exit: bool = True,
     ) -> PlatformOwnedTaskResult:
         terminal_outcome = "unexpected"
         error_code: str | None = None
@@ -433,6 +598,7 @@ class EvaluationRunner:
                 issued=issued,
                 orchestrator=orchestrator,
                 final_attempt=attempt_number >= max_attempts,
+                phase_recorder=phase_recorder,
             )
             finalization = self._finalize_assigned_task_decision(
                 batch_id=batch_id,
@@ -443,6 +609,7 @@ class EvaluationRunner:
                 max_attempts=max_attempts,
                 started_at=started_at,
                 decision=decision,
+                phase_recorder=phase_recorder,
             )
             terminal_outcome = finalization.terminal_outcome
             error_code = finalization.error_code
@@ -466,6 +633,11 @@ class EvaluationRunner:
                 max_attempts=max_attempts,
                 started_at=started_at,
                 exc=exc,
+                diagnostics=(
+                    phase_recorder.diagnostics(failure_owner=_exception_type_name(exc))
+                    if isinstance(phase_recorder, _AssignedAttemptPhaseRecorder)
+                    else None
+                ),
             )
         finally:
             _log_session_finished(
@@ -482,12 +654,13 @@ class EvaluationRunner:
                 terminal_outcome=terminal_outcome,
                 error_code=error_code,
             )
-            self._cleanup_attempt_session_best_effort(
-                session_id=issued.session.session_id,
-                batch_id=batch_id,
-                artifact_id=artifact.artifact_id,
-                task_id=task.task_id,
-            )
+            if cleanup_on_exit:
+                self._cleanup_attempt_session_best_effort(
+                    session_id=issued.session.session_id,
+                    batch_id=batch_id,
+                    artifact_id=artifact.artifact_id,
+                    task_id=task.task_id,
+                )
 
     async def evaluate_assigned_task_queue(
         self,
@@ -500,7 +673,7 @@ class EvaluationRunner:
         result_queue: asyncio.Queue[PlatformOwnedTaskResult],
         orchestrator: TaskRunOrchestrator,
     ) -> None:
-        active: dict[asyncio.Task[PlatformOwnedTaskResult], _ActiveAssignedTask] = {}
+        active: dict[asyncio.Task[_AssignedAttemptRunOutcome], _ActiveAssignedTask] = {}
         queue_waiter: asyncio.Task[ClaimedAssignedTask] | None = None
         claim_to_start: ClaimedAssignedTask | None = None
         close_waiter = asyncio.create_task(close_requested.wait())
@@ -522,75 +695,16 @@ class EvaluationRunner:
 
         def start_assignment(claimed: ClaimedAssignedTask) -> bool:
             assignment = claimed.assignment
-            session_started_at = time.monotonic()
-            issued: SessionIssued | None = None
-            attempt_started_at = self._clock()
-            try:
-                issued = self._issue_session(
-                    batch_id=batch_id,
-                    uid=artifact.uid,
-                    artifact_id=artifact.artifact_id,
-                    task=assignment.task,
-                    attempt_number=assignment.attempt_number,
-                    assignment_token=assignment.assignment_token,
-                )
-                issued = self._begin_session_attempt(issued.session.session_id)
-                attempt_started_at = self._clock()
-                claimed.mark_started(issued.session.session_id)
-            except Exception as exc:
-                if isinstance(exc, _PartialSessionIssueError):
-                    issued = exc.issued
-                    exc = exc.cause
-                result = self._assigned_task_unexpected_failure_result(
-                    batch_id=batch_id,
-                    artifact=artifact,
-                    task=assignment.task,
-                    issued=issued,
-                    attempt_number=assignment.attempt_number,
-                    max_attempts=assignment.max_attempts,
-                    started_at=attempt_started_at,
-                    exc=exc,
-                )
-                _log_session_finished(
-                    batch_id=batch_id,
-                    session_id=issued.session.session_id if issued is not None else UUID(int=0),
-                    artifact_id=artifact.artifact_id,
-                    task_id=assignment.task.task_id,
-                    uid=artifact.uid,
-                    attempt_count=assignment.attempt_number,
-                    session_ms=_monotonic_elapsed_ms(
-                        started_at=session_started_at,
-                        completed_at=time.monotonic(),
-                    ),
-                    terminal_outcome=AttemptControlKind.VALIDATOR_BATCH_FAILURE.value,
-                    error_code=str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE),
-                )
-                if issued is not None:
-                    self._cleanup_attempt_session_best_effort(
-                        session_id=issued.session.session_id,
-                        batch_id=batch_id,
-                        artifact_id=artifact.artifact_id,
-                        task_id=assignment.task.task_id,
-                    )
-                claimed.fail_before_start(result)
-                return result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
-
+            lifecycle = self._assigned_attempt_lifecycle(
+                batch_id=batch_id,
+                artifact=artifact,
+                claimed=claimed,
+            )
             execution_task = asyncio.create_task(
-                self._evaluate_issued_assigned_task(
-                    batch_id=batch_id,
-                    artifact=artifact,
-                    task=assignment.task,
-                    issued=issued,
-                    attempt_number=assignment.attempt_number,
-                    max_attempts=assignment.max_attempts,
-                    started_at=attempt_started_at,
-                    session_started_at=session_started_at,
-                    orchestrator=orchestrator,
-                )
+                self._run_assigned_attempt(lifecycle, orchestrator=orchestrator)
             )
             active[execution_task] = _ActiveAssignedTask(
                 assignment=assignment,
-                session_id=issued.session.session_id,
             )
             return False
 
@@ -601,7 +715,7 @@ class EvaluationRunner:
                     continue
                 active_task = active.pop(task)
                 try:
-                    result = task.result()
+                    outcome = task.result()
                 except Exception as exc:
                     result = self._platform_result_from_assignment_task_exception(
                         batch_id=batch_id,
@@ -609,9 +723,15 @@ class EvaluationRunner:
                         assignment=active_task.assignment,
                         exc=exc,
                     )
-                await result_queue.put(result)
+                    outcome = _AssignedAttemptRunOutcome(result_to_queue=result)
+                result = outcome.result_to_queue
+                if result is None:
+                    continue
                 if result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE:
                     delivery_failure_seen = True
+                if outcome.result_already_queued:
+                    continue
+                await result_queue.put(result)
             return delivery_failure_seen
 
         async def cancel_remaining_active() -> None:
@@ -619,6 +739,15 @@ class EvaluationRunner:
                 remaining.cancel()
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
+
+        async def cancel_queue_waiter() -> None:
+            nonlocal queue_waiter
+            if queue_waiter is None:
+                return
+            if not queue_waiter.done():
+                queue_waiter.cancel()
+            await asyncio.gather(queue_waiter, return_exceptions=True)
+            queue_waiter = None
 
         try:
             for assignment in initial_assignments:
@@ -641,34 +770,20 @@ class EvaluationRunner:
                     except asyncio.QueueEmpty:
                         break
 
-                if not active:
-                    if close_requested.is_set():
-                        break
-                    queue_waiter = asyncio.create_task(assigned_work.claim_for_dispatch())
-                    done, _pending = await asyncio.wait(
-                        {queue_waiter, close_waiter},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if queue_waiter in done:
-                        claim_to_start = queue_waiter.result()
-                        if start_assignment(claim_to_start):
-                            claim_to_start = None
-                            return
-                        claim_to_start = None
-                        queue_waiter = None
-                    continue
-
                 wait_for: set[asyncio.Task[object]] = set(active)
                 if not close_requested.is_set():
                     if queue_waiter is None:
                         queue_waiter = asyncio.create_task(assigned_work.claim_for_dispatch())
                     wait_for.add(queue_waiter)
                     wait_for.add(close_waiter)
+                elif not active:
+                    break
                 done, _pending = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
 
                 if await drain_completed_active(done):
-                    await cancel_remaining_active()
-                    return
+                    close_requested.set()
+                    await cancel_queue_waiter()
+                    continue
 
                 if queue_waiter is not None and queue_waiter in done:
                     claim_to_start = queue_waiter.result()
@@ -695,13 +810,52 @@ class EvaluationRunner:
             )
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
-                for active_task in active.values():
-                    self._cleanup_attempt_session_best_effort(
-                        session_id=active_task.session_id,
-                        batch_id=batch_id,
-                        artifact_id=artifact.artifact_id,
-                        task_id=active_task.assignment.task.task_id,
+
+    def _assigned_attempt_lifecycle(
+        self,
+        *,
+        batch_id: UUID,
+        artifact: ScriptArtifactSpec,
+        claimed: ClaimedAssignedTask,
+    ) -> _AssignedAttemptLifecycle:
+        return _AssignedAttemptLifecycle(
+            runner=self,
+            batch_id=batch_id,
+            artifact=artifact,
+            claimed=claimed,
+            phase_recorder=_AssignedAttemptPhaseRecorder(started_at=time.monotonic()),
+        )
+
+    async def _run_assigned_attempt(
+        self,
+        lifecycle: _AssignedAttemptLifecycle,
+        *,
+        orchestrator: TaskRunOrchestrator,
+    ) -> _AssignedAttemptRunOutcome:
+        try:
+            async with lifecycle.start() as attempt:
+                try:
+                    result = await self._evaluate_issued_assigned_task(
+                        batch_id=lifecycle.batch_id,
+                        artifact=lifecycle.artifact,
+                        task=attempt.assignment.task,
+                        issued=attempt.issued,
+                        attempt_number=attempt.assignment.attempt_number,
+                        max_attempts=attempt.assignment.max_attempts,
+                        started_at=attempt.attempt_started_at,
+                        session_started_at=attempt.session_started_at,
+                        orchestrator=orchestrator,
+                        phase_recorder=attempt.phase_recorder,
+                        cleanup_on_exit=False,
                     )
+                except Exception as exc:
+                    result = lifecycle.build_failure_result(
+                        exc=exc,
+                        attempt_started_at=attempt.attempt_started_at,
+                    )
+                return _AssignedAttemptRunOutcome(result_to_queue=result)
+        except _AssignmentStartFailedError as exc:
+            return exc.outcome
 
     async def record_assigned_task_setup_failures(
         self,
@@ -846,6 +1000,7 @@ class EvaluationRunner:
         max_attempts: int,
         started_at: datetime,
         exc: Exception,
+        diagnostics: MinerTaskAttemptDiagnostics | None = None,
     ) -> PlatformOwnedTaskResult:
         logger.exception(
             "assigned miner task failed unexpectedly",
@@ -865,6 +1020,7 @@ class EvaluationRunner:
             max_attempts=max_attempts,
             started_at=started_at,
             exc=exc,
+            diagnostics=diagnostics,
         )
         self._record_assigned_task_local_side_effects_best_effort(
             batch_id=batch_id,
@@ -886,10 +1042,19 @@ class EvaluationRunner:
         max_attempts: int,
         started_at: datetime,
         exc: Exception,
+        diagnostics: MinerTaskAttemptDiagnostics | None = None,
     ) -> PlatformOwnedTaskResult:
         session_id = issued.session.session_id if issued is not None else uuid4()
         execution_log = tuple(self._receipts.for_session(session_id)) if issued is not None else ()
         error_code = str(MinerTaskErrorCode.UNEXPECTED_VALIDATOR_FAILURE)
+        retry_decision = MinerTaskAttemptRetryDecision.WILL_NOT_RETRY
+        terminal_effect = MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
+        if issued is not None:
+            if attempt_number < max_attempts:
+                retry_decision = MinerTaskAttemptRetryDecision.WILL_RETRY
+                terminal_effect = None
+            else:
+                terminal_effect = MinerTaskAttemptTerminalEffect.ATTEMPT_FAILURE
         attempt = MinerTaskAttemptAuditRecord(
             validator_session_id=session_id,
             batch_id=batch_id,
@@ -903,10 +1068,11 @@ class EvaluationRunner:
             status=MinerTaskAttemptStatus.FAILED,
             error_code=error_code,
             error_summary_code=error_code,
-            retry_decision=MinerTaskAttemptRetryDecision.WILL_NOT_RETRY,
-            terminal_effect=MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE,
+            retry_decision=retry_decision,
+            terminal_effect=terminal_effect,
             max_attempts=max_attempts,
             execution_log=execution_log,
+            diagnostics=diagnostics,
         )
         logger.debug(
             "built assigned miner task unexpected-failure result",
@@ -1295,6 +1461,7 @@ class EvaluationRunner:
         issued: SessionIssued,
         orchestrator: TaskRunOrchestrator,
         final_attempt: bool,
+        phase_recorder: PhaseRecorder | None = None,
     ) -> TaskAttemptDecision:
         request = MinerTaskRunRequest(
             batch_id=batch_id,
@@ -1305,7 +1472,10 @@ class EvaluationRunner:
             task=task,
         )
         try:
-            outcome = await orchestrator.evaluate(request)
+            if phase_recorder is None or not _orchestrator_accepts_phase_recorder(orchestrator):
+                outcome = await orchestrator.evaluate(request)
+            else:
+                outcome = await orchestrator.evaluate(request, phase_recorder=phase_recorder)
         except SessionBudgetExhaustedError as exc:
             control_failure_decision = self._platform_tool_proxy_control_failure_decision(
                 artifact=artifact,
@@ -1826,7 +1996,7 @@ class EvaluationRunner:
         ):
             return None
         if not final_attempt:
-            return _retry_decision(exc)
+            return _retry_decision(exc, timeout_owner="platform_tool_proxy_execute")
         return _submission_decision(
             self._build_task_failure(
                 batch_id=batch_id,
@@ -1837,7 +2007,8 @@ class EvaluationRunner:
                 error_message="platform tool proxy execution timed out",
                 log_message="miner-owned platform tool proxy execution timed out",
                 exc=exc,
-            )
+            ),
+            timeout_owner="platform_tool_proxy_execute",
         )
 
     def _latest_current_attempt_platform_tool_proxy_receipt(self, session_id: UUID) -> ToolCall | None:
@@ -2053,16 +2224,21 @@ class EvaluationRunner:
         max_attempts: int,
         started_at: datetime,
         decision: TaskAttemptDecision,
+        phase_recorder: PhaseRecorder | None = None,
     ) -> _AssignedTaskFinalization:
+        diagnostics = (
+            phase_recorder.diagnostics(
+                timeout_owner=_timeout_owner_from_decision(decision),
+                failure_owner=_failure_owner_from_decision(decision),
+            )
+            if isinstance(phase_recorder, _AssignedAttemptPhaseRecorder)
+            else None
+        )
         if decision.kind is AttemptControlKind.SUBMISSION:
             terminal_outcome = AttemptControlKind.SUBMISSION.value
             submission = _require_submission(decision)
             error_code = _submission_error_code_or_none(submission)
             terminal_effect = MinerTaskAttemptTerminalEffect.TASK_RESULT
-            platform_result: MinerTaskRunSubmission | None = submission
-            if error_code is not None and is_delivery_disqualifying_validator_pair_error(error_code):
-                terminal_effect = MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
-                platform_result = None
             attempt = self._build_terminated_attempt_record(
                 batch_id=batch_id,
                 artifact=artifact,
@@ -2074,6 +2250,7 @@ class EvaluationRunner:
                 decision=decision,
                 retry_decision=MinerTaskAttemptRetryDecision.WILL_NOT_RETRY,
                 terminal_effect=terminal_effect,
+                diagnostics=diagnostics,
             )
             return _AssignedTaskFinalization(
                 result=PlatformOwnedTaskResult(
@@ -2081,7 +2258,7 @@ class EvaluationRunner:
                     artifact_id=artifact.artifact_id,
                     task_id=task.task_id,
                     attempt_number=attempt_number,
-                    result=platform_result,
+                    result=submission,
                     terminal_attempt=attempt,
                 ),
                 local_submission=submission,
@@ -2111,6 +2288,7 @@ class EvaluationRunner:
                 decision=timeout_resolution,
                 retry_decision=MinerTaskAttemptRetryDecision.WILL_NOT_RETRY,
                 terminal_effect=MinerTaskAttemptTerminalEffect.TASK_RESULT,
+                diagnostics=diagnostics,
             )
             return _AssignedTaskFinalization(
                 result=PlatformOwnedTaskResult(
@@ -2144,6 +2322,7 @@ class EvaluationRunner:
                 decision=decision,
                 retry_decision=MinerTaskAttemptRetryDecision.WILL_RETRY,
                 terminal_effect=None,
+                diagnostics=diagnostics,
             )
             return _AssignedTaskFinalization(
                 result=PlatformOwnedTaskResult(
@@ -2163,6 +2342,16 @@ class EvaluationRunner:
             validator_failure = _require_validator_failure(decision)
             terminal_outcome = AttemptControlKind.VALIDATOR_BATCH_FAILURE.value
             error_code = str(validator_failure.error_code)
+            retry_decision = (
+                MinerTaskAttemptRetryDecision.WILL_RETRY
+                if attempt_number < max_attempts
+                else MinerTaskAttemptRetryDecision.WILL_NOT_RETRY
+            )
+            terminal_effect = (
+                None
+                if retry_decision is MinerTaskAttemptRetryDecision.WILL_RETRY
+                else MinerTaskAttemptTerminalEffect.ATTEMPT_FAILURE
+            )
             attempt = self._build_terminated_attempt_record(
                 batch_id=batch_id,
                 artifact=artifact,
@@ -2172,8 +2361,9 @@ class EvaluationRunner:
                 max_attempts=max_attempts,
                 started_at=started_at,
                 decision=decision,
-                retry_decision=MinerTaskAttemptRetryDecision.WILL_NOT_RETRY,
-                terminal_effect=MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE,
+                retry_decision=retry_decision,
+                terminal_effect=terminal_effect,
+                diagnostics=diagnostics,
             )
             return _AssignedTaskFinalization(
                 result=PlatformOwnedTaskResult(
@@ -2277,6 +2467,7 @@ class EvaluationRunner:
         decision: TaskAttemptDecision,
         retry_decision: MinerTaskAttemptRetryDecision,
         terminal_effect: MinerTaskAttemptTerminalEffect | None,
+        diagnostics: MinerTaskAttemptDiagnostics | None = None,
     ) -> MinerTaskAttemptAuditRecord:
         record = self._build_terminated_attempt_record(
             batch_id=batch_id,
@@ -2289,6 +2480,7 @@ class EvaluationRunner:
             decision=decision,
             retry_decision=retry_decision,
             terminal_effect=terminal_effect,
+            diagnostics=diagnostics,
         )
         self._progress.record_terminated_attempt(record)
         return record
@@ -2306,6 +2498,7 @@ class EvaluationRunner:
         decision: TaskAttemptDecision,
         retry_decision: MinerTaskAttemptRetryDecision,
         terminal_effect: MinerTaskAttemptTerminalEffect | None,
+        diagnostics: MinerTaskAttemptDiagnostics | None = None,
     ) -> MinerTaskAttemptAuditRecord:
         status = MinerTaskAttemptStatus.FAILED
         attempt_receipts = decision.attempt_execution_log or tuple(
@@ -2332,6 +2525,7 @@ class EvaluationRunner:
             terminal_effect=terminal_effect,
             max_attempts=max_attempts,
             execution_log=attempt_receipts,
+            diagnostics=diagnostics,
         )
         return record
 
@@ -2379,6 +2573,7 @@ class EvaluationRunner:
         task: MinerTask,
         attempt_number: int = 1,
         assignment_token: str | None = None,
+        phase_recorder: PhaseRecorder | None = None,
     ) -> SessionIssued:
         issued_at = self._clock()
         expires_at = issued_at + self._config.session_ttl
@@ -2410,6 +2605,7 @@ class EvaluationRunner:
                     task_id=task.task_id,
                     assignment_token=assignment_token,
                     attempt_number=attempt_number,
+                    phase_recorder=phase_recorder,
                 )
         except Exception as exc:
             try:
@@ -2693,17 +2889,20 @@ def _submission_decision(
     submission: MinerTaskRunSubmission,
     *,
     attempt_execution_log: tuple[ToolCall, ...] | None = None,
+    timeout_owner: str | None = None,
 ) -> TaskAttemptDecision:
     return TaskAttemptDecision(
         kind=AttemptControlKind.SUBMISSION,
         submission=submission,
         attempt_execution_log=submission.execution_log if attempt_execution_log is None else attempt_execution_log,
+        timeout_owner=timeout_owner,
     )
 
 
-def _retry_decision(exc: Exception) -> TaskAttemptDecision:
+def _retry_decision(exc: Exception, *, timeout_owner: str | None = None) -> TaskAttemptDecision:
     return TaskAttemptDecision(
         kind=AttemptControlKind.RETRY,
+        timeout_owner=timeout_owner,
         retry_exc=exc,
     )
 
@@ -2813,6 +3012,42 @@ def _attempt_error_code(
     if decision.timeout_exc is not None:
         return decision.timeout_exc.detail_code or str(MinerTaskErrorCode.TIMEOUT_MINER_OWNED)
     return None
+
+
+def _timeout_owner_from_decision(decision: TaskAttemptDecision) -> str | None:
+    if decision.timeout_owner is not None:
+        return decision.timeout_owner
+    if decision.kind is AttemptControlKind.REVIEW_TIMEOUT:
+        return "sandbox_entrypoint"
+    if isinstance(decision.retry_exc, httpx.TimeoutException):
+        return "validator_internal"
+    if (
+        decision.validator_failure is not None
+        and decision.validator_failure.error_code is MinerTaskErrorCode.VALIDATOR_INTERNAL_TIMEOUT
+    ):
+        return "validator_internal"
+    return None
+
+
+def _failure_owner_from_decision(decision: TaskAttemptDecision) -> str | None:
+    if decision.retry_exc is not None:
+        return _exception_type_name(decision.retry_exc)
+    if decision.timeout_exc is not None:
+        return _exception_type_name(decision.timeout_exc)
+    if decision.validator_failure is not None:
+        return str(decision.validator_failure.error_code)
+    if decision.submission is not None:
+        error_code = _submission_error_code_or_none(decision.submission)
+        return None if error_code is None else str(error_code)
+    return None
+
+
+def _orchestrator_accepts_phase_recorder(orchestrator: TaskRunOrchestrator) -> bool:
+    parameters = inspect.signature(orchestrator.evaluate).parameters
+    return "phase_recorder" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def _platform_tool_proxy_error_code_or_none(execution_log: Sequence[ToolCall]) -> str | None:

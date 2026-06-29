@@ -13,6 +13,7 @@ from harnyx_commons.json_types import JsonValue
 from harnyx_commons.platform_tool_proxy import PLATFORM_TOOL_PROXY_EXECUTE_TRANSPORT_TIMEOUT_SECONDS
 from harnyx_commons.tools.executor import ToolInvocationContext, ToolInvocationOutput, ToolInvoker
 from harnyx_commons.tools.types import ToolName, is_search_tool
+from harnyx_validator.application.assigned_work import PhaseRecorder
 from harnyx_validator.application.ports.platform import (
     PlatformToolProxyControlError,
     PlatformToolProxyPlatformPort,
@@ -33,6 +34,7 @@ class PlatformToolProxySessionScope:
     task_id: UUID
     attempt_number: int
     assignment_token: str
+    phase_recorder: PhaseRecorder | None
     grants_by_attempt: Mapping[int, PlatformToolProxyAttemptGrant]
 
 
@@ -66,6 +68,7 @@ class PlatformToolProxyScopeRegistry:
         task_id: UUID,
         assignment_token: str,
         attempt_number: int = 1,
+        phase_recorder: PhaseRecorder | None = None,
     ) -> None:
         with self._lock:
             self._session_scopes[session_id] = PlatformToolProxySessionScope(
@@ -74,6 +77,7 @@ class PlatformToolProxyScopeRegistry:
                 task_id=task_id,
                 attempt_number=attempt_number,
                 assignment_token=assignment_token,
+                phase_recorder=phase_recorder,
                 grants_by_attempt={},
             )
 
@@ -109,6 +113,7 @@ class PlatformToolProxyScopeRegistry:
                 task_id=scope.task_id,
                 attempt_number=scope.attempt_number,
                 assignment_token=scope.assignment_token,
+                phase_recorder=scope.phase_recorder,
                 grants_by_attempt={
                     **scope.grants_by_attempt,
                     attempt_number: attempt_grant,
@@ -161,6 +166,9 @@ class PlatformToolProxyProxyToolInvoker(ToolInvoker):
                 scope = self._scopes.require_session(context.session_id)
                 attempt_grant = scope.grants_by_attempt.get(attempt_number)
                 if attempt_grant is None:
+                    previous_phase: str | None = None
+                    if scope.phase_recorder is not None:
+                        previous_phase = scope.phase_recorder.mark("platform_tool_proxy_grant_create")
                     grant = await self._platform.create_platform_tool_proxy_grant(
                         batch_id=scope.batch_id,
                         artifact_id=scope.artifact_id,
@@ -175,10 +183,15 @@ class PlatformToolProxyProxyToolInvoker(ToolInvoker):
                         token=grant.token,
                         expires_at=grant.expires_at,
                     )
+                    if scope.phase_recorder is not None and previous_phase is not None:
+                        scope.phase_recorder.mark(previous_phase)
         if attempt_grant is None:
             raise PlatformToolProxyControlError("platform tool proxy token is not registered for session")
         if _grant_expired(attempt_grant.expires_at):
             raise PlatformToolProxyTokenExpiredError("platform tool proxy token expired for session")
+        previous_phase = None
+        if scope.phase_recorder is not None:
+            previous_phase = scope.phase_recorder.mark("platform_tool_proxy_execute")
         result = await self._platform.execute_platform_tool_proxy_tool(
             token=attempt_grant.token,
             uid=context.uid,
@@ -192,6 +205,8 @@ class PlatformToolProxyProxyToolInvoker(ToolInvoker):
             kwargs=dict(kwargs),
             transport_timeout_seconds=PLATFORM_TOOL_PROXY_EXECUTE_TRANSPORT_TIMEOUT_SECONDS,
         )
+        if scope.phase_recorder is not None and previous_phase is not None:
+            scope.phase_recorder.mark(previous_phase)
         return ToolInvocationOutput(
             public_payload=result.response,
             execution=result.execution,

@@ -171,8 +171,8 @@ sequenceDiagram
 
   Note over P,V: Authorization: Bittensor ss58="...",sig="..."
   V->>P: POST /v2/miner-task-work/results<br/>{ results:[{ batch_id, artifact_id, task_id, attempt_number, ... }] }
-  P->>DB: Accept result idempotently and update run/delivery state
-  P-->>V: 200 { results:[{ outcome:"accepted"|"retry_later"|"rejected", canonical:true|false, reason_code:null|"already_accepted"|... }] }
+  P->>DB: Accept or reject result against existing task/session state
+  P-->>V: 200 { results:[{ outcome:"accepted"|"rejected", canonical:true|false, reason_code:null|"already_accepted"|... }] }
   Note over V: Act only on outcome; reason_code is diagnostic.
 
   Note over V,P: Validator retries only pending result submissions whose outcome is unknown or transient.

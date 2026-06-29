@@ -220,6 +220,17 @@ class MinerTaskAttemptRetryDecision(StrEnum):
 class MinerTaskAttemptTerminalEffect(StrEnum):
     TASK_RESULT = "task_result"
     DELIVERY_FAILURE = "delivery_failure"
+    ATTEMPT_FAILURE = "attempt_failure"
+
+
+class MinerTaskAttemptDiagnostics(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    phase: str = Field(min_length=1, max_length=128)
+    timeout_owner: str | None = Field(default=None, max_length=128)
+    failure_owner: str | None = Field(default=None, max_length=128)
+    elapsed_ms: float | None = Field(default=None, ge=0.0)
+    platform_tool_activity_observed: bool = False
 
 
 class MinerTaskAttemptAuditRecord(BaseModel):
@@ -241,6 +252,7 @@ class MinerTaskAttemptAuditRecord(BaseModel):
     terminal_effect: MinerTaskAttemptTerminalEffect | None
     max_attempts: int = Field(ge=1)
     execution_log: tuple[ToolCall, ...] = ()
+    diagnostics: MinerTaskAttemptDiagnostics | None = None
 
     @model_validator(mode="after")
     def _validate_attempt(self) -> MinerTaskAttemptAuditRecord:
@@ -260,6 +272,11 @@ class MinerTaskAttemptAuditRecord(BaseModel):
                 raise ValueError("retrying attempts must not have terminal effect")
             if self.attempt_number >= self.max_attempts:
                 raise ValueError("retrying attempts must have remaining retry budget")
+        if (
+            self.terminal_effect is MinerTaskAttemptTerminalEffect.ATTEMPT_FAILURE
+            and self.attempt_number != self.max_attempts
+        ):
+            raise ValueError("attempt_failure requires final attempt")
         if self.retry_decision is MinerTaskAttemptRetryDecision.WILL_NOT_RETRY and self.terminal_effect is None:
             raise ValueError("non-retrying attempts must have terminal effect")
         return self
@@ -292,6 +309,7 @@ __all__ = [
     "EntrypointInvocationRequest",
     "EntrypointInvocationResult",
     "MinerTaskAttemptAuditRecord",
+    "MinerTaskAttemptDiagnostics",
     "MinerTaskAttemptRetryDecision",
     "MinerTaskAttemptStatus",
     "MinerTaskAttemptTerminalEffect",

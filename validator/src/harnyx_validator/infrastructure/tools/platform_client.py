@@ -7,7 +7,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 import bittensor as bt
@@ -595,7 +595,7 @@ def _run_submission_payload(submission: Any) -> JsonObject:
 
 
 def _attempt_payload(attempt: Any) -> JsonObject:
-    return {
+    payload = {
         "validator_session_id": str(attempt.validator_session_id),
         "batch_id": str(attempt.batch_id),
         "artifact_id": str(attempt.artifact_id),
@@ -613,6 +613,9 @@ def _attempt_payload(attempt: Any) -> JsonObject:
         "max_attempts": attempt.max_attempts,
         "execution_log": _execution_log_payload(attempt.execution_log),
     }
+    if attempt.diagnostics is not None:
+        payload["diagnostics"] = _jsonable(attempt.diagnostics)
+    return payload
 
 
 def _execution_log_payload(execution_log: tuple[ToolCall, ...]) -> list[JsonValue]:
@@ -623,12 +626,18 @@ def _platform_result_acknowledgement(value: object) -> PlatformTaskResultAcknowl
     if not isinstance(value, dict):
         raise PlatformClientError(status_code=None, message="platform result item is invalid")
     item = cast(dict[str, object], value)
+    outcome = str(item["outcome"])
+    if outcome not in {"accepted", "rejected"}:
+        raise PlatformClientError(
+            status_code=None,
+            message=f"platform result item has unsupported outcome {outcome!r}",
+        )
     return PlatformTaskResultAcknowledgement(
         batch_id=UUID(str(item["batch_id"])),
         artifact_id=UUID(str(item["artifact_id"])),
         task_id=UUID(str(item["task_id"])),
         attempt_number=_required_int(item, "attempt_number"),
-        outcome=str(item["outcome"]),
+        outcome=cast(Literal["accepted", "rejected"], outcome),
         canonical=bool(item["canonical"]),
         reason_code=None if item.get("reason_code") is None else str(item["reason_code"]),
         reason=None if item.get("reason") is None else str(item["reason"]),

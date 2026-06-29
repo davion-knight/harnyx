@@ -430,6 +430,7 @@ Body: [MinerTaskWorkResultsRequest](#model-minertaskworkresultsrequest)
 |  |  | `artifact_id` | req | `string` (format: uuid) |
 |  |  | `attempt_number` | req | `integer` |
 |  |  | `batch_id` | req | `string` (format: uuid) |
+|  |  | `diagnostics` | opt | [MinerTaskAttemptDiagnosticsPayload](#model-minertaskattemptdiagnosticspayload) (nullable) |
 |  |  | `error_code` | opt | `string` (nullable) |
 |  |  | `error_summary_code` | opt | `string` (nullable) |
 |  |  | `execution_log` | opt | array[[ToolCall](#model-toolcall)] (default: []) |
@@ -2539,6 +2540,12 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `artifact_id` |  |  | req | `string` (format: uuid) |
 | `attempt_number` |  |  | req | `integer` |
 | `batch_id` |  |  | req | `string` (format: uuid) |
+| `diagnostics` |  |  | opt | [MinerTaskAttemptDiagnosticsPayload](#model-minertaskattemptdiagnosticspayload) (nullable) |
+|  | `elapsed_ms` |  | opt | `number` (nullable) |
+|  | `failure_owner` |  | opt | `string` (nullable) |
+|  | `phase` |  | req | `string` |
+|  | `platform_tool_activity_observed` |  | opt | `boolean` (default: False) |
+|  | `timeout_owner` |  | opt | `string` (nullable) |
 | `error_code` |  |  | opt | `string` (nullable) |
 | `error_summary_code` |  |  | opt | `string` (nullable) |
 | `execution_log` |  |  | opt | array[[ToolCall](#model-toolcall)] (default: []) |
@@ -2593,6 +2600,16 @@ Body: [WeightsResponse](#model-weightsresponse)
       "format": "uuid",
       "title": "Batch Id",
       "type": "string"
+    },
+    "diagnostics": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/MinerTaskAttemptDiagnosticsPayload"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "error_code": {
       "anyOf": [
@@ -2694,6 +2711,82 @@ Body: [WeightsResponse](#model-weightsresponse)
     "max_attempts"
   ],
   "title": "MinerTaskAttemptAuditPayload",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-minertaskattemptdiagnosticspayload"></a>
+### Model: MinerTaskAttemptDiagnosticsPayload
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `elapsed_ms` |  |  | opt | `number` (nullable) |
+| `failure_owner` |  |  | opt | `string` (nullable) |
+| `phase` |  |  | req | `string` |
+| `platform_tool_activity_observed` |  |  | opt | `boolean` (default: False) |
+| `timeout_owner` |  |  | opt | `string` (nullable) |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "elapsed_ms": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Elapsed Ms"
+    },
+    "failure_owner": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Failure Owner"
+    },
+    "phase": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Phase",
+      "type": "string"
+    },
+    "platform_tool_activity_observed": {
+      "default": false,
+      "title": "Platform Tool Activity Observed",
+      "type": "boolean"
+    },
+    "timeout_owner": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Timeout Owner"
+    }
+  },
+  "required": [
+    "phase"
+  ],
+  "title": "MinerTaskAttemptDiagnosticsPayload",
   "type": "object"
 }
 ```
@@ -2818,7 +2911,8 @@ Body: [WeightsResponse](#model-weightsresponse)
 {
   "enum": [
     "task_result",
-    "delivery_failure"
+    "delivery_failure",
+    "attempt_failure"
   ],
   "title": "MinerTaskAttemptTerminalEffect",
   "type": "string"
@@ -3117,7 +3211,6 @@ Body: [WeightsResponse](#model-weightsresponse)
 {
   "enum": [
     "accepted",
-    "retry_later",
     "rejected"
   ],
   "title": "MinerTaskResultOutcome",
@@ -3141,8 +3234,7 @@ Body: [WeightsResponse](#model-weightsresponse)
     "already_accepted",
     "stale_attempt",
     "conflicting_replay",
-    "invalid_attempt",
-    "platform_temporarily_unavailable"
+    "invalid_attempt"
   ],
   "title": "MinerTaskResultReasonCode",
   "type": "string"
@@ -3524,6 +3616,12 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `artifact_id` |  | req | `string` (format: uuid) |
 |  | `attempt_number` |  | req | `integer` |
 |  | `batch_id` |  | req | `string` (format: uuid) |
+|  | `diagnostics` |  | opt | [MinerTaskAttemptDiagnosticsPayload](#model-minertaskattemptdiagnosticspayload) (nullable) |
+|  |  | `elapsed_ms` | opt | `number` (nullable) |
+|  |  | `failure_owner` | opt | `string` (nullable) |
+|  |  | `phase` | req | `string` |
+|  |  | `platform_tool_activity_observed` | opt | `boolean` (default: False) |
+|  |  | `timeout_owner` | opt | `string` (nullable) |
 |  | `error_code` |  | opt | `string` (nullable) |
 |  | `error_summary_code` |  | opt | `string` (nullable) |
 |  | `execution_log` |  | opt | array[[ToolCall](#model-toolcall)] (default: []) |
@@ -3707,6 +3805,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `artifact_id` | req | `string` (format: uuid) |
 |  |  | `attempt_number` | req | `integer` |
 |  |  | `batch_id` | req | `string` (format: uuid) |
+|  |  | `diagnostics` | opt | [MinerTaskAttemptDiagnosticsPayload](#model-minertaskattemptdiagnosticspayload) (nullable) |
 |  |  | `error_code` | opt | `string` (nullable) |
 |  |  | `error_summary_code` | opt | `string` (nullable) |
 |  |  | `execution_log` | opt | array[[ToolCall](#model-toolcall)] (default: []) |

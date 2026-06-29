@@ -118,7 +118,7 @@ class _ClaimedAssignedTaskFake:
     def assignment(self) -> MinerTaskWorkAssignment:
         return self._assignment
 
-    def mark_started(self, validator_session_id: UUID) -> None:
+    def mark_started(self, validator_session_id: UUID, **_: object) -> None:
         self._owner._mark_started(self._assignment, validator_session_id)
 
     def fail_before_start(self, result: PlatformOwnedTaskResult) -> None:

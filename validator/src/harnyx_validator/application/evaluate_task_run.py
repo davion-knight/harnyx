@@ -23,6 +23,7 @@ from harnyx_commons.llm.pricing import price_search
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.miner_task_scoring import EvaluationScoringService
 from harnyx_commons.tools.types import SearchToolName, is_search_tool
+from harnyx_validator.application.assigned_work import PhaseRecorder
 from harnyx_validator.application.dto.evaluation import (
     EntrypointInvocationRequest,
     MinerTaskRunRequest,
@@ -315,9 +316,16 @@ class TaskRunOrchestrator:
         self._clock = clock
         self._usage = usage_summarizer or UsageSummarizer()
 
-    async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+    async def evaluate(
+        self,
+        request: MinerTaskRunRequest,
+        *,
+        phase_recorder: PhaseRecorder | None = None,
+    ) -> TaskRunOutcome:
         orchestration_started_at = time.monotonic()
         invocation_started_at = orchestration_started_at
+        if phase_recorder is not None:
+            phase_recorder.mark("entrypoint_invocation")
         invocation = await self._invoker.invoke(
             EntrypointInvocationRequest(
                 session_id=request.session_id,
@@ -332,6 +340,8 @@ class TaskRunOrchestrator:
         )
         invocation_completed_at = self._clock()
         scoring_started_at = time.monotonic()
+        if phase_recorder is not None:
+            phase_recorder.mark("scoring")
         try:
             score_breakdown = await self._scoring.score(
                 task=request.task,
