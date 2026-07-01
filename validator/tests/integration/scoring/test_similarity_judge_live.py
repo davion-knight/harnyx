@@ -131,13 +131,7 @@ async def test_similarity_judge_live_uses_real_structured_runtime_flow() -> None
     assert llm_provider.responses[0].metadata is not None
     assert llm_provider.responses[0].metadata["selected_provider"] == similarity_route.provider
     assert llm_provider.responses[0].metadata["selected_model"] == similarity_route.model
-    observed_reasoning = [
-        response.choices[0].message.reasoning
-        for response in llm_provider.responses
-        if response.choices and response.choices[0].message.reasoning is not None
-    ]
-    if observed_reasoning:
-        assert result.reasoning is not None
-        assert result.reasoning.strip()
-        if result.reasoning_tokens is not None:
-            assert result.reasoning_tokens >= 0
+    assert result.reasoning is not None
+    assert result.reasoning.strip()
+    if result.reasoning_tokens is not None:
+        assert result.reasoning_tokens >= 0

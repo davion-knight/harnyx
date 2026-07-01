@@ -4,10 +4,18 @@ import json
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.llm.retry_utils import RetryPolicy
-from harnyx_commons.llm.schema import LlmChoice, LlmChoiceMessage, LlmResponse, LlmUsage
+from harnyx_commons.llm.schema import (
+    AbstractLlmRequest,
+    LlmChoice,
+    LlmChoiceMessage,
+    LlmMessageContentPart,
+    LlmResponse,
+    LlmUsage,
+)
 from harnyx_commons.miner_task_similarity import SimilarityJudgeRequest
 from harnyx_validator.application.similarity_judge import SimilarityJudge, SimilarityJudgeConfig
 
@@ -16,9 +24,9 @@ pytestmark = pytest.mark.anyio("asyncio")
 
 class StubLlmProvider:
     def __init__(self) -> None:
-        self.requests: list[object] = []
+        self.requests: list[AbstractLlmRequest] = []
 
-    async def invoke(self, request: object) -> LlmResponse:
+    async def invoke(self, request: AbstractLlmRequest) -> LlmResponse:
         self.requests.append(request)
         return LlmResponse(
             id="stub-response",
@@ -33,7 +41,14 @@ class StubLlmProvider:
                 ),
             ),
             usage=LlmUsage(reasoning_tokens=17),
-            postprocessed={"verdict": "not_duplicate"},
+            postprocessed={
+                "verdict": "not_duplicate",
+                "reasoning": (
+                    "The candidate changes the retrieval strategy by adding a cross-source "
+                    "verification step before synthesis."
+                ),
+                "mechanism_change": "cross-source verification before synthesis",
+            },
         )
 
     async def aclose(self) -> None:
@@ -43,9 +58,9 @@ class StubLlmProvider:
 class SequenceLlmProvider:
     def __init__(self, outcomes: list[LlmResponse | Exception]) -> None:
         self._outcomes = outcomes
-        self.requests: list[object] = []
+        self.requests: list[AbstractLlmRequest] = []
 
-    async def invoke(self, request: object) -> LlmResponse:
+    async def invoke(self, request: AbstractLlmRequest) -> LlmResponse:
         self.requests.append(request)
         if not self._outcomes:
             raise RuntimeError("missing similarity outcome")
@@ -58,7 +73,7 @@ class SequenceLlmProvider:
         return None
 
 
-def _similarity_payload(request: object) -> dict[str, object]:
+def _similarity_payload(request: AbstractLlmRequest) -> dict[str, object]:
     user_prompt = request.messages[1].content[0].text
     _, payload_json = user_prompt.split("Payload:\n", 1)
     return json.loads(payload_json)
@@ -67,6 +82,8 @@ def _similarity_payload(request: object) -> dict[str, object]:
 def _similarity_response(
     *,
     verdict: str = "not_duplicate",
+    reasoning: str = "The candidate changes retrieval strategy.",
+    mechanism_change: str | None = "retrieval strategy change",
     reasoning_text: str | None = "candidate changes retrieval strategy",
     reasoning_tokens: int | None = 17,
     metadata: dict[str, object] | None = None,
@@ -84,12 +101,46 @@ def _similarity_response(
             ),
         ),
         usage=LlmUsage(reasoning_tokens=reasoning_tokens),
-        postprocessed={"verdict": verdict},
+        postprocessed=_similarity_postprocessed(
+            verdict=verdict,
+            reasoning=reasoning,
+            mechanism_change=mechanism_change,
+        ),
         metadata=metadata,
     )
 
 
-async def test_similarity_judge_returns_verdict_and_provider_reasoning() -> None:
+def _similarity_postprocessed(
+    *,
+    verdict: str,
+    reasoning: str | None,
+    mechanism_change: str | None,
+) -> dict[str, str | None]:
+    postprocessed: dict[str, str | None] = {"verdict": verdict}
+    if reasoning is not None:
+        postprocessed["reasoning"] = reasoning
+    if mechanism_change is not None:
+        postprocessed["mechanism_change"] = mechanism_change
+    return postprocessed
+
+
+def _raw_similarity_response(text: str) -> LlmResponse:
+    return LlmResponse(
+        id="raw-response",
+        choices=(
+            LlmChoice(
+                index=0,
+                message=LlmChoiceMessage(
+                    role="assistant",
+                    content=(LlmMessageContentPart.input_text(text),),
+                ),
+            ),
+        ),
+        usage=LlmUsage(),
+    )
+
+
+async def test_similarity_judge_returns_verdict_and_validator_reasoning() -> None:
     llm = StubLlmProvider()
     service = SimilarityJudge(
         llm_provider=llm,
@@ -115,7 +166,11 @@ async def test_similarity_judge_returns_verdict_and_provider_reasoning() -> None
     result = await service.judge(request)
 
     assert result.verdict == "not_duplicate"
-    assert result.reasoning == "candidate changes retrieval strategy"
+    assert (
+        result.reasoning
+        == "The candidate changes the retrieval strategy by adding a cross-source verification step before synthesis.\n"
+        "Mechanism change: cross-source verification before synthesis"
+    )
     assert result.reasoning_tokens == 17
     assert result.model == "moonshotai/Kimi-K2.5-TEE"
     assert result.provider == "chutes"
@@ -129,12 +184,141 @@ async def test_similarity_judge_returns_verdict_and_provider_reasoning() -> None
     payload = _similarity_payload(llm_request)
     assert payload["incumbent"]["script"] == "def answer(): return 'old'"
     assert payload["candidate"]["diff_against_incumbent"] == "+ def answer(): return 'new'"
-    system_prompt = llm_request.messages[0].content[0].text
-    assert "untrusted input" in system_prompt
-    assert "submission slots, salts, timestamps, comments" in system_prompt
-    assert "small token/timeout/budget/temperature tweaks" in system_prompt
-    assert "minor prompt-wording edits that restate the same instructions" in system_prompt
-    assert "When the evidence is borderline or the diff is mostly cosmetic, choose `duplicate`" in system_prompt
+    assert llm_request.output_schema.__name__ == "_SimilarityVerdictModel"
+    assert llm_request.postprocessor is not None
+
+
+async def test_similarity_judge_structured_output_contract_rejects_invalid_shapes() -> None:
+    llm = StubLlmProvider()
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(provider="chutes", model="google/gemma-4-31B-turbo-TEE"),
+    )
+
+    await service.judge(
+        SimilarityJudgeRequest(
+            batch_id=uuid4(),
+            candidate_artifact_id=uuid4(),
+            incumbent_artifact_id=uuid4(),
+            candidate_miner_uid=20,
+            incumbent_miner_uid=10,
+            incumbent_script="def answer(): return 'old'",
+            candidate_diff="+ def answer(): return 'new'",
+        )
+    )
+
+    postprocessor = llm.requests[0].postprocessor
+    assert postprocessor is not None
+
+    missing_reasoning = postprocessor(_raw_similarity_response('{"verdict":"duplicate"}'))
+    assert missing_reasoning.ok is False
+    assert missing_reasoning.retryable is True
+
+    blank_reasoning = postprocessor(_raw_similarity_response('{"verdict":"duplicate","reasoning":"   "}'))
+    assert blank_reasoning.ok is False
+    assert blank_reasoning.retryable is True
+
+    extra_field = postprocessor(
+        _raw_similarity_response('{"verdict":"duplicate","reasoning":"same mechanism","extra":"no"}')
+    )
+    assert extra_field.ok is False
+    assert extra_field.retryable is True
+
+    missing_mechanism = postprocessor(
+        _raw_similarity_response('{"verdict":"not_duplicate","reasoning":"adds a verifier"}')
+    )
+    assert missing_mechanism.ok is False
+    assert missing_mechanism.retryable is True
+
+
+async def test_similarity_judge_postprocessor_accepts_duplicate_with_reasoning() -> None:
+    llm = StubLlmProvider()
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(provider="chutes", model="google/gemma-4-31B-turbo-TEE"),
+    )
+
+    await service.judge(
+        SimilarityJudgeRequest(
+            batch_id=uuid4(),
+            candidate_artifact_id=uuid4(),
+            incumbent_artifact_id=uuid4(),
+            candidate_miner_uid=20,
+            incumbent_miner_uid=10,
+            incumbent_script="def answer(): return 'old'",
+            candidate_diff="+ def answer(): return 'new'",
+        )
+    )
+
+    postprocessor = llm.requests[0].postprocessor
+    assert postprocessor is not None
+    result = postprocessor(
+        _raw_similarity_response(
+            '{"verdict":"duplicate","reasoning":"Only token budget changed; no mechanism-level behavior changed."}'
+        )
+    )
+
+    assert result.ok is True
+
+
+async def test_similarity_judge_postprocessor_accepts_not_duplicate_with_mechanism_reasoning() -> None:
+    llm = StubLlmProvider()
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(provider="chutes", model="google/gemma-4-31B-turbo-TEE"),
+    )
+
+    await service.judge(
+        SimilarityJudgeRequest(
+            batch_id=uuid4(),
+            candidate_artifact_id=uuid4(),
+            incumbent_artifact_id=uuid4(),
+            candidate_miner_uid=20,
+            incumbent_miner_uid=10,
+            incumbent_script="def answer(): return 'old'",
+            candidate_diff="+ def answer(): return 'new'",
+        )
+    )
+
+    postprocessor = llm.requests[0].postprocessor
+    assert postprocessor is not None
+    result = postprocessor(
+        _raw_similarity_response(
+            '{"verdict":"not_duplicate","reasoning":"Adds verification before synthesis.",'
+            '"mechanism_change":"verification before synthesis"}'
+        )
+    )
+
+    assert result.ok is True
+
+
+async def test_similarity_judge_rejects_postprocessed_not_duplicate_without_mechanism_change() -> None:
+    llm = SequenceLlmProvider(
+        [
+            _similarity_response(
+                verdict="not_duplicate",
+                reasoning="Adds verification.",
+                mechanism_change="",
+            )
+        ]
+    )
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(provider="chutes", model="google/gemma-4-31B-turbo-TEE"),
+    )
+
+    with pytest.raises(ValidationError):
+        await service.judge(
+            SimilarityJudgeRequest(
+                batch_id=uuid4(),
+                candidate_artifact_id=uuid4(),
+                incumbent_artifact_id=uuid4(),
+                candidate_miner_uid=20,
+                incumbent_miner_uid=10,
+                incumbent_script="def answer(): return 'old'",
+                candidate_diff="+ def answer(): return 'new'",
+            )
+        )
 
 
 async def test_similarity_judge_keeps_reasoning_effort_on_request_without_typed_thinking() -> None:

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from harnyx_commons.llm.json_utils import pydantic_postprocessor
 from harnyx_commons.llm.provider import LlmProviderPort, LlmRetryExhaustedError
@@ -34,14 +34,21 @@ _SYSTEM_PROMPT = (
     "edits, reordered equivalent code, small token/timeout/budget/temperature tweaks, and minor "
     "prompt-wording edits that restate the same instructions. Do not credit a change as material "
     "merely because it might perturb stochastic LLM output or slightly alter cost/latency.\n"
-    "Prompt changes count as material only when they add, remove, or substantially change a "
-    "specific policy that would likely alter evidence gathering, retrieval strategy, source "
-    "acceptance, contradiction handling, verification, citation traceability, or final synthesis.\n"
-    "Return `not_duplicate` when the candidate introduces a material behavioral change that could "
-    "reasonably affect deep-research quality, traceability, tool use, verification, or synthesis.\n\n"
+    "Prompt improvements can count only when the diff shows that the agent will do materially "
+    "different work: new or changed decomposition, retrieval, source selection, verification, "
+    "contradiction handling, citation traceability, tool use, fallback, or final synthesis "
+    "behavior.\n"
+    "Prompt churn is duplicate: clearer wording, stronger wording, formatting instructions, "
+    "style instructions, or restatements of the same policy do not count by themselves.\n"
+    "Parameter changes are duplicate by themselves: token, timeout, budget, temperature, model, "
+    "retry, or source-count changes need a separate concrete mechanism-level behavior change.\n"
+    "Return `not_duplicate` only when you can name the concrete mechanism-level behavior change.\n\n"
     "When the evidence is borderline or the diff is mostly cosmetic, choose `duplicate`.\n\n"
-    "Return JSON only with exactly one key: `verdict`.\n"
-    "Set `verdict` to either `duplicate` or `not_duplicate`."
+    "Return JSON only with keys `verdict`, `reasoning`, and `mechanism_change`.\n"
+    "`reasoning` must briefly explain the verdict.\n"
+    "`mechanism_change` may be null or empty for `duplicate`.\n"
+    "For `not_duplicate`, `mechanism_change` must briefly name the concrete mechanism-level "
+    "behavior change."
 )
 _USER_PROMPT_PREFIX = (
     "Judge whether this candidate artifact is a semantic/functional duplicate of the original incumbent.\n\n"
@@ -50,9 +57,22 @@ _USER_PROMPT_PREFIX = (
 
 
 class _SimilarityVerdictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     verdict: Literal["not_duplicate", "duplicate"] = Field(
         description="Whether the candidate is materially distinct from the incumbent."
     )
+    reasoning: str = Field(description="Validator-owned verdict explanation.", min_length=1)
+    mechanism_change: str | None = Field(
+        default=None,
+        description="Concrete behavior change required when the verdict is not_duplicate.",
+    )
+
+    @model_validator(mode="after")
+    def _reasoning_supports_verdict(self) -> _SimilarityVerdictModel:
+        if self.verdict == "not_duplicate" and not self.mechanism_change:
+            raise ValueError("not_duplicate requires mechanism_change")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,15 +109,15 @@ class SimilarityJudge:
             parsed = response.postprocessed
             if parsed is None:
                 raise RuntimeError("similarity judge did not return structured output")
-            verdict = _SimilarityVerdictModel.model_validate(parsed).verdict
+            verdict_model = _SimilarityVerdictModel.model_validate(parsed)
             selected_provider, selected_model = _selected_route_metadata(
                 response,
                 default_provider=self._config.provider,
                 default_model=model,
             )
             return SimilarityJudgeResult(
-                verdict=verdict,
-                reasoning=_extract_reasoning_text(response),
+                verdict=verdict_model.verdict,
+                reasoning=_similarity_reasoning_text(verdict_model),
                 reasoning_tokens=response.usage.reasoning_tokens,
                 model=selected_model,
                 provider=selected_provider,
@@ -156,12 +176,10 @@ def _build_similarity_payload(request: SimilarityJudgeRequest) -> dict[str, obje
     }
 
 
-def _extract_reasoning_text(response: LlmResponse) -> str | None:
-    for choice in response.choices:
-        normalized_reasoning = choice.message.reasoning.strip() if choice.message.reasoning else ""
-        if normalized_reasoning:
-            return normalized_reasoning
-    return None
+def _similarity_reasoning_text(verdict_model: _SimilarityVerdictModel) -> str:
+    if verdict_model.verdict == "not_duplicate":
+        return f"{verdict_model.reasoning}\nMechanism change: {verdict_model.mechanism_change}"
+    return verdict_model.reasoning
 
 
 def _selected_route_metadata(
