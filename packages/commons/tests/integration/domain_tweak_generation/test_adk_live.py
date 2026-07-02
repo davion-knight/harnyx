@@ -5,7 +5,11 @@ import os
 import pytest
 
 from harnyx_commons.config.vertex import VertexSettings
-from harnyx_commons.domain_tweak_generation import DomainTweakAdkRunConfig, DomainTweakAdkRunner
+from harnyx_commons.domain_tweak_generation import (
+    DomainTweakAdkPhaseResult,
+    DomainTweakAdkRunConfig,
+    DomainTweakAdkRunner,
+)
 from harnyx_commons.domain_tweak_generation.validation import validate_question_generation_output
 from harnyx_commons.llm.providers.vertex.credentials import cleanup_credentials_file, prepare_credentials
 
@@ -26,7 +30,7 @@ async def test_adk_live_imports_and_runs_vertex_smoke(monkeypatch: pytest.Monkey
             ),
             config=DomainTweakAdkRunConfig(
                 model=os.environ.get("DOMAIN_TWEAK_ADK_LIVE_MODEL", "gemini-3.1-flash-lite"),
-                max_retries=0,
+                max_retries=1,
                 phase_timeout_seconds=120,
             ),
             validate=validate_question_generation_output,
@@ -34,8 +38,24 @@ async def test_adk_live_imports_and_runs_vertex_smoke(monkeypatch: pytest.Monkey
     finally:
         cleanup_credentials_file(credentials_path)
 
-    assert result.terminal_status == "validated"
+    assert result.terminal_status == "validated", _phase_result_debug(result)
     assert result.attempts
+
+
+def _phase_result_debug(result: DomainTweakAdkPhaseResult) -> str:
+    lines = [f"terminal_status={result.terminal_status}"]
+    if result.error_type or result.error:
+        lines.append(f"error={result.error_type}: {result.error}")
+    for attempt in result.attempts:
+        lines.append(
+            "attempt "
+            f"{attempt.attempt_index} "
+            f"prompt_kind={attempt.prompt_kind} "
+            f"validation_ok={attempt.validation_ok} "
+            f"feedback={list(attempt.validation_feedback)} "
+            f"preview={attempt.final_text_preview!r}"
+        )
+    return "\n".join(lines)
 
 
 def _configure_adk_vertex_environment(monkeypatch: pytest.MonkeyPatch) -> str | None:
