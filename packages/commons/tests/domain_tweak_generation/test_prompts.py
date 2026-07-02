@@ -56,12 +56,26 @@ def test_reference_answer_prompt_uses_a2_answer_strategy_without_internal_contex
     assert "false, partially supported, or unresolved premise" in prompt
     assert "Prefer bounded research" in prompt
     assert "complete final set near the top" in prompt
+    assert "included-entity proof table or compact proof list" in prompt
+    assert "For each included entity, bind every query predicate" in prompt
+    assert "candidate-pool membership, inclusion criteria, exclusion criteria not triggered" in prompt
+    assert "date/time basis" in prompt
+    assert "values used in filters or calculations" in prompt
     assert "candidate pool, filters, and calculations" in prompt
-    assert "Discuss excluded or borderline cases only when" in prompt
-    assert "citation object whose note directly says what the citation supports" in prompt
+    assert "Discuss excluded or borderline entities only when" in prompt
+    assert "A citation note is scorer-visible evidence" in prompt
+    assert "compact factual grounding snippet" in prompt
+    assert "exactly which visible claim it supports" in prompt
+    assert "If one citation does not support all major subclaims" in prompt
+    assert "Do not claim broad all-others exclusions or universal negatives" in prompt
     assert "official, primary, canonical, database, or specialized sources" in prompt
     assert "Search separately only for filters" in prompt
     assert "Search procedure" in prompt
+    assert "Compact exhaustive-list example" in prompt
+    assert "Good:" in prompt
+    assert "Proof:" in prompt
+    assert "Completeness:" in prompt
+    assert "Bad:" in prompt
     _assert_no_internal_context_terms(prompt)
 
 
