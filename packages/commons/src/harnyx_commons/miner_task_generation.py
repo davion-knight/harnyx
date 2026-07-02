@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from harnyx_commons.domain.miner_task import AnswerCitation, MinerTask, Query, ReferenceAnswer
 from harnyx_commons.domain.shared_config import COMMONS_STRICT_CONFIG
@@ -315,14 +315,63 @@ class MinerTaskDatasetRequest(BaseModel):
     model_config = COMMONS_STRICT_CONFIG
 
     batch_id: UUID
+    created_at: datetime | None = None
     minimum_task_total: int = Field(gt=0)
     generation_task_buffer: int = Field(ge=0)
     generation_spec: MinerTaskModelSpec
     reference_spec: MinerTaskModelSpec
 
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_must_be_timezone_aware(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+        return value
+
     @property
     def generation_task_total(self) -> int:
         return self.minimum_task_total + self.generation_task_buffer
+
+
+class DomainTweakPairInput(BaseModel):
+    model_config = COMMONS_STRICT_CONFIG
+
+    pair_id: str = Field(min_length=1)
+    deepsearchqa_form_target: str = Field(min_length=1)
+    deepresearch9k_domain_target: str = Field(min_length=1)
+    timestamp: datetime
+
+
+class DomainTweakQuestionCandidate(BaseModel):
+    model_config = COMMONS_STRICT_CONFIG
+
+    question: str = Field(min_length=1)
+    short_answer: str = Field(min_length=1)
+    solution_plan: str = Field(min_length=1)
+
+    @field_validator("solution_plan")
+    @classmethod
+    def _validate_solution_plan(cls, value: str) -> str:
+        if not any(line.strip().startswith(("-", "*")) for line in value.splitlines()):
+            raise ValueError("solution_plan must include at least one unordered markdown bullet")
+        return value
+
+
+class DomainTweakFormReview(BaseModel):
+    model_config = COMMONS_STRICT_CONFIG
+
+    form_match: bool
+    false_premise_status: str = Field(min_length=1)
+    reviewer_feedback: str = Field(min_length=1)
+    retry_recommended: bool
+
+
+class DomainTweakReferenceAnswerCandidate(BaseModel):
+    model_config = COMMONS_STRICT_CONFIG
+
+    question: str = Field(min_length=1)
+    premise_assessment: str = Field(min_length=1)
+    reference_answer: ReferenceAnswer
 
 
 class _GeneratedTaskPayload(BaseModel):
@@ -630,6 +679,10 @@ class MinerTaskDatasetBuilder:
 
 
 __all__ = [
+    "DomainTweakFormReview",
+    "DomainTweakPairInput",
+    "DomainTweakQuestionCandidate",
+    "DomainTweakReferenceAnswerCandidate",
     "MinerTaskDatasetBuilder",
     "MinerTaskDatasetRequest",
     "MinerTaskModelSpec",

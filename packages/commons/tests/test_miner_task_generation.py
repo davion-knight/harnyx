@@ -267,6 +267,7 @@ async def test_miner_task_dataset_builder_dismisses_incomplete_reference_citatio
     tasks = await builder.build(
         MinerTaskDatasetRequest(
             batch_id=uuid4(),
+            created_at=datetime(2026, 3, 6, tzinfo=UTC),
             minimum_task_total=1,
             generation_task_buffer=0,
             generation_spec=MinerTaskModelSpec(
@@ -304,6 +305,7 @@ async def test_miner_task_dataset_builder_rejects_bedrock_reference_generation()
         await builder.build(
             MinerTaskDatasetRequest(
                 batch_id=uuid4(),
+                created_at=datetime(2026, 3, 6, tzinfo=UTC),
                 minimum_task_total=1,
                 generation_task_buffer=0,
                 generation_spec=MinerTaskModelSpec(
@@ -341,6 +343,7 @@ async def test_miner_task_dataset_builder_accepts_buffered_underfill_with_warnin
     tasks = await builder.build(
         MinerTaskDatasetRequest(
             batch_id=uuid4(),
+            created_at=datetime(2026, 3, 6, tzinfo=UTC),
             minimum_task_total=2,
             generation_task_buffer=1,
             generation_spec=MinerTaskModelSpec(
@@ -383,6 +386,7 @@ async def test_miner_task_dataset_builder_accepts_buffered_duplicates_after_dedu
     tasks = await builder.build(
         MinerTaskDatasetRequest(
             batch_id=uuid4(),
+            created_at=datetime(2026, 3, 6, tzinfo=UTC),
             minimum_task_total=3,
             generation_task_buffer=1,
             generation_spec=MinerTaskModelSpec(
@@ -435,6 +439,7 @@ async def test_miner_task_dataset_builder_retries_duplicate_heavy_under_minimum(
     tasks = await builder.build(
         MinerTaskDatasetRequest(
             batch_id=uuid4(),
+            created_at=datetime(2026, 3, 6, tzinfo=UTC),
             minimum_task_total=3,
             generation_task_buffer=1,
             generation_spec=MinerTaskModelSpec(
@@ -480,6 +485,7 @@ async def test_miner_task_dataset_builder_rejects_below_minimum_task_total() -> 
         await builder.build(
             MinerTaskDatasetRequest(
                 batch_id=uuid4(),
+                created_at=datetime(2026, 3, 6, tzinfo=UTC),
                 minimum_task_total=2,
                 generation_task_buffer=1,
                 generation_spec=MinerTaskModelSpec(
@@ -535,6 +541,7 @@ async def test_miner_task_dataset_builder_rejects_blank_non_vertex_reference_ans
         await builder.build(
             MinerTaskDatasetRequest(
                 batch_id=uuid4(),
+                created_at=datetime(2026, 3, 6, tzinfo=UTC),
                 minimum_task_total=1,
                 generation_task_buffer=0,
                 generation_spec=MinerTaskModelSpec(
