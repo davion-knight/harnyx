@@ -190,6 +190,12 @@ class _SuccessfulLlmProvider:
             metadata={
                 "effective_provider": "openrouter",
                 "raw_response": {"usage": {"cost": 0.0042}},
+                "actual_cost_usd": 0.0042,
+                "actual_cost_provider": "openrouter",
+                "actual_cost_evidence": {
+                    "settlement_source": "provider_returned",
+                    "pricing_origin": "openrouter_usage_cost",
+                },
             },
         )
 

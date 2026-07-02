@@ -419,7 +419,7 @@ async def test_chutes_provider_attaches_actual_cost_from_static_pricing() -> Non
 
 
 @pytest.mark.anyio("asyncio")
-async def test_chutes_provider_prices_final_accumulated_usage_after_provider_retries() -> None:
+async def test_chutes_provider_accumulates_per_response_cost_after_provider_retries() -> None:
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -462,9 +462,10 @@ async def test_chutes_provider_prices_final_accumulated_usage_after_provider_ret
     assert response.usage.prompt_tokens == 3_000
     assert response.usage.completion_tokens == 3_000
     assert response.metadata is not None
-    assert response.metadata["actual_cost_usd"] == pytest.approx(0.0009)
-    assert response.metadata["actual_cost_evidence"]["prompt_tokens"] == 3_000
-    assert response.metadata["actual_cost_evidence"]["completion_tokens"] == 3_000
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.0006)
+    assert response.metadata["actual_cost_usd_total"] == pytest.approx(0.0009)
+    assert response.metadata["actual_cost_evidence"]["prompt_tokens"] == 2_000
+    assert response.metadata["actual_cost_evidence"]["completion_tokens"] == 2_000
 
 
 @pytest.mark.anyio("asyncio")

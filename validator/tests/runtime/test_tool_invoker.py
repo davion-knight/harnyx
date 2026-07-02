@@ -281,6 +281,12 @@ class StubChutesProvider:
             return {
                 "effective_provider": "openrouter",
                 "raw_response": {"usage": {"cost": 0.0042}},
+                "actual_cost_provider": "openrouter",
+                "actual_cost_usd": 0.0042,
+                "actual_cost_evidence": {
+                    "settlement_source": "provider_returned",
+                    "pricing_origin": "openrouter_usage_cost",
+                },
             }
         return {
             "actual_cost_provider": "chutes",
@@ -349,8 +355,30 @@ class StubOpenRouterProvider(StubChutesProvider):
             metadata={
                 "effective_provider": "openrouter",
                 "raw_response": {"usage": {"cost": 0.0042}},
+                "actual_cost_provider": "openrouter",
+                "actual_cost_usd": 0.0042,
+                "actual_cost_evidence": {
+                    "settlement_source": "provider_returned",
+                    "pricing_origin": "openrouter_usage_cost",
+                },
             },
             finish_reason="stop",
+        )
+
+
+class RetryAggregateCostOpenRouterProvider(StubOpenRouterProvider):
+    async def invoke(self, request: LlmRequest) -> LlmResponse:
+        response = await super().invoke(request)
+        return LlmResponse(
+            id=response.id,
+            choices=response.choices,
+            usage=response.usage,
+            metadata={
+                **dict(response.metadata or {}),
+                "actual_cost_usd": 0.02,
+                "actual_cost_usd_total": 0.03,
+            },
+            finish_reason=response.finish_reason,
         )
 
 
@@ -1493,6 +1521,32 @@ async def test_runtime_invoker_returns_public_payload_plus_execution_facts(
     assert "actual_cost_usd" not in result.public_payload
 
 
+async def test_runtime_invoker_uses_retry_aggregate_llm_cost() -> None:
+    provider = RetryAggregateCostOpenRouterProvider()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        llm_provider=provider,
+        llm_provider_name="openrouter",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    result = await _invoke(
+        invoker,
+        "llm_chat",
+        kwargs={
+            "provider": "openrouter",
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": ALLOWED_TOOL_MODELS[0],
+        },
+    )
+
+    assert isinstance(result, ToolInvocationOutput)
+    assert result.actual_cost_usd == pytest.approx(0.03)
+    assert result.actual_cost_evidence is not None
+    assert result.actual_cost_evidence["settlement_source"] == "retry_aggregate"
+    assert result.actual_cost_evidence["final_response_actual_cost_usd"] == pytest.approx(0.02)
+
+
 async def test_runtime_invoker_openrouter_missing_usage_cost_uses_static_pricing() -> None:
     class MissingUsageCostOpenRouterProvider(StubOpenRouterProvider):
         async def invoke(self, request: LlmRequest) -> LlmResponse:
@@ -1501,7 +1555,13 @@ async def test_runtime_invoker_openrouter_missing_usage_cost_uses_static_pricing
                 id=response.id,
                 choices=response.choices,
                 usage=response.usage,
-                metadata={"effective_provider": "openrouter", "raw_response": {"usage": {}}},
+                metadata={
+                    "effective_provider": "openrouter",
+                    "raw_response": {"usage": {}},
+                    "actual_cost_provider": "openrouter",
+                    "actual_cost_usd": price_miner_llm("openrouter", OPENROUTER_NATIVE_TOOL_MODEL, response.usage),
+                    "actual_cost_evidence": {"settlement_source": "static_pricing"},
+                },
                 finish_reason=response.finish_reason,
             )
 
@@ -1536,19 +1596,23 @@ async def test_runtime_invoker_openrouter_missing_usage_cost_uses_static_pricing
     assert result.actual_cost_evidence["settlement_source"] == "static_pricing"
 
 
-async def test_runtime_invoker_rejects_boolean_openrouter_usage_cost_as_provider_error() -> None:
-    class BooleanUsageCostOpenRouterProvider(StubOpenRouterProvider):
+async def test_runtime_invoker_rejects_boolean_normalized_llm_actual_cost_as_provider_error() -> None:
+    class BooleanActualCostOpenRouterProvider(StubOpenRouterProvider):
         async def invoke(self, request: LlmRequest) -> LlmResponse:
             response = await super().invoke(request)
             return LlmResponse(
                 id=response.id,
                 choices=response.choices,
                 usage=response.usage,
-                metadata={"effective_provider": "openrouter", "raw_response": {"usage": {"cost": True}}},
+                metadata={
+                    "actual_cost_provider": "openrouter",
+                    "actual_cost_usd": True,
+                    "actual_cost_evidence": {"settlement_source": "provider_returned"},
+                },
                 finish_reason=response.finish_reason,
             )
 
-    provider = BooleanUsageCostOpenRouterProvider()
+    provider = BooleanActualCostOpenRouterProvider()
     invoker = RuntimeToolInvoker(
         FakeReceiptLog(),
         llm_provider=provider,
@@ -1568,7 +1632,80 @@ async def test_runtime_invoker_rejects_boolean_openrouter_usage_cost_as_provider
         )
 
     assert isinstance(exc_info.value.__cause__, ValueError)
-    assert "OpenRouter usage.cost must be numeric" in str(exc_info.value.__cause__)
+    assert "actual_cost_usd must be numeric" in str(exc_info.value.__cause__)
+
+
+async def test_runtime_invoker_rejects_llm_chat_without_normalized_cost_metadata() -> None:
+    class MissingSettledCostProvider(StubOpenRouterProvider):
+        async def invoke(self, request: LlmRequest) -> LlmResponse:
+            response = await super().invoke(request)
+            return LlmResponse(
+                id=response.id,
+                choices=response.choices,
+                usage=response.usage,
+                metadata={"effective_provider": "openrouter", "raw_response": {"usage": {"cost": 0.0042}}},
+                finish_reason=response.finish_reason,
+            )
+
+    provider = MissingSettledCostProvider()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        llm_provider=provider,
+        llm_provider_name="openrouter",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    with pytest.raises(ToolProviderError) as exc_info:
+        await _invoke(
+            invoker,
+            "llm_chat",
+            kwargs={
+                "provider": "openrouter",
+                "messages": [{"role": "user", "content": "hi"}],
+                "model": OPENROUTER_NATIVE_TOOL_MODEL,
+            },
+        )
+
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert "missing settled cost" in str(exc_info.value.__cause__)
+
+
+async def test_runtime_invoker_rejects_llm_chat_without_actual_cost_evidence() -> None:
+    class MissingActualCostEvidenceProvider(StubOpenRouterProvider):
+        async def invoke(self, request: LlmRequest) -> LlmResponse:
+            response = await super().invoke(request)
+            return LlmResponse(
+                id=response.id,
+                choices=response.choices,
+                usage=response.usage,
+                metadata={
+                    "actual_cost_provider": "openrouter",
+                    "actual_cost_usd": 0.0042,
+                },
+                finish_reason=response.finish_reason,
+            )
+
+    provider = MissingActualCostEvidenceProvider()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        llm_provider=provider,
+        llm_provider_name="openrouter",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    with pytest.raises(ToolProviderError) as exc_info:
+        await _invoke(
+            invoker,
+            "llm_chat",
+            kwargs={
+                "provider": "openrouter",
+                "messages": [{"role": "user", "content": "hi"}],
+                "model": OPENROUTER_NATIVE_TOOL_MODEL,
+            },
+        )
+
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert "missing settled cost" in str(exc_info.value.__cause__)
 
 
 async def test_runtime_invoker_uses_chutes_actual_cost_metadata_and_keeps_payload_public() -> None:

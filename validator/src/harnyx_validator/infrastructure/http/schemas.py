@@ -7,6 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from harnyx_commons.domain.judge_usage import JudgeUsageSummary
 from harnyx_commons.miner_task_similarity import SimilarityJudgeRequest, SimilarityJudgeResult
 from harnyx_validator.domain.shared_config import VALIDATOR_STRICT_CONFIG
 
@@ -58,6 +59,7 @@ class SimilarityJudgeResponseModel(BaseModel):
     reasoning_tokens: int | None = Field(default=None, ge=0)
     model: str = Field(min_length=1)
     provider: str = Field(min_length=1)
+    judge_usage: JudgeUsageSummary | None = None
 
     @classmethod
     def from_domain(cls, result: SimilarityJudgeResult) -> SimilarityJudgeResponseModel:
@@ -67,7 +69,17 @@ class SimilarityJudgeResponseModel(BaseModel):
             reasoning_tokens=result.reasoning_tokens,
             model=result.model,
             provider=result.provider,
+            judge_usage=result.judge_usage,
         )
+
+
+class SimilarityJudgeFailureResponseModel(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    error_code: Literal["similarity_judge_failed"]
+    retryable: bool
+    detail: str = Field(min_length=1)
+    judge_usage: JudgeUsageSummary | None = None
 
 
 class ValidatorInternalErrorResponse(BaseModel):
@@ -114,6 +126,7 @@ class ValidatorStatusResponse(BaseModel):
 
 
 __all__ = [
+    "SimilarityJudgeFailureResponseModel",
     "SimilarityJudgeRequestModel",
     "SimilarityJudgeResponseModel",
     "ValidatorResourceUsageResponse",

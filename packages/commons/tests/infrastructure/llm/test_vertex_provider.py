@@ -1184,6 +1184,9 @@ async def test_vertex_maas_gpt_oss_routes_to_chat_completions(
     assert response.metadata is not None
     assert isinstance(response.metadata["ttft_ms"], float)
     assert response.metadata["ttft_ms"] >= 0.0
+    assert response.metadata["actual_cost_provider"] == "vertex"
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.000001173)
+    assert response.metadata["actual_cost_evidence"]["settlement_source"] == "static_pricing"
 
     records = [record for record in caplog.records if record.message == "llm.vertex.stream.ttft"]
     assert records

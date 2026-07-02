@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
 
+from harnyx_commons.domain.judge_usage import JudgeUsageSummary
 from harnyx_commons.llm.provider_types import LlmRouteTarget
 
 SimilarityVerdict = Literal["not_duplicate", "duplicate"]
@@ -30,6 +31,7 @@ class SimilarityJudgeResult:
     reasoning_tokens: int | None
     model: str
     provider: LlmRouteTarget
+    judge_usage: JudgeUsageSummary | None = None
 
 
 @dataclass(frozen=True, slots=True)

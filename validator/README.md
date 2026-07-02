@@ -61,6 +61,8 @@ Validator pairwise scoring keeps `SCORING_LLM_PROVIDER` configurable, but the pr
 
 Duplicate-preflight similarity judging uses `SIMILARITY_LLM_*` for provider, temperature, timeout, output tokens, and retry policy. The default primary model remains `google/gemma-4-31B-turbo-TEE`, followed by `moonshotai/Kimi-K2.5-TEE` and then `zai-org/GLM-5-TEE` if the current candidate exhausts provider retries. The platform computes the duplicate-preflight order and sends the original incumbent script plus candidate diff to validators; validators own the similarity prompt internally and return a duplicate/not-duplicate verdict with structured reasoning. The `not_duplicate` standard requires a concrete mechanism-level behavior change; prompt churn and parameter-only changes remain duplicates unless the diff also changes actual research behavior.
 
+If the validator cannot produce a similarity verdict after receiving a valid request because judge execution or the upstream judge provider failed, it returns a structured `502` JSON body with `error_code`, `retryable`, `detail`, and nullable `judge_usage`. Request validation failures remain `422`. Service-availability failures such as auth unavailable or missing similarity judge configuration remain `503` and use normal status-based Platform retry behavior unless a structured failure body says otherwise. Platform reads the explicit `retryable` field from valid structured similarity judge failure bodies when deciding whether to retry a failed similarity judge request.
+
 Internal route controls may still appear in internal/local tooling deployments, including miner local eval, but they are not validator server miner-task provider credential requirements.
 
 ### Optional Sentry

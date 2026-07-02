@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from harnyx_commons.llm.pricing import MINER_TOOL_LLM_PRICING, ModelPricing
+from harnyx_commons.llm.pricing import MINER_TOOL_LLM_PRICING, ModelPricing, price_static_llm_model
 from harnyx_commons.llm.provider_types import CHUTES_PROVIDER
 from harnyx_commons.llm.providers.chutes_pricing import CHUTES_STATIC_PRICING, ChutesModelPricingCache
 from harnyx_commons.llm.schema import LlmUsage
@@ -55,6 +55,17 @@ async def test_chutes_pricing_cache_prices_kimi_validator_judge_model() -> None:
     assert actual_cost.provider == "chutes"
     assert actual_cost.evidence["settlement_source"] == "static_pricing"
     assert actual_cost.evidence["pricing_origin"] == "chutes_repo_rates"
+
+
+def test_static_model_pricing_includes_kimi_validator_judge_model() -> None:
+    usage = LlmUsage(
+        prompt_tokens=1_000,
+        completion_tokens=2_000,
+        reasoning_tokens=3_000,
+        total_tokens=6_000,
+    )
+
+    assert price_static_llm_model("moonshotai/Kimi-K2.5-TEE", usage) == pytest.approx(0.01044)
 
 
 def test_chutes_static_pricing_uses_miner_advertised_rates_for_allowed_models() -> None:

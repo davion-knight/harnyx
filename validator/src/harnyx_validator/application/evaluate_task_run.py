@@ -21,7 +21,7 @@ from harnyx_commons.domain.tool_usage import (
 )
 from harnyx_commons.llm.pricing import price_search
 from harnyx_commons.llm.provider import LlmRetryExhaustedError
-from harnyx_commons.miner_task_scoring import EvaluationScoringService
+from harnyx_commons.miner_task_scoring import EvaluationScoringResult, EvaluationScoringService
 from harnyx_commons.tools.types import SearchToolName, is_search_tool
 from harnyx_validator.application.assigned_work import PhaseRecorder
 from harnyx_validator.application.dto.evaluation import (
@@ -343,7 +343,7 @@ class TaskRunOrchestrator:
         if phase_recorder is not None:
             phase_recorder.mark("scoring")
         try:
-            score_breakdown = await self._scoring.score(
+            scoring_result = await self._scoring.score(
                 task=request.task,
                 response=invocation.response,
             )
@@ -369,6 +369,12 @@ class TaskRunOrchestrator:
                 error_code=_scoring_error_code(exc),
             )
             raise
+        if isinstance(scoring_result, EvaluationScoringResult):
+            score_breakdown = scoring_result.score_breakdown
+            scoring_judge_usage = scoring_result.judge_usage
+        else:
+            score_breakdown = scoring_result
+            scoring_judge_usage = None
         scoring_ms = _monotonic_elapsed_ms(
             started_at=scoring_started_at,
             completed_at=time.monotonic(),
@@ -378,6 +384,7 @@ class TaskRunOrchestrator:
         usage, total_tool_usage = self._usage.summarize(session, invocation.tool_receipts)
         details = EvaluationDetails(
             score_breakdown=score_breakdown,
+            scoring_judge_usage=scoring_judge_usage,
             total_tool_usage=total_tool_usage,
             elapsed_ms=_elapsed_ms(issued_at=session.issued_at, completed_at=invocation_completed_at),
         )

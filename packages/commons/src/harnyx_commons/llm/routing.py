@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
-from harnyx_commons.llm.provider import LlmProviderPort
+from harnyx_commons.llm.provider import LlmProviderPort, LlmRetryExhaustedError
 from harnyx_commons.llm.provider_types import (
     LlmProviderName,
     LlmRouteTarget,
@@ -159,7 +159,12 @@ class RoutedLlmProvider(LlmProviderPort):
             allow_custom_openai_compatible=self._allow_custom_openai_compatible,
         )
         routed_request = replace(request, provider=route.provider, model=route.model)
-        response = await self._resolve_provider(route.provider).invoke(routed_request)
+        try:
+            response = await self._resolve_provider(route.provider).invoke(routed_request)
+        except LlmRetryExhaustedError as exc:
+            if exc.response is not None:
+                exc.response = with_effective_route_metadata(exc.response, route)
+            raise
         return with_effective_route_metadata(response, route)
 
     async def aclose(self) -> None:

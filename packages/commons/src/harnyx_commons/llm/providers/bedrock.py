@@ -9,6 +9,7 @@ from aiobotocore.session import get_session
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
+from harnyx_commons.llm.cost_settlement import settled_response_cost, with_settled_llm_cost
 from harnyx_commons.llm.provider import BaseLlmProvider
 from harnyx_commons.llm.schema import AbstractLlmRequest, LlmRequest, LlmResponse
 
@@ -69,6 +70,20 @@ class BedrockLlmProvider(BaseLlmProvider):
             classify_exception=self._classify_exception,
             policy=validated_request.retry_policy,
         )
+
+    async def _annotate_response_cost(
+        self,
+        request: AbstractLlmRequest,
+        response: LlmResponse,
+    ) -> LlmResponse:
+        cost = settled_response_cost(response, provider="bedrock", model=request.model)
+        if cost is None:
+            self._logger.warning(
+                "bedrock.cost_settlement.unavailable",
+                extra={"data": {"provider": self._provider_label, "model": request.model}},
+            )
+            return response
+        return with_settled_llm_cost(response, cost)
 
     async def _call_bedrock(self, request: LlmRequest) -> LlmResponse:
         bedrock_request = BedrockConverseStreamRequest.from_llm_request(request)

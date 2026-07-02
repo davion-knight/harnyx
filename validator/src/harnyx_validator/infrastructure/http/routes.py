@@ -27,6 +27,7 @@ from harnyx_validator.application.platform_tool_proxy import PlatformToolProxySc
 from harnyx_validator.application.ports.platform import PlatformToolProxyPlatformPort
 from harnyx_validator.application.status import BatchActivityTracker, StatusProvider
 from harnyx_validator.infrastructure.http.schemas import (
+    SimilarityJudgeFailureResponseModel,
     SimilarityJudgeRequestModel,
     SimilarityJudgeResponseModel,
     ValidatorInternalErrorResponse,
@@ -198,7 +199,10 @@ def add_control_routes(
     @app.post(
         "/validator/miner-task-batches/{batch_id}/similarity",
         response_model=SimilarityJudgeResponseModel,
-        responses={500: {"model": ValidatorInternalErrorResponse}},
+        responses={
+            502: {"model": SimilarityJudgeFailureResponseModel},
+            500: {"model": ValidatorInternalErrorResponse},
+        },
         description="Run a validator-owned similarity judge for a dethroning miner script candidate.",
     )
     async def judge_similarity(
@@ -215,7 +219,16 @@ def add_control_routes(
         except HTTPException:
             raise
         except (RuntimeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            error_response = SimilarityJudgeFailureResponseModel(
+                error_code="similarity_judge_failed",
+                retryable=False,
+                detail=str(exc),
+                judge_usage=getattr(exc, "judge_usage", None),
+            )
+            return JSONResponse(
+                status_code=502,
+                content=error_response.model_dump(mode="json"),
+            )
         except Exception as exc:
             return _control_route_internal_error_response(request, exc)
         return SimilarityJudgeResponseModel.from_domain(result)

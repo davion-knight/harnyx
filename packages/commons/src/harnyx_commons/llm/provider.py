@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -73,9 +74,47 @@ class RetryContext:
     total_usage: LlmUsage = field(default_factory=LlmUsage)
     total_latency_ms: float = 0.0
     last_response: LlmResponse | None = None
+    billable_response_count: int = 0
+    _actual_cost_usd_values: list[float] = field(default_factory=list)
+    _actual_cost_complete: bool = True
 
     def is_exhausted(self, attempt: int) -> bool:
         return (attempt + 1) >= self.policy.attempts
+
+    @property
+    def actual_cost_usd_total(self) -> float | None:
+        if (
+            self.billable_response_count == 0
+            or not self._actual_cost_complete
+            or len(self._actual_cost_usd_values) != self.billable_response_count
+        ):
+            return None
+        return round(sum(self._actual_cost_usd_values), 12)
+
+    def record_billable_response(self, response: LlmResponse) -> None:
+        self.billable_response_count += 1
+        cost = _actual_cost_usd_for_retry_total(response)
+        if cost is None:
+            self._actual_cost_complete = False
+            return
+        self._actual_cost_usd_values.append(cost)
+
+
+def _actual_cost_usd_for_retry_total(response: LlmResponse) -> float | None:
+    metadata = response.metadata or {}
+    if "actual_cost_usd" not in metadata:
+        return None
+    value = metadata["actual_cost_usd"]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError("actual_cost_usd must be numeric when supplied")
+    cost = float(value)
+    if not math.isfinite(cost):
+        raise ValueError("actual_cost_usd must be finite when supplied")
+    if cost < 0.0:
+        raise ValueError("actual_cost_usd must be non-negative when supplied")
+    return cost
 
 
 class LlmProviderError(RuntimeError):
@@ -308,6 +347,14 @@ class BaseLlmProvider(ABC, LlmProviderPort):
     async def _invoke(self, request: AbstractLlmRequest) -> LlmResponse:
         """Provider-specific invocation; implemented by concrete providers."""
 
+    async def _annotate_response_cost(
+        self,
+        request: AbstractLlmRequest,
+        response: LlmResponse,
+    ) -> LlmResponse:
+        """Attach provider-owned settled-cost metadata when available."""
+        return response
+
     async def _call_with_retry(
         self,
         request: AbstractLlmRequest,
@@ -341,7 +388,10 @@ class BaseLlmProvider(ABC, LlmProviderPort):
             # Success
             return self._build_response(request, response, ctx, processed)
 
-        raise LlmRetryExhaustedError("LLM call exhausted all retry attempts", response=ctx.last_response)
+        raise LlmRetryExhaustedError(
+            "LLM call exhausted all retry attempts",
+            response=self._build_response_for_error(ctx.last_response, ctx),
+        )
 
     async def _try_call(
         self,
@@ -376,9 +426,11 @@ class BaseLlmProvider(ABC, LlmProviderPort):
             )
             return None
 
+        response = await self._annotate_response_cost(request, response)
         latency_ms = (time.perf_counter() - start) * 1000
         ctx.total_latency_ms += latency_ms
         ctx.total_usage += response.usage or LlmUsage()
+        ctx.record_billable_response(response)
         ctx.last_response = response
         return response
 
@@ -526,7 +578,10 @@ class BaseLlmProvider(ABC, LlmProviderPort):
         """Handle a phase failure - either raise or prepare for retry."""
         response_for_error = response if response is not None else ctx.last_response
         if retryable and ctx.is_exhausted(attempt):
-            raise LlmRetryExhaustedError(failure.reason, response=response_for_error)
+            raise LlmRetryExhaustedError(
+                failure.reason,
+                response=self._build_response_for_error(response_for_error, ctx),
+            )
         if not retryable:
             if source_exception is not None:
                 if isinstance(source_exception, LlmProviderError):
@@ -545,13 +600,31 @@ class BaseLlmProvider(ABC, LlmProviderPort):
         processed: object | None,
     ) -> LlmResponse:
         """Construct final response with accumulated metadata."""
+        self._log_retry_complete(request=request, response=response, ctx=ctx)
+        return self._build_accumulated_response(response, ctx, processed)
+
+    def _build_response_for_error(self, response: LlmResponse | None, ctx: RetryContext) -> LlmResponse | None:
+        if response is None:
+            return None
+        return self._build_accumulated_response(response, ctx, response.postprocessed)
+
+    def _build_accumulated_response(
+        self,
+        response: LlmResponse,
+        ctx: RetryContext,
+        processed: object | None,
+    ) -> LlmResponse:
         metadata = dict(response.metadata or {})
         metadata["attempts"] = len(ctx.reasons) + 1
+        metadata["billable_response_count"] = ctx.billable_response_count
+        actual_cost_total = ctx.actual_cost_usd_total
+        if actual_cost_total is not None:
+            metadata["actual_cost_usd_total"] = actual_cost_total
+        else:
+            metadata.pop("actual_cost_usd_total", None)
         metadata["retry_reasons"] = tuple(ctx.reasons)
         if ctx.recovery_events:
             metadata["postprocess_recoveries"] = tuple(ctx.recovery_events)
-
-        self._log_retry_complete(request=request, response=response, ctx=ctx)
 
         return LlmResponse(
             id=response.id,

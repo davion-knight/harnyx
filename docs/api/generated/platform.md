@@ -300,6 +300,37 @@ Body: [ErrorResponse](#model-errorresponse)
 | `error_code` |  |  | req | `string` |
 | `message` |  |  | req | `string` |
 
+`422` Validation Error
+Content-Type: `application/json`
+Body: [HTTPValidationError](#model-httpvalidationerror)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `detail` |  |  | opt | array[[ValidationError](#model-validationerror)] |
+|  | `ctx` |  | opt | `object` |
+|  | `input` |  | opt | `object` |
+|  | `loc` |  | req | array[anyOf: `string` OR `integer`] |
+|  | `msg` |  | req | `string` |
+|  | `type` |  | req | `string` |
+
+`502` Platform API could not validate the worker acknowledgement for the async start.
+Content-Type: `application/json`
+Body: [ErrorResponse](#model-errorresponse)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `error_code` |  |  | req | `string` |
+| `message` |  |  | req | `string` |
+
+`503` Platform API could not reach the worker for batch creation delegation.
+Content-Type: `application/json`
+Body: [ErrorResponse](#model-errorresponse)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `error_code` |  |  | req | `string` |
+| `message` |  |  | req | `string` |
+
 
 #### {batch_id}
 
@@ -1388,6 +1419,25 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `text` | opt | `string` (nullable) |
 |  | `scoring_version` |  | req | `string` |
 |  | `total_score` |  | req | `number` |
+| `scoring_judge_usage` |  |  | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `models` |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  |  | `actual_cost_evidence` | opt | `string` (nullable) |
+|  |  | `actual_cost_provider` | opt | `string` (nullable) |
+|  |  | `actual_cost_source` | req | `string` (enum: [provider_actual, unavailable]) |
+|  |  | `actual_cost_usd` | req | `number` (nullable) |
+|  |  | `call_count` | req | `integer` |
+|  |  | `completion_tokens` | req | `integer` |
+|  |  | `model` | req | `string` |
+|  |  | `prompt_tokens` | req | `integer` |
+|  |  | `provider` | req | `string` |
+|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
 | `total_tool_usage` |  |  | opt | [ToolUsageSummary](#model-toolusagesummary) |
 |  | `actual_cost_by_provider` |  | opt | `object` |
 |  | `actual_total_cost_usd` |  | opt | `number` (nullable) |
@@ -1444,6 +1494,16 @@ Body: [WeightsResponse](#model-weightsresponse)
       "anyOf": [
         {
           "$ref": "#/components/schemas/ScoreBreakdown"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scoring_judge_usage": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/JudgeUsageSummary"
         },
         {
           "type": "null"
@@ -2233,6 +2293,202 @@ Body: [WeightsResponse](#model-weightsresponse)
     }
   },
   "title": "HTTPValidationError",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-judgemodelusage"></a>
+### Model: JudgeModelUsage
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `actual_cost_evidence` |  |  | opt | `string` (nullable) |
+| `actual_cost_provider` |  |  | opt | `string` (nullable) |
+| `actual_cost_source` |  |  | req | `string` (enum: [provider_actual, unavailable]) |
+| `actual_cost_usd` |  |  | req | `number` (nullable) |
+| `call_count` |  |  | req | `integer` |
+| `completion_tokens` |  |  | req | `integer` |
+| `model` |  |  | req | `string` |
+| `prompt_tokens` |  |  | req | `integer` |
+| `provider` |  |  | req | `string` |
+| `reasoning_tokens` |  |  | req | `integer` |
+| `total_tokens` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "properties": {
+    "actual_cost_evidence": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Evidence"
+    },
+    "actual_cost_provider": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Provider"
+    },
+    "actual_cost_source": {
+      "enum": [
+        "provider_actual",
+        "unavailable"
+      ],
+      "title": "Actual Cost Source",
+      "type": "string"
+    },
+    "actual_cost_usd": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Usd"
+    },
+    "call_count": {
+      "title": "Call Count",
+      "type": "integer"
+    },
+    "completion_tokens": {
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "prompt_tokens": {
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "provider": {
+      "title": "Provider",
+      "type": "string"
+    },
+    "reasoning_tokens": {
+      "title": "Reasoning Tokens",
+      "type": "integer"
+    },
+    "total_tokens": {
+      "title": "Total Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "provider",
+    "model",
+    "call_count",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "actual_cost_usd",
+    "actual_cost_source"
+  ],
+  "title": "JudgeModelUsage",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-judgeusagesummary"></a>
+### Model: JudgeUsageSummary
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `actual_cost_usd` |  |  | req | `number` (nullable) |
+| `call_count` |  |  | req | `integer` |
+| `completion_tokens` |  |  | req | `integer` |
+| `models` |  |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  | `actual_cost_evidence` |  | opt | `string` (nullable) |
+|  | `actual_cost_provider` |  | opt | `string` (nullable) |
+|  | `actual_cost_source` |  | req | `string` (enum: [provider_actual, unavailable]) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `model` |  | req | `string` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `provider` |  | req | `string` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
+| `prompt_tokens` |  |  | req | `integer` |
+| `reasoning_tokens` |  |  | req | `integer` |
+| `total_tokens` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "properties": {
+    "actual_cost_usd": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Usd"
+    },
+    "call_count": {
+      "title": "Call Count",
+      "type": "integer"
+    },
+    "completion_tokens": {
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/components/schemas/JudgeModelUsage"
+      },
+      "title": "Models",
+      "type": "array"
+    },
+    "prompt_tokens": {
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "reasoning_tokens": {
+      "title": "Reasoning Tokens",
+      "type": "integer"
+    },
+    "total_tokens": {
+      "title": "Total Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "call_count",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "actual_cost_usd",
+    "models"
+  ],
+  "title": "JudgeUsageSummary",
   "type": "object"
 }
 ```
@@ -3462,6 +3718,14 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `reasoning` | opt | [ScorerReasoning](#model-scorerreasoning) (nullable) |
 |  |  | `scoring_version` | req | `string` |
 |  |  | `total_score` | req | `number` |
+|  | `scoring_judge_usage` |  | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
+|  |  | `actual_cost_usd` | req | `number` (nullable) |
+|  |  | `call_count` | req | `integer` |
+|  |  | `completion_tokens` | req | `integer` |
+|  |  | `models` | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  |  | `prompt_tokens` | req | `integer` |
+|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
 |  | `total_tool_usage` |  | opt | [ToolUsageSummary](#model-toolusagesummary) |
 |  |  | `actual_cost_by_provider` | opt | `object` |
 |  |  | `actual_total_cost_usd` | opt | `number` (nullable) |
@@ -3773,6 +4037,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `elapsed_ms` | opt | `number` (nullable) |
 |  |  | `error` | opt | [EvaluationError](#model-evaluationerror) (nullable) |
 |  |  | `score_breakdown` | opt | [ScoreBreakdown](#model-scorebreakdown) (nullable) |
+|  |  | `scoring_judge_usage` | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
 |  |  | `total_tool_usage` | opt | [ToolUsageSummary](#model-toolusagesummary) |
 |  | `usage` |  | req | [UsageModel](#model-usagemodel) |
 |  |  | `by_provider` | opt | `object` |

@@ -8,7 +8,7 @@ import pytest
 from pydantic import BaseModel
 
 from harnyx_commons.llm.json_utils import pydantic_postprocessor
-from harnyx_commons.llm.provider import BaseLlmProvider
+from harnyx_commons.llm.provider import BaseLlmProvider, LlmRetryExhaustedError
 from harnyx_commons.llm.retry_utils import RetryPolicy
 from harnyx_commons.llm.schema import (
     AbstractLlmRequest,
@@ -30,7 +30,14 @@ class _ExpectedAnswer(BaseModel):
     justification: str
 
 
-def _response(text: str, *, role: str = "assistant", response_id: str = "response-id") -> LlmResponse:
+def _response(
+    text: str,
+    *,
+    role: str = "assistant",
+    response_id: str = "response-id",
+    usage: LlmUsage | None = None,
+    metadata: dict[str, object] | None = None,
+) -> LlmResponse:
     return LlmResponse(
         id=response_id,
         choices=(
@@ -42,7 +49,8 @@ def _response(text: str, *, role: str = "assistant", response_id: str = "respons
                 ),
             ),
         ),
-        usage=LlmUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        usage=usage or LlmUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        metadata=metadata,
     )
 
 
@@ -72,6 +80,27 @@ class _SequencedProvider(BaseLlmProvider):
             request,
             call_coro=_call,
             verifier=lambda _: (True, False, None),
+        )
+
+
+class _HookCostedSequencedProvider(_SequencedProvider):
+    async def _annotate_response_cost(
+        self,
+        request: AbstractLlmRequest,
+        response: LlmResponse,
+    ) -> LlmResponse:
+        response_index = int(response.id.removeprefix("resp-"))
+        return LlmResponse(
+            id=response.id,
+            choices=response.choices,
+            usage=response.usage,
+            metadata={
+                **dict(response.metadata or {}),
+                "actual_cost_usd": response_index / 100,
+                "actual_cost_provider": request.provider,
+                "actual_cost_evidence": {"settlement_source": "test_hook"},
+            },
+            finish_reason=response.finish_reason,
         )
 
 
@@ -216,6 +245,137 @@ async def test_provider_feedback_retry_preserves_or_falls_back_tool_role(
 
     retry_request = provider.requests[1]
     assert retry_request.messages[2].role == expected_role
+
+
+async def test_provider_feedback_retry_accumulates_actual_cost_metadata_with_usage() -> None:
+    first_response = _response(
+        "not valid json",
+        response_id="resp-1",
+        usage=LlmUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+        metadata={"actual_cost_usd": 0.01, "actual_cost_provider": "chutes"},
+    )
+    second_response = _response(
+        json.dumps({"verdict": 1, "justification": "repaired"}),
+        response_id="resp-2",
+        usage=LlmUsage(prompt_tokens=11, completion_tokens=3, total_tokens=14),
+        metadata={"actual_cost_usd": 0.02, "actual_cost_provider": "chutes"},
+    )
+    provider = _SequencedProvider(
+        responses=[first_response, second_response],
+        postprocessor=pydantic_postprocessor(_ExpectedAnswer),
+    )
+
+    result = await provider.invoke(_request())
+
+    assert result.usage == LlmUsage(prompt_tokens=21, completion_tokens=5, total_tokens=26)
+    assert result.metadata is not None
+    assert result.metadata["attempts"] == 2
+    assert result.metadata["billable_response_count"] == 2
+    assert result.metadata["actual_cost_usd"] == pytest.approx(0.02)
+    assert result.metadata["actual_cost_usd_total"] == pytest.approx(0.03)
+
+
+async def test_provider_cost_hook_runs_before_retry_records_billable_response() -> None:
+    first_response = _response(
+        "not valid json",
+        response_id="resp-1",
+        usage=LlmUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+    )
+    second_response = _response(
+        json.dumps({"verdict": 1, "justification": "repaired"}),
+        response_id="resp-2",
+        usage=LlmUsage(prompt_tokens=11, completion_tokens=3, total_tokens=14),
+    )
+    provider = _HookCostedSequencedProvider(
+        responses=[first_response, second_response],
+        postprocessor=pydantic_postprocessor(_ExpectedAnswer),
+    )
+
+    result = await provider.invoke(_request())
+
+    assert result.metadata is not None
+    assert result.metadata["billable_response_count"] == 2
+    assert result.metadata["actual_cost_usd"] == pytest.approx(0.02)
+    assert result.metadata["actual_cost_usd_total"] == pytest.approx(0.03)
+
+
+async def test_provider_feedback_retry_rejects_invalid_intermediate_actual_cost_metadata() -> None:
+    first_response = _response(
+        "not valid json",
+        response_id="resp-1",
+        metadata={"actual_cost_usd": True, "actual_cost_provider": "chutes"},
+    )
+    second_response = _response(
+        json.dumps({"verdict": 1, "justification": "repaired"}),
+        response_id="resp-2",
+        metadata={"actual_cost_usd": 0.02, "actual_cost_provider": "chutes"},
+    )
+    provider = _SequencedProvider(
+        responses=[first_response, second_response],
+        postprocessor=pydantic_postprocessor(_ExpectedAnswer),
+    )
+
+    with pytest.raises(ValueError, match="actual_cost_usd"):
+        await provider.invoke(_request())
+
+
+async def test_provider_feedback_retry_omits_actual_cost_total_when_cost_is_missing() -> None:
+    first_response = _response(
+        "not valid json",
+        response_id="resp-1",
+        usage=LlmUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+    )
+    second_response = _response(
+        json.dumps({"verdict": 1, "justification": "repaired"}),
+        response_id="resp-2",
+        usage=LlmUsage(prompt_tokens=11, completion_tokens=3, total_tokens=14),
+        metadata={"actual_cost_usd": 0.02, "actual_cost_provider": "chutes"},
+    )
+    provider = _SequencedProvider(
+        responses=[first_response, second_response],
+        postprocessor=pydantic_postprocessor(_ExpectedAnswer),
+    )
+
+    result = await provider.invoke(_request())
+
+    assert result.usage == LlmUsage(prompt_tokens=21, completion_tokens=5, total_tokens=26)
+    assert result.metadata is not None
+    assert result.metadata["billable_response_count"] == 2
+    assert result.metadata["actual_cost_usd"] == pytest.approx(0.02)
+    assert "actual_cost_usd_total" not in result.metadata
+
+
+async def test_provider_retry_exhaustion_returns_accumulated_actual_cost_metadata_with_usage() -> None:
+    provider = _SequencedProvider(
+        responses=[
+            _response(
+                "not valid json",
+                response_id="resp-1",
+                usage=LlmUsage(prompt_tokens=10, completion_tokens=2, total_tokens=12),
+                metadata={"actual_cost_usd": 0.01, "actual_cost_provider": "chutes"},
+            ),
+            _response(
+                "still not valid json",
+                response_id="resp-2",
+                usage=LlmUsage(prompt_tokens=11, completion_tokens=3, total_tokens=14),
+                metadata={"actual_cost_usd": 0.02, "actual_cost_provider": "chutes"},
+            ),
+        ],
+        postprocessor=pydantic_postprocessor(_ExpectedAnswer),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await provider.invoke(_request())
+
+    response = raised.value.response
+    assert response is not None
+    assert response.id == "resp-2"
+    assert response.usage == LlmUsage(prompt_tokens=21, completion_tokens=5, total_tokens=26)
+    assert response.metadata is not None
+    assert response.metadata["attempts"] == 2
+    assert response.metadata["billable_response_count"] == 2
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.02)
+    assert response.metadata["actual_cost_usd_total"] == pytest.approx(0.03)
 
 
 async def test_provider_retryable_postprocess_failure_without_recovery_keeps_original_history() -> None:

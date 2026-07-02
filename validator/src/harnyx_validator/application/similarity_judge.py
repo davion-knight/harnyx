@@ -8,7 +8,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from harnyx_commons.domain.judge_usage import JudgeUsageSummary
 from harnyx_commons.llm.json_utils import pydantic_postprocessor
+from harnyx_commons.llm.judge_usage import judge_usage_from_response, merge_judge_usage
 from harnyx_commons.llm.provider import LlmProviderPort, LlmRetryExhaustedError
 from harnyx_commons.llm.provider_types import LlmProviderName, LlmRouteTarget
 from harnyx_commons.llm.retry_utils import RetryPolicy
@@ -99,11 +101,21 @@ class SimilarityJudge:
 
     async def judge(self, request: SimilarityJudgeRequest) -> SimilarityJudgeResult:
         last_error: LlmRetryExhaustedError | None = None
+        failed_candidate_usage: list[JudgeUsageSummary] = []
         for model in _judge_candidate_models(self._config):
             llm_request = self._build_request(request, model=model)
             try:
                 response = await self._llm.invoke(llm_request)
             except LlmRetryExhaustedError as exc:
+                failed_usage = _judge_usage_from_retry_response(
+                    exc.response,
+                    default_provider=self._config.provider,
+                    default_model=model,
+                )
+                if failed_usage is not None:
+                    failed_candidate_usage.append(failed_usage)
+                if failed_candidate_usage:
+                    _attach_similarity_judge_usage(exc, merge_judge_usage(failed_candidate_usage))
                 last_error = exc
                 continue
             parsed = response.postprocessed
@@ -115,14 +127,22 @@ class SimilarityJudge:
                 default_provider=self._config.provider,
                 default_model=model,
             )
+            success_usage = judge_usage_from_response(
+                response,
+                default_provider=self._config.provider,
+                default_model=model,
+            )
             return SimilarityJudgeResult(
                 verdict=verdict_model.verdict,
                 reasoning=_similarity_reasoning_text(verdict_model),
                 reasoning_tokens=response.usage.reasoning_tokens,
                 model=selected_model,
                 provider=selected_provider,
+                judge_usage=merge_judge_usage((*failed_candidate_usage, success_usage)),
             )
         assert last_error is not None
+        if failed_candidate_usage:
+            _attach_similarity_judge_usage(last_error, merge_judge_usage(failed_candidate_usage))
         raise last_error
 
     def _build_request(self, request: SimilarityJudgeRequest, *, model: str) -> LlmRequest:
@@ -194,6 +214,26 @@ def _selected_route_metadata(
     if not isinstance(provider, str) or not isinstance(model, str):
         return default_provider, default_model
     return provider, model
+
+
+def _judge_usage_from_retry_response(
+    response: LlmResponse | None,
+    *,
+    default_provider: LlmProviderName,
+    default_model: str,
+) -> JudgeUsageSummary | None:
+    if response is None:
+        return None
+    return judge_usage_from_response(
+        response,
+        default_provider=default_provider,
+        default_model=default_model,
+    )
+
+
+def _attach_similarity_judge_usage(exc: Exception, judge_usage: JudgeUsageSummary) -> Exception:
+    exc.__dict__["judge_usage"] = judge_usage
+    return exc
 
 
 def _judge_candidate_models(config: SimilarityJudgeConfig) -> tuple[str, ...]:

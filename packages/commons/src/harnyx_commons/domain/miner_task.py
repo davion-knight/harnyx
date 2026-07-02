@@ -7,9 +7,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
+from harnyx_commons.domain.judge_usage import JudgeUsageSummary
 from harnyx_commons.domain.shared_config import COMMONS_STRICT_CONFIG
 from harnyx_commons.domain.tool_usage import ToolUsageSummary
 
+_JUDGE_USAGE_ADAPTER = TypeAdapter(JudgeUsageSummary)
 _TOOL_USAGE_ADAPTER = TypeAdapter(ToolUsageSummary)
 DEFAULT_MINER_TASK_BUDGET_USD = 0.5
 
@@ -180,9 +182,17 @@ class EvaluationDetails(BaseModel):
     model_config = COMMONS_STRICT_CONFIG
 
     score_breakdown: ScoreBreakdown | None = None
+    scoring_judge_usage: JudgeUsageSummary | None = None
     total_tool_usage: ToolUsageSummary = Field(default_factory=ToolUsageSummary.zero)
     elapsed_ms: float | None = Field(default=None, ge=0.0)
     error: EvaluationError | None = None
+
+    @field_validator("scoring_judge_usage", mode="before")
+    @classmethod
+    def _validate_scoring_judge_usage(cls, value: object) -> JudgeUsageSummary | None:
+        if value is None:
+            return None
+        return _JUDGE_USAGE_ADAPTER.validate_python(value)
 
     @field_validator("total_tool_usage", mode="before")
     @classmethod

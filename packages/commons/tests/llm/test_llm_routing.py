@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from harnyx_commons.llm.provider import LlmRetryExhaustedError
 from harnyx_commons.llm.routing import (
     ResolvedLlmRoute,
     RoutedLlmProvider,
@@ -286,6 +287,26 @@ class _RecordingProvider:
         return None
 
 
+@dataclass(slots=True)
+class _RetryExhaustingProvider:
+    seen_requests: list[LlmRequest]
+
+    async def invoke(self, request: LlmRequest) -> LlmResponse:
+        self.seen_requests.append(request)
+        raise LlmRetryExhaustedError(
+            "provider retries exhausted",
+            response=LlmResponse(
+                id="resp-exhausted",
+                choices=(),
+                usage=LlmUsage(prompt_tokens=7, completion_tokens=4, total_tokens=11),
+                metadata={"actual_cost_usd": 0.02},
+            ),
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
 @pytest.mark.anyio("asyncio")
 async def test_routed_provider_rewrites_request_provider_before_delegating() -> None:
     delegate = _RecordingProvider(seen_requests=[])
@@ -314,6 +335,37 @@ async def test_routed_provider_rewrites_request_provider_before_delegating() -> 
     assert response.metadata["effective_model"] == "sample-routed-model"
     assert response.metadata["selected_provider"] == "bedrock"
     assert response.metadata["selected_model"] == "sample-routed-model"
+
+
+@pytest.mark.anyio("asyncio")
+async def test_routed_provider_attaches_route_metadata_to_retry_exhausted_response() -> None:
+    delegate = _RetryExhaustingProvider(seen_requests=[])
+
+    provider = RoutedLlmProvider(
+        surface="scoring",
+        default_provider="chutes",
+        overrides={"scoring": {"google/gemma-4-31B-turbo-TEE": "bedrock"}},
+        allowed_providers={"bedrock", "chutes"},
+        resolve_provider=lambda _: delegate,
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as exc_info:
+        await provider.invoke(
+            LlmRequest(
+                provider="chutes",
+                model="google/gemma-4-31B-turbo-TEE",
+                messages=(),
+                temperature=None,
+                max_output_tokens=128,
+            )
+        )
+
+    assert delegate.seen_requests[0].provider == "bedrock"
+    response = exc_info.value.response
+    assert response is not None
+    assert response.metadata is not None
+    assert response.metadata["selected_provider"] == "bedrock"
+    assert response.metadata["selected_model"] == "google/gemma-4-31B-turbo-TEE"
 
 
 @pytest.mark.anyio("asyncio")

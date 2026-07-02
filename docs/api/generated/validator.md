@@ -48,6 +48,25 @@ Body: [SimilarityJudgeResponseModel](#model-similarityjudgeresponsemodel)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
+| `judge_usage` |  |  | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `models` |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  |  | `actual_cost_evidence` | opt | `string` (nullable) |
+|  |  | `actual_cost_provider` | opt | `string` (nullable) |
+|  |  | `actual_cost_source` | req | `string` (enum: [provider_actual, unavailable]) |
+|  |  | `actual_cost_usd` | req | `number` (nullable) |
+|  |  | `call_count` | req | `integer` |
+|  |  | `completion_tokens` | req | `integer` |
+|  |  | `model` | req | `string` |
+|  |  | `prompt_tokens` | req | `integer` |
+|  |  | `provider` | req | `string` |
+|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
 | `model` |  |  | req | `string` |
 | `provider` |  |  | req | `string` |
 | `reasoning` |  |  | opt | `string` (nullable) |
@@ -66,6 +85,47 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 |  | `loc` |  | req | array[anyOf: `string` OR `integer`] |
 |  | `msg` |  | req | `string` |
 |  | `type` |  | req | `string` |
+
+`500` Internal Server Error
+Content-Type: `application/json`
+Body: [ValidatorInternalErrorResponse](#model-validatorinternalerrorresponse)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `error_code` |  |  | req | `string` |
+| `error_message` |  |  | req | `string` |
+| `exception_type` |  |  | req | `string` |
+| `request_id` |  |  | req | `string` |
+| `traceback` |  |  | req | `string` |
+
+`502` Bad Gateway
+Content-Type: `application/json`
+Body: [SimilarityJudgeFailureResponseModel](#model-similarityjudgefailureresponsemodel)
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `detail` |  |  | req | `string` |
+| `error_code` |  |  | req | `string` |
+| `judge_usage` |  |  | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `models` |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  |  | `actual_cost_evidence` | opt | `string` (nullable) |
+|  |  | `actual_cost_provider` | opt | `string` (nullable) |
+|  |  | `actual_cost_source` | req | `string` (enum: [provider_actual, unavailable]) |
+|  |  | `actual_cost_usd` | req | `number` (nullable) |
+|  |  | `call_count` | req | `integer` |
+|  |  | `completion_tokens` | req | `integer` |
+|  |  | `model` | req | `string` |
+|  |  | `prompt_tokens` | req | `integer` |
+|  |  | `provider` | req | `string` |
+|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
+| `retryable` |  |  | req | `boolean` |
 
 
 
@@ -241,6 +301,274 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 
 </details>
 
+<a id="model-judgemodelusage"></a>
+### Model: JudgeModelUsage
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `actual_cost_evidence` |  |  | opt | `string` (nullable) |
+| `actual_cost_provider` |  |  | opt | `string` (nullable) |
+| `actual_cost_source` |  |  | req | `string` (enum: [provider_actual, unavailable]) |
+| `actual_cost_usd` |  |  | req | `number` (nullable) |
+| `call_count` |  |  | req | `integer` |
+| `completion_tokens` |  |  | req | `integer` |
+| `model` |  |  | req | `string` |
+| `prompt_tokens` |  |  | req | `integer` |
+| `provider` |  |  | req | `string` |
+| `reasoning_tokens` |  |  | req | `integer` |
+| `total_tokens` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "properties": {
+    "actual_cost_evidence": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Evidence"
+    },
+    "actual_cost_provider": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Provider"
+    },
+    "actual_cost_source": {
+      "enum": [
+        "provider_actual",
+        "unavailable"
+      ],
+      "title": "Actual Cost Source",
+      "type": "string"
+    },
+    "actual_cost_usd": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Usd"
+    },
+    "call_count": {
+      "title": "Call Count",
+      "type": "integer"
+    },
+    "completion_tokens": {
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "model": {
+      "title": "Model",
+      "type": "string"
+    },
+    "prompt_tokens": {
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "provider": {
+      "title": "Provider",
+      "type": "string"
+    },
+    "reasoning_tokens": {
+      "title": "Reasoning Tokens",
+      "type": "integer"
+    },
+    "total_tokens": {
+      "title": "Total Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "provider",
+    "model",
+    "call_count",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "actual_cost_usd",
+    "actual_cost_source"
+  ],
+  "title": "JudgeModelUsage",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-judgeusagesummary"></a>
+### Model: JudgeUsageSummary
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `actual_cost_usd` |  |  | req | `number` (nullable) |
+| `call_count` |  |  | req | `integer` |
+| `completion_tokens` |  |  | req | `integer` |
+| `models` |  |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  | `actual_cost_evidence` |  | opt | `string` (nullable) |
+|  | `actual_cost_provider` |  | opt | `string` (nullable) |
+|  | `actual_cost_source` |  | req | `string` (enum: [provider_actual, unavailable]) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `model` |  | req | `string` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `provider` |  | req | `string` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
+| `prompt_tokens` |  |  | req | `integer` |
+| `reasoning_tokens` |  |  | req | `integer` |
+| `total_tokens` |  |  | req | `integer` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "properties": {
+    "actual_cost_usd": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Actual Cost Usd"
+    },
+    "call_count": {
+      "title": "Call Count",
+      "type": "integer"
+    },
+    "completion_tokens": {
+      "title": "Completion Tokens",
+      "type": "integer"
+    },
+    "models": {
+      "items": {
+        "$ref": "#/components/schemas/JudgeModelUsage"
+      },
+      "title": "Models",
+      "type": "array"
+    },
+    "prompt_tokens": {
+      "title": "Prompt Tokens",
+      "type": "integer"
+    },
+    "reasoning_tokens": {
+      "title": "Reasoning Tokens",
+      "type": "integer"
+    },
+    "total_tokens": {
+      "title": "Total Tokens",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "call_count",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "reasoning_tokens",
+    "actual_cost_usd",
+    "models"
+  ],
+  "title": "JudgeUsageSummary",
+  "type": "object"
+}
+```
+
+</details>
+
+<a id="model-similarityjudgefailureresponsemodel"></a>
+### Model: SimilarityJudgeFailureResponseModel
+
+| 1st level | 2nd level | 3rd level | Req | Notes |
+| --- | --- | --- | --- | --- |
+| `detail` |  |  | req | `string` |
+| `error_code` |  |  | req | `string` |
+| `judge_usage` |  |  | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `models` |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  |  | `actual_cost_evidence` | opt | `string` (nullable) |
+|  |  | `actual_cost_provider` | opt | `string` (nullable) |
+|  |  | `actual_cost_source` | req | `string` (enum: [provider_actual, unavailable]) |
+|  |  | `actual_cost_usd` | req | `number` (nullable) |
+|  |  | `call_count` | req | `integer` |
+|  |  | `completion_tokens` | req | `integer` |
+|  |  | `model` | req | `string` |
+|  |  | `prompt_tokens` | req | `integer` |
+|  |  | `provider` | req | `string` |
+|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
+| `retryable` |  |  | req | `boolean` |
+
+<details>
+<summary>JSON schema</summary>
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "detail": {
+      "minLength": 1,
+      "title": "Detail",
+      "type": "string"
+    },
+    "error_code": {
+      "const": "similarity_judge_failed",
+      "title": "Error Code",
+      "type": "string"
+    },
+    "judge_usage": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/JudgeUsageSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "retryable": {
+      "title": "Retryable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "error_code",
+    "retryable",
+    "detail"
+  ],
+  "title": "SimilarityJudgeFailureResponseModel",
+  "type": "object"
+}
+```
+
+</details>
+
 <a id="model-similarityjudgerequestmodel"></a>
 ### Model: SimilarityJudgeRequestModel
 
@@ -311,6 +639,25 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
+| `judge_usage` |  |  | opt | [JudgeUsageSummary](#model-judgeusagesummary) (nullable) |
+|  | `actual_cost_usd` |  | req | `number` (nullable) |
+|  | `call_count` |  | req | `integer` |
+|  | `completion_tokens` |  | req | `integer` |
+|  | `models` |  | req | array[[JudgeModelUsage](#model-judgemodelusage)] |
+|  |  | `actual_cost_evidence` | opt | `string` (nullable) |
+|  |  | `actual_cost_provider` | opt | `string` (nullable) |
+|  |  | `actual_cost_source` | req | `string` (enum: [provider_actual, unavailable]) |
+|  |  | `actual_cost_usd` | req | `number` (nullable) |
+|  |  | `call_count` | req | `integer` |
+|  |  | `completion_tokens` | req | `integer` |
+|  |  | `model` | req | `string` |
+|  |  | `prompt_tokens` | req | `integer` |
+|  |  | `provider` | req | `string` |
+|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `total_tokens` | req | `integer` |
+|  | `prompt_tokens` |  | req | `integer` |
+|  | `reasoning_tokens` |  | req | `integer` |
+|  | `total_tokens` |  | req | `integer` |
 | `model` |  |  | req | `string` |
 | `provider` |  |  | req | `string` |
 | `reasoning` |  |  | opt | `string` (nullable) |
@@ -324,6 +671,16 @@ Body: [HTTPValidationError](#model-httpvalidationerror)
 {
   "additionalProperties": false,
   "properties": {
+    "judge_usage": {
+      "anyOf": [
+        {
+          "$ref": "#/components/schemas/JudgeUsageSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "model": {
       "minLength": 1,
       "title": "Model",

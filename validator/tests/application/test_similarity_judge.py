@@ -86,6 +86,9 @@ def _similarity_response(
     mechanism_change: str | None = "retrieval strategy change",
     reasoning_text: str | None = "candidate changes retrieval strategy",
     reasoning_tokens: int | None = 17,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
     metadata: dict[str, object] | None = None,
 ) -> LlmResponse:
     return LlmResponse(
@@ -100,7 +103,12 @@ def _similarity_response(
                 ),
             ),
         ),
-        usage=LlmUsage(reasoning_tokens=reasoning_tokens),
+        usage=LlmUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            reasoning_tokens=reasoning_tokens,
+        ),
         postprocessed=_similarity_postprocessed(
             verdict=verdict,
             reasoning=reasoning,
@@ -174,6 +182,9 @@ async def test_similarity_judge_returns_verdict_and_validator_reasoning() -> Non
     assert result.reasoning_tokens == 17
     assert result.model == "moonshotai/Kimi-K2.5-TEE"
     assert result.provider == "chutes"
+    assert result.judge_usage is not None
+    assert result.judge_usage.call_count == 1
+    assert result.judge_usage.reasoning_tokens == 17
     llm_request = llm.requests[0]
     assert llm_request.provider == "chutes"
     assert llm_request.model == "moonshotai/Kimi-K2.5-TEE"
@@ -355,9 +366,13 @@ async def test_similarity_judge_tries_next_candidate_after_true_retry_exhaustion
         [
             LlmRetryExhaustedError("primary exhausted"),
             _similarity_response(
+                prompt_tokens=31,
+                completion_tokens=13,
+                total_tokens=44,
                 metadata={
                     "selected_provider": "custom-openai-compatible:gemma4-cloud-run-turbo",
                     "selected_model": "google/gemma-4-31B-turbo-TEE",
+                    "actual_cost_usd": 0.04,
                 }
             ),
         ]
@@ -387,11 +402,192 @@ async def test_similarity_judge_tries_next_candidate_after_true_retry_exhaustion
     assert result.verdict == "not_duplicate"
     assert result.provider == "custom-openai-compatible:gemma4-cloud-run-turbo"
     assert result.model == "google/gemma-4-31B-turbo-TEE"
+    assert result.judge_usage is not None
+    assert result.judge_usage.prompt_tokens == 31
+    assert result.judge_usage.completion_tokens == 13
+    assert result.judge_usage.total_tokens == 44
+    assert result.judge_usage.actual_cost_usd == pytest.approx(0.04)
     assert [request.model for request in llm.requests] == [
         "moonshotai/Kimi-K2.5-TEE",
         "google/gemma-4-31B-turbo-TEE",
     ]
     assert [request.retry_policy for request in llm.requests] == [retry_policy, retry_policy]
+
+
+async def test_similarity_judge_counts_exhausted_primary_usage_before_fallback_success() -> None:
+    primary_error = LlmRetryExhaustedError(
+        "primary exhausted",
+        response=_similarity_response(
+            reasoning_text=None,
+            reasoning_tokens=2,
+            prompt_tokens=7,
+            completion_tokens=4,
+            total_tokens=11,
+            metadata={
+                "selected_provider": "chutes",
+                "selected_model": "moonshotai/Kimi-K2.5-TEE",
+                "actual_cost_usd": 0.02,
+            },
+        ),
+    )
+    llm = SequenceLlmProvider(
+        [
+            primary_error,
+            _similarity_response(
+                prompt_tokens=31,
+                completion_tokens=13,
+                total_tokens=44,
+                metadata={
+                    "selected_provider": "custom-openai-compatible:gemma4-cloud-run-turbo",
+                    "selected_model": "google/gemma-4-31B-turbo-TEE",
+                    "actual_cost_usd": 0.04,
+                },
+            ),
+        ]
+    )
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(
+            provider="chutes",
+            model="moonshotai/Kimi-K2.5-TEE",
+            fallback_models=("google/gemma-4-31B-turbo-TEE",),
+        ),
+    )
+
+    result = await service.judge(
+        SimilarityJudgeRequest(
+            batch_id=uuid4(),
+            candidate_artifact_id=uuid4(),
+            incumbent_artifact_id=uuid4(),
+            candidate_miner_uid=20,
+            incumbent_miner_uid=10,
+            incumbent_script="def answer(): return 'old'",
+            candidate_diff="+ def answer(): return 'new'",
+        )
+    )
+
+    assert result.provider == "custom-openai-compatible:gemma4-cloud-run-turbo"
+    assert result.model == "google/gemma-4-31B-turbo-TEE"
+    assert result.judge_usage is not None
+    assert result.judge_usage.call_count == 2
+    assert result.judge_usage.prompt_tokens == 38
+    assert result.judge_usage.completion_tokens == 17
+    assert result.judge_usage.total_tokens == 55
+    assert result.judge_usage.reasoning_tokens == 19
+    assert result.judge_usage.actual_cost_usd == pytest.approx(0.06)
+    assert [request.model for request in llm.requests] == [
+        "moonshotai/Kimi-K2.5-TEE",
+        "google/gemma-4-31B-turbo-TEE",
+    ]
+
+
+async def test_similarity_judge_preserves_retry_tokens_when_actual_cost_total_unavailable() -> None:
+    primary_error = LlmRetryExhaustedError(
+        "primary exhausted",
+        response=_similarity_response(
+            reasoning_text=None,
+            reasoning_tokens=5,
+            prompt_tokens=18,
+            completion_tokens=9,
+            total_tokens=27,
+            metadata={
+                "selected_provider": "chutes",
+                "selected_model": "moonshotai/Kimi-K2.5-TEE",
+                "billable_response_count": 2,
+            },
+        ),
+    )
+    llm = SequenceLlmProvider(
+        [
+            primary_error,
+            _similarity_response(
+                prompt_tokens=31,
+                completion_tokens=13,
+                total_tokens=44,
+                metadata={
+                    "selected_provider": "custom-openai-compatible:gemma4-cloud-run-turbo",
+                    "selected_model": "google/gemma-4-31B-turbo-TEE",
+                    "actual_cost_usd": 0.04,
+                },
+            ),
+        ]
+    )
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(
+            provider="chutes",
+            model="moonshotai/Kimi-K2.5-TEE",
+            fallback_models=("google/gemma-4-31B-turbo-TEE",),
+        ),
+    )
+
+    result = await service.judge(
+        SimilarityJudgeRequest(
+            batch_id=uuid4(),
+            candidate_artifact_id=uuid4(),
+            incumbent_artifact_id=uuid4(),
+            candidate_miner_uid=20,
+            incumbent_miner_uid=10,
+            incumbent_script="def answer(): return 'old'",
+            candidate_diff="+ def answer(): return 'new'",
+        )
+    )
+
+    assert result.judge_usage is not None
+    assert result.judge_usage.call_count == 3
+    assert result.judge_usage.prompt_tokens == 49
+    assert result.judge_usage.completion_tokens == 22
+    assert result.judge_usage.total_tokens == 71
+    assert result.judge_usage.reasoning_tokens == 22
+    assert result.judge_usage.actual_cost_usd is None
+
+
+async def test_similarity_judge_carries_failed_usage_when_final_fallback_has_no_response() -> None:
+    primary_error = LlmRetryExhaustedError(
+        "primary exhausted",
+        response=_similarity_response(
+            reasoning_text=None,
+            reasoning_tokens=2,
+            prompt_tokens=7,
+            completion_tokens=4,
+            total_tokens=11,
+            metadata={
+                "selected_provider": "chutes",
+                "selected_model": "moonshotai/Kimi-K2.5-TEE",
+                "actual_cost_usd": 0.02,
+            },
+        ),
+    )
+    fallback_error = LlmRetryExhaustedError("fallback exhausted")
+    service = SimilarityJudge(
+        llm_provider=SequenceLlmProvider([primary_error, fallback_error]),
+        config=SimilarityJudgeConfig(
+            provider="chutes",
+            model="moonshotai/Kimi-K2.5-TEE",
+            fallback_models=("google/gemma-4-31B-turbo-TEE",),
+        ),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await service.judge(
+            SimilarityJudgeRequest(
+                batch_id=uuid4(),
+                candidate_artifact_id=uuid4(),
+                incumbent_artifact_id=uuid4(),
+                candidate_miner_uid=20,
+                incumbent_miner_uid=10,
+                incumbent_script="def answer(): return 'old'",
+                candidate_diff="+ def answer(): return 'new'",
+            )
+        )
+
+    assert raised.value is fallback_error
+    assert raised.value.judge_usage.call_count == 1
+    assert raised.value.judge_usage.prompt_tokens == 7
+    assert raised.value.judge_usage.completion_tokens == 4
+    assert raised.value.judge_usage.total_tokens == 11
+    assert raised.value.judge_usage.reasoning_tokens == 2
+    assert raised.value.judge_usage.actual_cost_usd == pytest.approx(0.02)
 
 
 async def test_similarity_judge_does_not_advance_after_non_retryable_failure() -> None:

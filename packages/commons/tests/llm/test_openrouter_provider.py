@@ -276,6 +276,9 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     assert response.metadata["effective_provider"] == "openrouter"
     assert response.metadata["effective_model"] == model
     assert response.metadata["raw_response"]["usage"]["cost"] == pytest.approx(0.0042)
+    assert response.metadata["actual_cost_provider"] == "openrouter"
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.0042)
+    assert response.metadata["actual_cost_evidence"]["settlement_source"] == "provider_returned"
 
 
 @pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)

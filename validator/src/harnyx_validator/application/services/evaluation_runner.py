@@ -21,6 +21,7 @@ import httpx
 from harnyx_commons.application.dto.session import SessionEnvelope, SessionIssued, SessionTokenRequest
 from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
 from harnyx_commons.application.session_manager import SessionManager
+from harnyx_commons.domain.judge_usage import JudgeUsageSummary
 from harnyx_commons.domain.miner_task import (
     EvaluationDetails,
     EvaluationError,
@@ -1682,6 +1683,7 @@ class EvaluationRunner:
         usage: TokenUsageSummary | None = None,
         execution_log: tuple[ToolCall, ...] | None = None,
         elapsed_ms: float | None = None,
+        scoring_judge_usage: JudgeUsageSummary | None = None,
     ) -> MinerTaskRunSubmission:
         envelope = self._sessions.mark_status(session_id, SessionStatus.ERROR)
         return self._build_terminal_failure(
@@ -1696,6 +1698,7 @@ class EvaluationRunner:
             usage=usage,
             execution_log=execution_log,
             elapsed_ms=elapsed_ms,
+            scoring_judge_usage=scoring_judge_usage,
         )
 
     def _record_exhausted(
@@ -1753,6 +1756,7 @@ class EvaluationRunner:
         usage: TokenUsageSummary | None = None,
         execution_log: tuple[ToolCall, ...] | None = None,
         elapsed_ms: float | None = None,
+        scoring_judge_usage: JudgeUsageSummary | None = None,
     ) -> MinerTaskRunSubmission:
         submission = self._build_terminal_failure(
             batch_id=batch_id,
@@ -1766,6 +1770,7 @@ class EvaluationRunner:
             usage=usage,
             execution_log=execution_log,
             elapsed_ms=elapsed_ms,
+            scoring_judge_usage=scoring_judge_usage,
         )
         self._record_submission(submission)
         return submission
@@ -1784,6 +1789,7 @@ class EvaluationRunner:
         usage: TokenUsageSummary | None = None,
         execution_log: tuple[ToolCall, ...] | None = None,
         elapsed_ms: float | None = None,
+        scoring_judge_usage: JudgeUsageSummary | None = None,
     ) -> MinerTaskRunSubmission:
         session_id = envelope.session.session_id
         completed_at = self._clock()
@@ -1791,6 +1797,7 @@ class EvaluationRunner:
         receipt_log = tuple(self._receipts.for_session(session_id)) if execution_log is None else execution_log
         details = EvaluationDetails(
             error=EvaluationError(code=error_code, message=error_message),
+            scoring_judge_usage=scoring_judge_usage,
             total_tool_usage=total_tool_usage or summarized_tool_usage,
             elapsed_ms=elapsed_ms or _elapsed_ms(issued_at=envelope.session.issued_at, completed_at=completed_at),
         )
@@ -1850,6 +1857,7 @@ class EvaluationRunner:
         error_message: str,
         log_message: str,
         exc: Exception,
+        scoring_judge_usage: JudgeUsageSummary | None = None,
     ) -> MinerTaskRunSubmission:
         logger.error(
             log_message,
@@ -1869,6 +1877,7 @@ class EvaluationRunner:
             task=task,
             error_code=error_code,
             error_message=error_message,
+            scoring_judge_usage=scoring_judge_usage or getattr(exc, "judge_usage", None),
         )
 
     def _record_terminal_timeout_submission(

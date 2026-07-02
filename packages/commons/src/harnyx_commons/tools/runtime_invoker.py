@@ -19,14 +19,13 @@ from harnyx_commons.application.ports.receipt_log import ReceiptLogPort
 from harnyx_commons.domain.tool_call import ToolExecutionFacts
 from harnyx_commons.errors import ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
+from harnyx_commons.llm.cost_settlement import settled_cost_from_metadata
 from harnyx_commons.llm.pricing import (
     MINER_TOOL_LLM_PRICING,
     SEARCH_PRICING_PER_REFERENCEABLE_RESULT,
-    price_miner_llm,
     price_search,
 )
 from harnyx_commons.llm.provider import LlmProviderError, LlmProviderPort, LlmRetryExhaustedError
-from harnyx_commons.llm.provider_types import CHUTES_PROVIDER, OPENROUTER_PROVIDER
 from harnyx_commons.llm.schema import (
     LlmChoice,
     LlmChoiceMessage,
@@ -470,11 +469,7 @@ class RuntimeToolInvoker(ToolInvoker):
         except (LlmProviderError, LlmRetryExhaustedError) as exc:
             raise ToolProviderError("tool provider failed") from exc
         try:
-            actual_cost = _settle_llm_cost(
-                llm_response,
-                provider=invocation.provider,
-                model=invocation.model,
-            )
+            actual_cost = _require_settled_llm_cost(llm_response)
             _require_actual_cost(actual_cost, tool_name="llm_chat")
         except ValueError as exc:
             raise ToolProviderError("tool provider failed") from exc
@@ -828,72 +823,11 @@ def _require_actual_cost(actual_cost: _ActualCost, *, tool_name: str) -> None:
         raise ValueError(f"{tool_name} provider-backed success missing actual_cost_provider")
 
 
-def _settle_llm_cost(response: LlmResponse, *, provider: str, model: str) -> _ActualCost:
-    provider_cost = _provider_returned_llm_cost(response, provider=provider)
-    if provider_cost.cost_usd is not None:
-        return provider_cost
-    return _ActualCost(
-        price_miner_llm(provider, model, response.usage),
-        provider,
-        {
-            "settlement_source": "static_pricing",
-            "provider": provider,
-            "model": model,
-        },
-    )
-
-
-def _provider_returned_llm_cost(response: LlmResponse, *, provider: str) -> _ActualCost:
-    metadata = response.metadata or {}
-    if metadata.get("actual_cost_provider") == CHUTES_PROVIDER:
-        cost = metadata.get("actual_cost_usd")
-        if not isinstance(cost, int | float) or isinstance(cost, bool):
-            raise ValueError("Chutes actual_cost_usd must be numeric when supplied")
-        if cost < 0:
-            raise ValueError("Chutes actual_cost_usd must be non-negative")
-        evidence = metadata.get("actual_cost_evidence")
-        return _ActualCost(
-            float(cost),
-            CHUTES_PROVIDER,
-            cast(JsonObject, evidence) if isinstance(evidence, Mapping) else None,
-        )
-    return _ActualCost(
-        _openrouter_actual_cost_usd(response, provider=provider),
-        _openrouter_actual_cost_provider(response, provider=provider),
-        {"settlement_source": "provider_returned", "pricing_origin": "openrouter_usage_cost"},
-    )
-
-
-def _openrouter_actual_cost_usd(response: LlmResponse, *, provider: str) -> float | None:
-    if _openrouter_actual_cost_provider(response, provider=provider) != OPENROUTER_PROVIDER:
-        return None
-    raw_response = (response.metadata or {}).get("raw_response")
-    if not isinstance(raw_response, Mapping):
-        return None
-    raw_response_mapping = cast(Mapping[str, object], raw_response)
-    usage = raw_response_mapping.get("usage")
-    if not isinstance(usage, Mapping):
-        return None
-    usage_mapping = cast(Mapping[str, object], usage)
-    cost = usage_mapping.get("cost")
-    if cost is None:
-        return None
-    if not isinstance(cost, (int, float)) or isinstance(cost, bool):
-        raise ValueError("OpenRouter usage.cost must be numeric when supplied")
-    if cost < 0.0:
-        raise ValueError("OpenRouter usage.cost must be non-negative")
-    return float(cost)
-
-
-def _openrouter_actual_cost_provider(response: LlmResponse, *, provider: str) -> str | None:
-    metadata = response.metadata or {}
-    if provider == OPENROUTER_PROVIDER:
-        return OPENROUTER_PROVIDER
-    if metadata.get("effective_provider") == OPENROUTER_PROVIDER:
-        return OPENROUTER_PROVIDER
-    if metadata.get("selected_provider") == OPENROUTER_PROVIDER:
-        return OPENROUTER_PROVIDER
-    return None
+def _require_settled_llm_cost(response: LlmResponse) -> _ActualCost:
+    settled = settled_cost_from_metadata(response.metadata or {})
+    if settled is None:
+        raise ValueError("llm_chat provider-backed success missing settled cost")
+    return _ActualCost(settled.cost_usd, settled.provider, settled.evidence)
 
 
 __all__ = [

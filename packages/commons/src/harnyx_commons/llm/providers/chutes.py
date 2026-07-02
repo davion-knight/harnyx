@@ -6,12 +6,13 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from harnyx_commons.llm.cost_settlement import SettledLlmCost, with_settled_llm_cost
 from harnyx_commons.llm.provider import BaseLlmProvider
 from harnyx_commons.llm.providers.chutes_codec import (
     _ChutesChatRequest,
@@ -68,7 +69,7 @@ class ChutesLlmProvider(BaseLlmProvider):
     async def _invoke(self, request: AbstractLlmRequest) -> LlmResponse:
         headers = self._auth_headers()
 
-        response = await self._call_with_retry(
+        return await self._call_with_retry(
             request,
             call_coro=lambda current_request: self._request_chutes(
                 self._build_request(current_request),
@@ -79,7 +80,6 @@ class ChutesLlmProvider(BaseLlmProvider):
             classify_exception=self._classify_exception,
             policy=request.retry_policy,
         )
-        return await self._with_actual_cost(model=request.model, response=response)
 
     def _build_request(self, request: AbstractLlmRequest) -> _ChutesChatRequest:
         return _ChutesChatRequest.from_request(request)
@@ -119,13 +119,27 @@ class ChutesLlmProvider(BaseLlmProvider):
             finish_reason=llm_response.finish_reason,
         )
 
-    async def _with_actual_cost(self, *, model: str, response: LlmResponse) -> LlmResponse:
-        actual_cost = await self._pricing_cache.price(model=model, usage=response.usage)
-        metadata = dict(response.metadata or {})
-        metadata["actual_cost_usd"] = actual_cost.cost_usd
-        metadata["actual_cost_provider"] = actual_cost.provider
-        metadata["actual_cost_evidence"] = actual_cost.evidence
-        return replace(response, metadata=metadata)
+    async def _annotate_response_cost(
+        self,
+        request: AbstractLlmRequest,
+        response: LlmResponse,
+    ) -> LlmResponse:
+        try:
+            actual_cost = await self._pricing_cache.price(model=request.model, usage=response.usage)
+        except KeyError:
+            logger.warning(
+                "chutes.cost_settlement.unavailable",
+                extra={"data": {"provider": self._provider_label, "model": request.model}},
+            )
+            return response
+        return with_settled_llm_cost(
+            response,
+            SettledLlmCost(
+                cost_usd=actual_cost.cost_usd,
+                provider=actual_cost.provider,
+                evidence=actual_cost.evidence,
+            ),
+        )
 
     async def _stream_chat_completions(self, **request_kwargs: Any) -> tuple[_ChutesChatResponse, float | None]:
         started_at = time.perf_counter()

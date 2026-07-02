@@ -22,6 +22,7 @@ from harnyx_commons.config.llm import (
     OpenAiCompatibleNoAuthConfig,
 )
 from harnyx_commons.llm.adapter import canonical_model_for_provider_model
+from harnyx_commons.llm.cost_settlement import settled_response_cost, with_settled_llm_cost
 from harnyx_commons.llm.provider import BaseLlmProvider
 from harnyx_commons.llm.provider_types import custom_openai_compatible_target
 from harnyx_commons.llm.providers.openai_chat_codec import OpenAiChatRequestParts
@@ -74,6 +75,21 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
             classify_exception=self._classify_exception,
             policy=request.retry_policy,
         )
+
+    async def _annotate_response_cost(
+        self,
+        request: AbstractLlmRequest,
+        response: LlmResponse,
+    ) -> LlmResponse:
+        provider = request.provider or custom_openai_compatible_target(self._endpoint.id)
+        cost = settled_response_cost(response, provider=provider, model=request.model)
+        if cost is None:
+            self._llm_logger.warning(
+                "openai_compatible.cost_settlement.unavailable",
+                extra={"data": {"provider": provider, "model": request.model}},
+            )
+            return response
+        return with_settled_llm_cost(response, cost)
 
     def _build_request(self, request: AbstractLlmRequest) -> _OpenAiCompatibleChatRequest:
         return _OpenAiCompatibleChatRequest.from_request(

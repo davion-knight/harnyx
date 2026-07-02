@@ -64,6 +64,13 @@ MODEL_PRICING: Mapping[ToolModelName, ModelPricing] = {
     "google/gemma-4-31B-turbo-TEE": ModelPricing(0.13, 0.38, 0.0),
 }
 
+STATIC_LLM_PRICING: Mapping[str, ModelPricing] = {
+    **MODEL_PRICING,
+    "openai/gpt-oss-20b-TEE": MODEL_PRICING["openai/gpt-oss-20b"],
+    "openai/gpt-oss-120b-TEE": MODEL_PRICING["openai/gpt-oss-120b"],
+    "moonshotai/Kimi-K2.5-TEE": ModelPricing(0.44, 2.00, 0.0),
+}
+
 MINER_TOOL_LLM_PRICING: Mapping[MinerSelectedLlmProviderName, Mapping[str, ModelPricing]] = {
     CHUTES_PROVIDER: {
         model: MODEL_PRICING[cast(ToolModelName, model)]
@@ -121,6 +128,14 @@ def price_miner_llm(provider: str, model: str, usage: LlmUsage) -> float:
         raise KeyError(provider)
     pricing_by_model = MINER_TOOL_LLM_PRICING[cast(MinerSelectedLlmProviderName, provider)]
     pricing = pricing_by_model[model]
+    return _price_tokens(pricing, usage)
+
+
+def price_static_llm_model(model: str, usage: LlmUsage) -> float | None:
+    """Return USD cost for a configured static LLM model, if available."""
+    pricing = STATIC_LLM_PRICING.get(model)
+    if pricing is None:
+        return None
     return _price_tokens(pricing, usage)
 
 
@@ -274,5 +289,7 @@ __all__ = [
     "MODEL_PRICING",
     "MINER_TOOL_LLM_PRICING",
     "SEARCH_PRICING_PER_REFERENCEABLE_RESULT",
+    "STATIC_LLM_PRICING",
     "ModelPricing",
+    "price_static_llm_model",
 ]

@@ -17,6 +17,7 @@ from google.auth.credentials import Credentials as GoogleCredentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.genai import errors, types
 
+from harnyx_commons.llm.cost_settlement import settled_response_cost, with_settled_llm_cost
 from harnyx_commons.llm.provider import BaseLlmProvider
 from harnyx_commons.llm.providers.openai_stream import (
     OpenAiStreamError,
@@ -144,6 +145,20 @@ class VertexLlmProvider(BaseLlmProvider):
             classify_exception=self._classify_exception,
             policy=request.retry_policy,
         )
+
+    async def _annotate_response_cost(
+        self,
+        request: AbstractLlmRequest,
+        response: LlmResponse,
+    ) -> LlmResponse:
+        cost = settled_response_cost(response, provider="vertex", model=request.model)
+        if cost is None:
+            self._logger.warning(
+                "vertex.cost_settlement.unavailable",
+                extra={"data": {"provider": self._provider_label, "model": request.model}},
+            )
+            return response
+        return with_settled_llm_cost(response, cost)
 
     async def aclose(self) -> None:
         await self._http_client.aclose()

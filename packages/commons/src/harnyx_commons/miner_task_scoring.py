@@ -8,6 +8,7 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from harnyx_commons.domain.judge_usage import JudgeUsageSummary
 from harnyx_commons.domain.miner_task import (
     AnswerCitation,
     MinerTask,
@@ -17,6 +18,7 @@ from harnyx_commons.domain.miner_task import (
     ScorerReasoning,
 )
 from harnyx_commons.llm.json_utils import pydantic_postprocessor
+from harnyx_commons.llm.judge_usage import judge_usage_from_response, merge_judge_usage
 from harnyx_commons.llm.provider import LlmProviderPort, LlmRetryExhaustedError
 from harnyx_commons.llm.provider_types import LlmProviderName
 from harnyx_commons.llm.retry_utils import RetryPolicy
@@ -115,12 +117,36 @@ class _PairwiseJudgeResult:
     preferred_position: Literal["first", "second"]
     reasoning_text: str | None
     reasoning_tokens: int | None
+    judge_usage: JudgeUsageSummary
 
 
 @dataclass(frozen=True, slots=True)
 class _PairwiseScore:
     comparison_score: float
     reasoning: ScorerReasoning | None
+    judge_usage: JudgeUsageSummary
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationScoringResult:
+    score_breakdown: ScoreBreakdown
+    judge_usage: JudgeUsageSummary
+
+    @property
+    def comparison_score(self) -> float:
+        return self.score_breakdown.comparison_score
+
+    @property
+    def total_score(self) -> float:
+        return self.score_breakdown.total_score
+
+    @property
+    def reasoning(self) -> ScorerReasoning | None:
+        return self.score_breakdown.reasoning
+
+    @property
+    def scoring_version(self) -> str:
+        return self.score_breakdown.scoring_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,18 +178,21 @@ class EvaluationScoringService:
         *,
         task: MinerTask,
         response: Response,
-    ) -> ScoreBreakdown:
+    ) -> EvaluationScoringResult | ScoreBreakdown:
         pairwise_score = await self._score_pairwise(
             query_text=task.query.text,
             miner_response=response,
             reference_response=task.reference_answer,
         )
         total_score = round(pairwise_score.comparison_score, 6)
-        return ScoreBreakdown(
-            comparison_score=pairwise_score.comparison_score,
-            total_score=total_score,
-            scoring_version=self._config.scoring_version,
-            reasoning=pairwise_score.reasoning,
+        return EvaluationScoringResult(
+            score_breakdown=ScoreBreakdown(
+                comparison_score=pairwise_score.comparison_score,
+                total_score=total_score,
+                scoring_version=self._config.scoring_version,
+                reasoning=pairwise_score.reasoning,
+            ),
+            judge_usage=pairwise_score.judge_usage,
         )
 
     async def _score_pairwise(
@@ -178,19 +207,25 @@ class EvaluationScoringService:
             first_answer=miner_response,
             second_answer=reference_response,
         )
-        reference_first = await self._judge_pair(
-            query_text=query_text,
-            first_answer=reference_response,
-            second_answer=miner_response,
-        )
+        try:
+            reference_first = await self._judge_pair(
+                query_text=query_text,
+                first_answer=reference_response,
+                second_answer=miner_response,
+            )
+        except Exception as exc:
+            partial_usage = merge_judge_usage((miner_first.judge_usage, _judge_usage_from_exception(exc)))
+            raise attach_scoring_judge_usage(exc, partial_usage) from None
         miner_wins = 0
         if miner_first.preferred_position == "first":
             miner_wins += 1
         if reference_first.preferred_position == "second":
             miner_wins += 1
+        judge_usage = merge_judge_usage((miner_first.judge_usage, reference_first.judge_usage))
         return _PairwiseScore(
             comparison_score=miner_wins / 2.0,
             reasoning=_build_pairwise_reasoning_trace(miner_first, reference_first),
+            judge_usage=judge_usage,
         )
 
     async def _judge_pair(
@@ -210,21 +245,37 @@ class EvaluationScoringService:
             indent=2,
         )
         last_error: LlmRetryExhaustedError | None = None
+        failed_candidate_usage: list[JudgeUsageSummary] = []
         for model in _judge_candidate_models(self._config):
             request = self._build_pairwise_request(model=model, user_prompt=user_prompt)
             try:
                 response = await self._llm.invoke(request)
             except LlmRetryExhaustedError as exc:
+                failed_usage = _judge_usage_from_retry_response(
+                    exc.response,
+                    default_provider=self._config.provider,
+                    default_model=model,
+                )
+                if failed_usage is not None:
+                    failed_candidate_usage.append(failed_usage)
+                if failed_candidate_usage:
+                    attach_scoring_judge_usage(exc, merge_judge_usage(failed_candidate_usage))
                 last_error = exc
                 continue
             parsed = response.postprocessed
             if parsed is None:
                 raise RuntimeError("pairwise judge did not return structured output")
             preference = _PairwisePreference.model_validate(parsed)
+            success_usage = judge_usage_from_response(
+                response,
+                default_provider=self._config.provider,
+                default_model=model,
+            )
             return _PairwiseJudgeResult(
                 preferred_position=preference.preferred_position,
                 reasoning_text=_extract_reasoning_text(response),
                 reasoning_tokens=response.usage.reasoning_tokens,
+                judge_usage=merge_judge_usage((*failed_candidate_usage, success_usage)),
             )
         assert last_error is not None
         raise last_error
@@ -257,6 +308,31 @@ class EvaluationScoringService:
 
 def _judge_candidate_models(config: EvaluationScoringConfig) -> tuple[str, ...]:
     return (config.model, *config.fallback_models)
+
+
+def attach_scoring_judge_usage(exc: Exception, judge_usage: JudgeUsageSummary) -> Exception:
+    exc.__dict__["judge_usage"] = judge_usage
+    return exc
+
+
+def _judge_usage_from_retry_response(
+    response: LlmResponse | None,
+    *,
+    default_provider: str,
+    default_model: str,
+) -> JudgeUsageSummary | None:
+    if response is None:
+        return None
+    return judge_usage_from_response(
+        response,
+        default_provider=default_provider,
+        default_model=default_model,
+    )
+
+
+def _judge_usage_from_exception(exc: Exception) -> JudgeUsageSummary | None:
+    usage = getattr(exc, "judge_usage", None)
+    return usage if isinstance(usage, JudgeUsageSummary) else None
 
 
 def _build_pairwise_reasoning_trace(
@@ -348,5 +424,7 @@ def _render_citation_payload(citation: AnswerCitation) -> dict[str, str]:
 
 __all__ = [
     "EvaluationScoringConfig",
+    "EvaluationScoringResult",
     "EvaluationScoringService",
+    "attach_scoring_judge_usage",
 ]

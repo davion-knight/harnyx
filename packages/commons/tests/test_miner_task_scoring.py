@@ -13,8 +13,9 @@ from harnyx_commons.domain.miner_task import (
     Response,
     ScorerReasoning,
 )
-from harnyx_commons.llm.provider import LlmRetryExhaustedError
-from harnyx_commons.llm.schema import LlmChoice, LlmChoiceMessage, LlmResponse, LlmUsage
+from harnyx_commons.llm.provider import BaseLlmProvider, LlmRetryExhaustedError
+from harnyx_commons.llm.retry_utils import RetryPolicy
+from harnyx_commons.llm.schema import AbstractLlmRequest, LlmChoice, LlmChoiceMessage, LlmResponse, LlmUsage
 from harnyx_commons.miner_task_scoring import (
     _MAX_RENDERED_CITATIONS,
     EvaluationScoringConfig,
@@ -96,6 +97,30 @@ class SequenceLlmProvider:
         return None
 
 
+class RetryWrappedSequenceLlmProvider(BaseLlmProvider):
+    def __init__(self, outcomes: list[LlmResponse | Exception]) -> None:
+        super().__init__(provider_label="chutes")
+        self._outcomes = outcomes
+        self.requests: list[AbstractLlmRequest] = []
+
+    async def _invoke(self, request: AbstractLlmRequest) -> LlmResponse:
+        async def _call(current_request: AbstractLlmRequest) -> LlmResponse:
+            self.requests.append(current_request)
+            if not self._outcomes:
+                raise RuntimeError("missing pairwise outcome")
+            outcome = self._outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        return await self._call_with_retry(
+            request,
+            call_coro=_call,
+            verifier=lambda _: (True, False, None),
+            policy=request.retry_policy,
+        )
+
+
 def _pairwise_payload(request: object) -> dict[str, object]:
     user_prompt = request.messages[1].content[0].text
     _, payload_json = user_prompt.split("Payload:\n", 1)
@@ -107,6 +132,10 @@ def _pairwise_response(
     preferred_position: str,
     reasoning_text: str | None,
     reasoning_tokens: int | None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> LlmResponse:
     return LlmResponse(
         id="stub-response",
@@ -120,8 +149,14 @@ def _pairwise_response(
                 ),
             ),
         ),
-        usage=LlmUsage(reasoning_tokens=reasoning_tokens),
+        usage=LlmUsage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            reasoning_tokens=reasoning_tokens,
+        ),
         postprocessed={"preferred_position": preferred_position},
+        metadata=metadata,
     )
 
 
@@ -140,6 +175,58 @@ async def test_scoring_service_returns_pairwise_score_directly() -> None:
 
     assert score.comparison_score == pytest.approx(1.0)
     assert score.total_score == pytest.approx(1.0)
+
+
+async def test_scoring_service_records_two_judge_calls_in_scoring_result() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    llm = SequenceLlmProvider(
+        [
+            _pairwise_response(
+                preferred_position="first",
+                reasoning_text=None,
+                reasoning_tokens=3,
+                prompt_tokens=11,
+                completion_tokens=5,
+                total_tokens=16,
+                metadata={
+                    "selected_provider": "chutes",
+                    "selected_model": "judge-model",
+                    "actual_cost_usd": 0.01,
+                },
+            ),
+            _pairwise_response(
+                preferred_position="second",
+                reasoning_text=None,
+                reasoning_tokens=4,
+                prompt_tokens=13,
+                completion_tokens=7,
+                total_tokens=20,
+                metadata={
+                    "selected_provider": "chutes",
+                    "selected_model": "judge-model",
+                    "actual_cost_usd": 0.02,
+                },
+            ),
+        ]
+    )
+    service = EvaluationScoringService(
+        llm_provider=llm,
+        config=EvaluationScoringConfig(provider="chutes", model="judge-model"),
+    )
+
+    result = await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert result.score_breakdown.total_score == pytest.approx(1.0)
+    assert result.judge_usage.call_count == 2
+    assert result.judge_usage.prompt_tokens == 24
+    assert result.judge_usage.completion_tokens == 12
+    assert result.judge_usage.total_tokens == 36
+    assert result.judge_usage.reasoning_tokens == 7
+    assert result.judge_usage.actual_cost_usd == pytest.approx(0.03)
 
 
 async def test_scoring_service_tries_next_candidate_after_true_retry_exhaustion() -> None:
@@ -194,6 +281,282 @@ async def test_scoring_service_does_not_advance_after_non_retryable_failure() ->
         await service.score(task=task, response=Response(text="Miner says 42."))
 
     assert [request.model for request in llm.requests] == ["primary-judge"]
+
+
+async def test_scoring_service_attaches_partial_judge_usage_to_second_pair_failure() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    retry_error = LlmRetryExhaustedError(
+        "second pair exhausted",
+        response=_pairwise_response(
+            preferred_position="first",
+            reasoning_text=None,
+            reasoning_tokens=2,
+            prompt_tokens=7,
+            completion_tokens=4,
+            total_tokens=11,
+            metadata={"selected_provider": "chutes", "selected_model": "judge-model", "actual_cost_usd": 0.02},
+        ),
+    )
+    llm = SequenceLlmProvider(
+        [
+            _pairwise_response(
+                preferred_position="first",
+                reasoning_text=None,
+                reasoning_tokens=3,
+                prompt_tokens=11,
+                completion_tokens=5,
+                total_tokens=16,
+                metadata={"selected_provider": "chutes", "selected_model": "judge-model", "actual_cost_usd": 0.01},
+            ),
+            retry_error,
+        ]
+    )
+    service = EvaluationScoringService(
+        llm_provider=llm,
+        config=EvaluationScoringConfig(provider="chutes", model="judge-model"),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert raised.value is retry_error
+    assert raised.value.judge_usage.call_count == 2
+    assert raised.value.judge_usage.prompt_tokens == 18
+    assert raised.value.judge_usage.completion_tokens == 9
+    assert raised.value.judge_usage.total_tokens == 27
+    assert raised.value.judge_usage.reasoning_tokens == 5
+    assert raised.value.judge_usage.actual_cost_usd == pytest.approx(0.03)
+
+
+async def test_scoring_service_attaches_failed_usage_when_first_pair_exhausts() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    retry_error = LlmRetryExhaustedError(
+        "first pair exhausted",
+        response=_pairwise_response(
+            preferred_position="first",
+            reasoning_text=None,
+            reasoning_tokens=2,
+            prompt_tokens=7,
+            completion_tokens=4,
+            total_tokens=11,
+            metadata={"selected_provider": "chutes", "selected_model": "judge-model", "actual_cost_usd": 0.02},
+        ),
+    )
+    service = EvaluationScoringService(
+        llm_provider=SequenceLlmProvider([retry_error]),
+        config=EvaluationScoringConfig(provider="chutes", model="judge-model"),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert raised.value is retry_error
+    assert raised.value.judge_usage.call_count == 1
+    assert raised.value.judge_usage.prompt_tokens == 7
+    assert raised.value.judge_usage.completion_tokens == 4
+    assert raised.value.judge_usage.total_tokens == 11
+    assert raised.value.judge_usage.reasoning_tokens == 2
+    assert raised.value.judge_usage.actual_cost_usd == pytest.approx(0.02)
+
+
+async def test_scoring_service_preserves_retry_tokens_when_actual_cost_total_unavailable() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    retry_error = LlmRetryExhaustedError(
+        "first pair exhausted",
+        response=_pairwise_response(
+            preferred_position="first",
+            reasoning_text=None,
+            reasoning_tokens=5,
+            prompt_tokens=18,
+            completion_tokens=9,
+            total_tokens=27,
+            metadata={
+                "selected_provider": "chutes",
+                "selected_model": "judge-model",
+                "billable_response_count": 2,
+            },
+        ),
+    )
+    service = EvaluationScoringService(
+        llm_provider=SequenceLlmProvider([retry_error]),
+        config=EvaluationScoringConfig(provider="chutes", model="judge-model"),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert raised.value is retry_error
+    assert raised.value.judge_usage.call_count == 2
+    assert raised.value.judge_usage.prompt_tokens == 18
+    assert raised.value.judge_usage.completion_tokens == 9
+    assert raised.value.judge_usage.total_tokens == 27
+    assert raised.value.judge_usage.reasoning_tokens == 5
+    assert raised.value.judge_usage.actual_cost_usd is None
+
+
+async def test_scoring_service_counts_exhausted_primary_usage_before_fallback_success() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    primary_error = LlmRetryExhaustedError(
+        "primary exhausted",
+        response=_pairwise_response(
+            preferred_position="first",
+            reasoning_text=None,
+            reasoning_tokens=2,
+            prompt_tokens=7,
+            completion_tokens=4,
+            total_tokens=11,
+            metadata={"selected_provider": "chutes", "selected_model": "primary-judge", "actual_cost_usd": 0.02},
+        ),
+    )
+    llm = SequenceLlmProvider(
+        [
+            primary_error,
+            _pairwise_response(
+                preferred_position="first",
+                reasoning_text=None,
+                reasoning_tokens=3,
+                prompt_tokens=11,
+                completion_tokens=5,
+                total_tokens=16,
+                metadata={"selected_provider": "chutes", "selected_model": "fallback-judge", "actual_cost_usd": 0.01},
+            ),
+            _pairwise_response(
+                preferred_position="second",
+                reasoning_text=None,
+                reasoning_tokens=4,
+                prompt_tokens=13,
+                completion_tokens=7,
+                total_tokens=20,
+                metadata={"selected_provider": "chutes", "selected_model": "primary-judge", "actual_cost_usd": 0.03},
+            ),
+        ]
+    )
+    service = EvaluationScoringService(
+        llm_provider=llm,
+        config=EvaluationScoringConfig(
+            provider="chutes",
+            model="primary-judge",
+            fallback_models=("fallback-judge",),
+        ),
+    )
+
+    result = await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert result.score_breakdown.comparison_score == pytest.approx(1.0)
+    assert result.judge_usage.call_count == 3
+    assert result.judge_usage.prompt_tokens == 31
+    assert result.judge_usage.completion_tokens == 16
+    assert result.judge_usage.total_tokens == 47
+    assert result.judge_usage.reasoning_tokens == 9
+    assert result.judge_usage.actual_cost_usd == pytest.approx(0.06)
+    assert [request.model for request in llm.requests] == [
+        "primary-judge",
+        "fallback-judge",
+        "primary-judge",
+    ]
+
+
+async def test_scoring_service_carries_failed_usage_when_final_fallback_has_no_response() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    primary_error = LlmRetryExhaustedError(
+        "primary exhausted",
+        response=_pairwise_response(
+            preferred_position="first",
+            reasoning_text=None,
+            reasoning_tokens=2,
+            prompt_tokens=7,
+            completion_tokens=4,
+            total_tokens=11,
+            metadata={"selected_provider": "chutes", "selected_model": "primary-judge", "actual_cost_usd": 0.02},
+        ),
+    )
+    fallback_error = LlmRetryExhaustedError("fallback exhausted")
+    service = EvaluationScoringService(
+        llm_provider=SequenceLlmProvider([primary_error, fallback_error]),
+        config=EvaluationScoringConfig(
+            provider="chutes",
+            model="primary-judge",
+            fallback_models=("fallback-judge",),
+        ),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert raised.value is fallback_error
+    assert raised.value.judge_usage.call_count == 1
+    assert raised.value.judge_usage.prompt_tokens == 7
+    assert raised.value.judge_usage.completion_tokens == 4
+    assert raised.value.judge_usage.total_tokens == 11
+    assert raised.value.judge_usage.reasoning_tokens == 2
+    assert raised.value.judge_usage.actual_cost_usd == pytest.approx(0.02)
+
+
+async def test_scoring_service_counts_accumulated_retry_usage_from_exhausted_provider_response() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the answer?"),
+        reference_answer=ReferenceAnswer(text="The answer is 42."),
+    )
+    service = EvaluationScoringService(
+        llm_provider=RetryWrappedSequenceLlmProvider(
+            [
+                _pairwise_response(
+                    preferred_position="first",
+                    reasoning_text=None,
+                    reasoning_tokens=2,
+                    prompt_tokens=7,
+                    completion_tokens=4,
+                    total_tokens=11,
+                    metadata={"selected_provider": "chutes", "selected_model": "judge-model", "actual_cost_usd": 0.02},
+                ),
+                _pairwise_response(
+                    preferred_position="first",
+                    reasoning_text=None,
+                    reasoning_tokens=3,
+                    prompt_tokens=11,
+                    completion_tokens=5,
+                    total_tokens=16,
+                    metadata={"selected_provider": "chutes", "selected_model": "judge-model", "actual_cost_usd": 0.01},
+                ),
+            ]
+        ),
+        config=EvaluationScoringConfig(
+            provider="chutes",
+            model="judge-model",
+            retry_policy=RetryPolicy(attempts=2, initial_ms=0, max_ms=0, jitter=0.0),
+        ),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError) as raised:
+        await service.score(task=task, response=Response(text="Miner says 42."))
+
+    assert raised.value.judge_usage.call_count == 2
+    assert raised.value.judge_usage.prompt_tokens == 18
+    assert raised.value.judge_usage.completion_tokens == 9
+    assert raised.value.judge_usage.total_tokens == 27
+    assert raised.value.judge_usage.reasoning_tokens == 5
+    assert raised.value.judge_usage.actual_cost_usd == pytest.approx(0.03)
 
 
 async def test_scoring_service_records_split_pairwise_decision() -> None:

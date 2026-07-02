@@ -173,8 +173,45 @@ async def test_openai_compatible_provider_normalizes_streamed_chat_response() ->
     assert response.metadata is not None
     assert response.metadata["raw_response"]["id"] == "chatcmpl-1"
     assert response.metadata["raw_response"]["usage"]["cost"] == pytest.approx(0.00123)
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.00000115)
+    assert response.metadata["actual_cost_provider"] == "custom-openai-compatible:local"
+    assert response.metadata["actual_cost_evidence"]["settlement_source"] == "static_pricing"
     assert isinstance(response.metadata["ttft_ms"], float)
     assert response.metadata["ttft_ms"] >= 0.0
+
+
+async def test_openai_compatible_provider_attaches_openrouter_usage_cost() -> None:
+    provider = OpenAiCompatibleLlmProvider(
+        endpoint=_endpoint(endpoint_id="openrouter", auth={"type": "none"}),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: _streaming_response())),
+    )
+
+    try:
+        response = await provider.invoke(_request(provider="openrouter", model="deepseek/deepseek-v3.2"))
+    finally:
+        await provider.aclose()
+
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.00123)
+    assert response.metadata["actual_cost_provider"] == "openrouter"
+    assert response.metadata["actual_cost_evidence"]["settlement_source"] == "provider_returned"
+
+
+async def test_openai_compatible_provider_attaches_openrouter_static_cost_when_usage_cost_missing() -> None:
+    provider = OpenAiCompatibleLlmProvider(
+        endpoint=_endpoint(endpoint_id="openrouter", auth={"type": "none"}),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda _: _streaming_response_without_usage_cost())),
+    )
+
+    try:
+        response = await provider.invoke(_request(provider="openrouter", model="deepseek/deepseek-v3.2"))
+    finally:
+        await provider.aclose()
+
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_usd"] == pytest.approx(0.00000168)
+    assert response.metadata["actual_cost_provider"] == "openrouter"
+    assert response.metadata["actual_cost_evidence"]["settlement_source"] == "static_pricing"
 
 
 async def test_openai_compatible_thinking_omitted_is_noop() -> None:
@@ -503,6 +540,19 @@ def _streaming_response() -> httpx.Response:
             'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
             'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
             '"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5,"cost":0.00123}}',
+            "data: [DONE]",
+            "",
+        )
+    )
+    return httpx.Response(200, content=payload.encode("utf-8"))
+
+
+def _streaming_response_without_usage_cost() -> httpx.Response:
+    payload = "\n\n".join(
+        (
+            'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
             "data: [DONE]",
             "",
         )

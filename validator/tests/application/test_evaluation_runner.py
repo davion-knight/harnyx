@@ -12,6 +12,7 @@ import pytest
 
 import harnyx_validator.application.services.evaluation_runner as evaluation_runner_module
 from harnyx_commons.application.session_manager import SessionManager
+from harnyx_commons.domain.judge_usage import JudgeModelUsage, JudgeUsageSummary
 from harnyx_commons.domain.miner_task import (
     EvaluationDetails,
     EvaluationError,
@@ -327,6 +328,31 @@ def _search_usage(receipt_log: FakeReceiptLog, session_id) -> ToolUsageSummary:
         search_tool_cost=total_cost,
         llm=ToolUsageSummary.zero().llm,
         llm_cost=0.0,
+    )
+
+
+def _judge_usage(*, actual_cost_usd: float = 0.031) -> JudgeUsageSummary:
+    model_usage = JudgeModelUsage(
+        provider="chutes",
+        model="google/gemma-4-31B-turbo-TEE",
+        call_count=1,
+        prompt_tokens=100,
+        completion_tokens=20,
+        total_tokens=120,
+        reasoning_tokens=7,
+        actual_cost_usd=actual_cost_usd,
+        actual_cost_source="provider_actual",
+        actual_cost_provider="chutes",
+        actual_cost_evidence="test-cost-id",
+    )
+    return JudgeUsageSummary(
+        call_count=1,
+        prompt_tokens=100,
+        completion_tokens=20,
+        total_tokens=120,
+        reasoning_tokens=7,
+        actual_cost_usd=actual_cost_usd,
+        models=(model_usage,),
     )
 
 
@@ -3140,6 +3166,13 @@ class _ScoringRetryExhaustedOrchestrator:
         raise LlmRetryExhaustedError("embedding retries exhausted")
 
 
+class _ScoringRetryExhaustedWithJudgeUsageOrchestrator:
+    async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
+        exc = LlmRetryExhaustedError("embedding retries exhausted")
+        exc.__dict__["judge_usage"] = _judge_usage(actual_cost_usd=0.031)
+        raise exc
+
+
 class _SandboxTimeoutOrchestrator:
     async def evaluate(self, request: MinerTaskRunRequest) -> TaskRunOutcome:
         raise _sandbox_invocation_error(
@@ -3629,6 +3662,35 @@ async def test_evaluation_runner_assigned_task_final_scoring_failure_stays_task_
         code="scoring_llm_retry_exhausted",
         message="embedding retries exhausted",
     )
+
+
+async def test_evaluation_runner_assigned_task_final_scoring_failure_records_partial_judge_usage(
+    tmp_path: Path,
+) -> None:
+    runner, batch_id, artifact, task, _, _, _, evaluation_store = _assigned_task_test_context(tmp_path)
+
+    result = await runner.evaluate_assigned_task(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        orchestrator=cast(TaskRunOrchestrator, _ScoringRetryExhaustedWithJudgeUsageOrchestrator()),
+    )
+
+    assert result.result is not None
+    assert result.terminal_attempt.error_code == "scoring_llm_retry_exhausted"
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    assert evaluation_store.records[0].run.details.error == EvaluationError(
+        code="scoring_llm_retry_exhausted",
+        message="embedding retries exhausted",
+    )
+    judge_usage = evaluation_store.records[0].run.details.scoring_judge_usage
+    assert judge_usage is not None
+    assert judge_usage.call_count == 1
+    assert judge_usage.total_tokens == 120
+    assert judge_usage.actual_cost_usd == pytest.approx(0.031)
 
 
 async def test_evaluation_runner_assigned_task_final_sandbox_invocation_failure_stays_task_result(

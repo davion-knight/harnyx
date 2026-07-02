@@ -162,6 +162,9 @@ async def test_bedrock_provider_maps_stream_response_and_logs_ttft(
     assert response.usage.total_tokens == 18
     assert isinstance(dict(response.metadata or {})["ttft_ms"], float)
     assert dict(response.metadata or {})["ttft_ms"] >= 0.0
+    assert dict(response.metadata or {})["actual_cost_provider"] == "bedrock"
+    assert dict(response.metadata or {})["actual_cost_usd"] == pytest.approx(0.00000131)
+    assert dict(response.metadata or {})["actual_cost_evidence"]["settlement_source"] == "static_pricing"
     raw_response = dict(response.metadata or {})["raw_response"]
     assert isinstance(raw_response, dict)
     assert len(raw_response["events"]) == 6
