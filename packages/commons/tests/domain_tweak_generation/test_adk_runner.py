@@ -29,15 +29,19 @@ class _FakeTurnExecutor:
 
 
 class _RecordingTurnExecutor:
-    def __init__(self) -> None:
+    def __init__(self, *, responses: tuple[str | BaseException, ...] | None = None) -> None:
+        self._responses = list(responses or ("{}",))
         self.prompts: list[str] = []
         self.attempt_indexes: list[int] = []
 
     async def __call__(self, **kwargs: object) -> adk_runner_mod.DomainTweakAdkTurn:
         self.prompts.append(str(kwargs["prompt"]))
         self.attempt_indexes.append(int(kwargs["attempt_index"]))
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
         return adk_runner_mod.DomainTweakAdkTurn(
-            final_text="{}",
+            final_text=response,
             events=(
                 DomainTweakAdkEventSummary(
                     is_final_response=True,
@@ -164,6 +168,7 @@ async def test_phase_timeout_budget_is_shared_across_validation_retries(
 async def test_soft_timeout_retries_with_time_pressure_feedback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock_values = iter((100.0, 100.0, 102.0, 102.0, 103.0))
     wait_for_timeouts: list[float | None] = []
     executor = _RecordingTurnExecutor()
 
@@ -176,6 +181,7 @@ async def test_soft_timeout_retries_with_time_pressure_feedback(
             raise TimeoutError("soft timeout elapsed")
         return await coro
 
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
     monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
 
     result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
@@ -195,7 +201,7 @@ async def test_soft_timeout_retries_with_time_pressure_feedback(
     )
 
     assert result.terminal_status == "validated"
-    assert wait_for_timeouts[0] == 2.0
+    assert wait_for_timeouts[0] == pytest.approx(2.0, abs=0.01)
     assert result.attempts[0].prompt_kind == "initial"
     assert result.attempts[0].validation_ok is False
     assert result.attempts[0].validation_feedback == adk_runner_mod.SOFT_TIMEOUT_FEEDBACK
@@ -205,12 +211,297 @@ async def test_soft_timeout_retries_with_time_pressure_feedback(
     assert "Do not restart broad research" in executor.prompts[0]
 
 
+async def test_early_provider_timeout_does_not_trigger_soft_timeout_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100.0, 100.0, 101.0, 102.0))
+    wait_for_timeouts: list[float | None] = []
+    executor = _RecordingTurnExecutor(responses=(TimeoutError("provider early timeout"),))
+
+    async def fake_wait_for(coro: object, *, timeout: float | None = None) -> object:
+        wait_for_timeouts.append(timeout)
+        return await coro
+
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
+
+    result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
+        phase="reference_answer",
+        prompt="Answer the question.",
+        config=DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            max_retries=1,
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=600.0,
+            soft_timeout_interval_seconds=300.0,
+        ),
+        validate=lambda text: DomainTweakValidationOutcome(ok=True, terminal_status="validated"),
+    )
+
+    assert result.terminal_status == "timeout"
+    assert wait_for_timeouts == [600.0]
+    assert executor.attempt_indexes == [0]
+    assert len(result.attempts) == 1
+    assert result.attempts[0].prompt_kind == "initial"
+    assert result.attempts[0].validation_feedback == ("provider early timeout",)
+
+
+async def test_soft_timeout_feedback_repeats_until_hard_timeout_with_elapsed_wall_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((1000.0, 1000.0, 1600.0, 1600.0, 1900.0, 1900.0, 1901.0))
+    wait_for_timeouts: list[float | None] = []
+    executor = _RecordingTurnExecutor(
+        responses=(
+            TimeoutError("first pressure point"),
+            TimeoutError("second pressure point"),
+            "{}",
+        )
+    )
+
+    async def fake_wait_for(coro: object, *, timeout: float | None = None) -> object:
+        wait_for_timeouts.append(timeout)
+        return await coro
+
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
+
+    result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
+        phase="reference_answer",
+        prompt="Answer the question.",
+        config=DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            max_retries=1,
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=600.0,
+            soft_timeout_interval_seconds=300.0,
+        ),
+        validate=lambda text: DomainTweakValidationOutcome(
+            ok=True,
+            terminal_status="validated",
+            parsed_output=None,
+        ),
+    )
+
+    assert result.terminal_status == "validated"
+    assert wait_for_timeouts == [600.0, 300.0, 300.0]
+    assert executor.attempt_indexes == [0, 1, 2]
+    assert "Elapsed wall time: 10 minutes (600 seconds)." in executor.prompts[1]
+    assert "Elapsed wall time: 15 minutes (900 seconds)." in executor.prompts[2]
+    assert result.attempts[0].prompt_kind == "initial"
+    assert result.attempts[1].prompt_kind == "soft_timeout_feedback"
+    assert result.attempts[2].prompt_kind == "soft_timeout_feedback"
+
+
+async def test_soft_timeout_feedback_does_not_consume_validation_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100.0, 100.0, 700.0, 700.0, 701.0, 702.0))
+    wait_for_timeouts: list[float | None] = []
+    executor = _RecordingTurnExecutor(
+        responses=(
+            TimeoutError("pressure point"),
+            '{"ok": false}',
+            '{"ok": true}',
+        )
+    )
+    validation_calls = 0
+
+    async def fake_wait_for(coro: object, *, timeout: float | None = None) -> object:
+        wait_for_timeouts.append(timeout)
+        return await coro
+
+    def validate(_: str) -> DomainTweakValidationOutcome:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls == 1:
+            return DomainTweakValidationOutcome(
+                ok=False,
+                terminal_status="validation_failed",
+                feedback=("retry with deterministic validation feedback",),
+            )
+        return DomainTweakValidationOutcome(ok=True, terminal_status="validated")
+
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
+
+    result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
+        phase="reference_answer",
+        prompt="Answer the question.",
+        config=DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            max_retries=1,
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=600.0,
+            soft_timeout_interval_seconds=300.0,
+        ),
+        validate=validate,
+    )
+
+    assert result.terminal_status == "validated"
+    assert wait_for_timeouts == [600.0, 300.0, 299.0]
+    assert validation_calls == 2
+    assert "Elapsed wall time: 10 minutes (600 seconds)." in executor.prompts[1]
+    assert "deterministic validation feedback" in executor.prompts[2]
+    assert result.attempts[0].prompt_kind == "initial"
+    assert result.attempts[1].prompt_kind == "soft_timeout_feedback"
+    assert result.attempts[2].prompt_kind == "feedback"
+
+
+async def test_soft_timeout_schedule_uses_phase_wall_time_after_validation_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100.0, 100.0, 400.0, 401.0))
+    wait_for_timeouts: list[float | None] = []
+    executor = _RecordingTurnExecutor(responses=('{"ok": false}', '{"ok": true}'))
+    validation_calls = 0
+
+    async def fake_wait_for(coro: object, *, timeout: float | None = None) -> object:
+        wait_for_timeouts.append(timeout)
+        return await coro
+
+    def validate(_: str) -> DomainTweakValidationOutcome:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls == 1:
+            return DomainTweakValidationOutcome(
+                ok=False,
+                terminal_status="validation_failed",
+                feedback=("retry with deterministic validation feedback",),
+            )
+        return DomainTweakValidationOutcome(ok=True, terminal_status="validated")
+
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
+
+    result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
+        phase="reference_answer",
+        prompt="Answer the question.",
+        config=DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            max_retries=1,
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=600.0,
+            soft_timeout_interval_seconds=300.0,
+        ),
+        validate=validate,
+    )
+
+    assert result.terminal_status == "validated"
+    assert wait_for_timeouts == [600.0, 300.0]
+    assert result.attempts[0].prompt_kind == "initial"
+    assert result.attempts[1].prompt_kind == "feedback"
+
+
+async def test_late_validation_feedback_uses_next_future_soft_timeout_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100.0, 100.0, 710.0, 711.0))
+    wait_for_timeouts: list[float | None] = []
+    executor = _RecordingTurnExecutor(responses=('{"ok": false}', '{"ok": true}'))
+    validation_calls = 0
+
+    async def fake_wait_for(coro: object, *, timeout: float | None = None) -> object:
+        wait_for_timeouts.append(timeout)
+        return await coro
+
+    def validate(_: str) -> DomainTweakValidationOutcome:
+        nonlocal validation_calls
+        validation_calls += 1
+        if validation_calls == 1:
+            return DomainTweakValidationOutcome(
+                ok=False,
+                terminal_status="validation_failed",
+                feedback=("retry with deterministic validation feedback",),
+            )
+        return DomainTweakValidationOutcome(ok=True, terminal_status="validated")
+
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
+
+    result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
+        phase="reference_answer",
+        prompt="Answer the question.",
+        config=DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            max_retries=1,
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=600.0,
+            soft_timeout_interval_seconds=300.0,
+        ),
+        validate=validate,
+    )
+
+    assert result.terminal_status == "validated"
+    assert wait_for_timeouts == [600.0, 290.0]
+    assert "deterministic validation feedback" in executor.prompts[1]
+    assert result.attempts[0].prompt_kind == "initial"
+    assert result.attempts[1].prompt_kind == "feedback"
+
+
+async def test_provider_timeout_before_next_future_boundary_stays_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_values = iter((100.0, 100.0, 710.0, 720.0, 721.0))
+    wait_for_timeouts: list[float | None] = []
+    executor = _RecordingTurnExecutor(
+        responses=('{"ok": false}', TimeoutError("provider timeout before next pressure"))
+    )
+    validation_calls = 0
+
+    async def fake_wait_for(coro: object, *, timeout: float | None = None) -> object:
+        wait_for_timeouts.append(timeout)
+        return await coro
+
+    def validate(_: str) -> DomainTweakValidationOutcome:
+        nonlocal validation_calls
+        validation_calls += 1
+        return DomainTweakValidationOutcome(
+            ok=False,
+            terminal_status="validation_failed",
+            feedback=("retry with deterministic validation feedback",),
+        )
+
+    monkeypatch.setattr(adk_runner_mod.time, "perf_counter", lambda: next(clock_values))
+    monkeypatch.setattr(adk_runner_mod.asyncio, "wait_for", fake_wait_for)
+
+    result = await DomainTweakAdkRunner(turn_executor=executor).run_phase(
+        phase="reference_answer",
+        prompt="Answer the question.",
+        config=DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            max_retries=1,
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=600.0,
+            soft_timeout_interval_seconds=300.0,
+        ),
+        validate=validate,
+    )
+
+    assert result.terminal_status == "timeout"
+    assert wait_for_timeouts == [600.0, 290.0]
+    assert validation_calls == 1
+    assert result.attempts[0].prompt_kind == "initial"
+    assert result.attempts[1].prompt_kind == "feedback"
+    assert result.attempts[1].validation_feedback == ("provider timeout before next pressure",)
+
+
 def test_adk_run_config_rejects_soft_timeout_without_hard_timeout_budget() -> None:
     with pytest.raises(ValidationError, match="soft_timeout_seconds must be lower"):
         DomainTweakAdkRunConfig(
             model="gemini-3.1-pro-preview",
             phase_timeout_seconds=10.0,
             soft_timeout_seconds=10.0,
+        )
+
+
+def test_adk_run_config_rejects_interval_without_soft_timeout() -> None:
+    with pytest.raises(ValidationError, match="soft_timeout_interval_seconds requires soft_timeout_seconds"):
+        DomainTweakAdkRunConfig(
+            model="gemini-3.1-pro-preview",
+            phase_timeout_seconds=1800.0,
+            soft_timeout_seconds=None,
+            soft_timeout_interval_seconds=300.0,
         )
 
 

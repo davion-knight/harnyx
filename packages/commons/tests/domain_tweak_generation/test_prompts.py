@@ -86,9 +86,10 @@ def test_phase_instructions_do_not_name_source_datasets() -> None:
 
 
 def test_soft_timeout_feedback_prompt_pushes_final_answer_without_broad_research() -> None:
-    prompt = soft_timeout_feedback_prompt()
+    prompt = soft_timeout_feedback_prompt(elapsed_seconds=900.0)
 
     assert "ran too long" in prompt
+    assert "Elapsed wall time: 15 minutes (900 seconds)." in prompt
     assert "Time is almost gone" in prompt
     assert "Do not restart broad research" in prompt
     assert "Return one corrected JSON object only" in prompt

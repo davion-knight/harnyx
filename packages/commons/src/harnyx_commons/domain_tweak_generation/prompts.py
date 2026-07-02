@@ -202,12 +202,32 @@ def feedback_prompt(feedback: tuple[str, ...]) -> str:
     )
 
 
-def soft_timeout_feedback_prompt(feedback: tuple[str, ...] = SOFT_TIMEOUT_FEEDBACK) -> str:
+def soft_timeout_feedback_prompt(
+    feedback: tuple[str, ...] = SOFT_TIMEOUT_FEEDBACK,
+    *,
+    elapsed_seconds: float | None = None,
+) -> str:
+    elapsed_line = (
+        ""
+        if elapsed_seconds is None
+        else f"Elapsed wall time: {_format_elapsed_seconds(elapsed_seconds)}.\n"
+    )
     return (
         "Your previous reference-answer attempt ran too long before finalizing.\n"
+        + elapsed_line
         + "\n".join(f"- {item}" for item in feedback)
         + "\nDo not restart broad research. Return one corrected JSON object only."
     )
+
+
+def _format_elapsed_seconds(elapsed_seconds: float) -> str:
+    rounded_seconds = max(0, int(round(elapsed_seconds)))
+    minutes, seconds = divmod(rounded_seconds, 60)
+    if minutes == 0:
+        return f"{seconds} seconds"
+    if seconds == 0:
+        return f"{minutes} minutes ({rounded_seconds} seconds)"
+    return f"{minutes} minutes {seconds} seconds ({rounded_seconds} seconds)"
 
 
 __all__ = [

@@ -175,12 +175,18 @@ async def test_batch_pipeline_applies_phase_specific_defaults() -> None:
     assert len(result.finalized_tasks) == 1
     observed = list(zip(executor.phases, executor.configs, strict=True))
     assert [
-        (phase, config.max_retries, config.phase_timeout_seconds, config.soft_timeout_seconds)
+        (
+            phase,
+            config.max_retries,
+            config.phase_timeout_seconds,
+            config.soft_timeout_seconds,
+            config.soft_timeout_interval_seconds,
+        )
         for phase, config in observed
     ] == [
-        ("question_generation", 2, 600.0, None),
-        ("form_review", 2, 600.0, None),
-        ("reference_answer", 1, 900.0, 600.0),
+        ("question_generation", 2, 600.0, None, None),
+        ("form_review", 2, 600.0, None, None),
+        ("reference_answer", 1, 1800.0, 600.0, 300.0),
     ]
 
 

@@ -204,6 +204,7 @@ class DomainTweakBatchGenerationPipeline:
                     "max_retries": policy.validation_retries_per_answer,
                     "phase_timeout_seconds": policy.timeout_seconds,
                     "soft_timeout_seconds": policy.soft_timeout_seconds,
+                    "soft_timeout_interval_seconds": policy.soft_timeout_interval_seconds,
                 }
             ),
             runner=self._runner,

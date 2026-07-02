@@ -44,6 +44,7 @@ class DomainTweakAdkRunConfig(BaseModel):
     max_retries: int = Field(default=2, ge=0)
     phase_timeout_seconds: float = Field(default=900.0, gt=0)
     soft_timeout_seconds: float | None = Field(default=None, gt=0)
+    soft_timeout_interval_seconds: float | None = Field(default=None, gt=0)
     app_name: str = Field(default="harnyx_domain_tweak_generation", min_length=1)
     user_id: str = Field(default="domain_tweak_generator", min_length=1)
 
@@ -51,6 +52,13 @@ class DomainTweakAdkRunConfig(BaseModel):
     def _soft_timeout_must_leave_hard_timeout_budget(self) -> DomainTweakAdkRunConfig:
         if self.soft_timeout_seconds is not None and self.soft_timeout_seconds >= self.phase_timeout_seconds:
             raise ValueError("soft_timeout_seconds must be lower than phase_timeout_seconds")
+        if self.soft_timeout_interval_seconds is not None and self.soft_timeout_seconds is None:
+            raise ValueError("soft_timeout_interval_seconds requires soft_timeout_seconds")
+        if (
+            self.soft_timeout_interval_seconds is not None
+            and self.soft_timeout_interval_seconds >= self.phase_timeout_seconds
+        ):
+            raise ValueError("soft_timeout_interval_seconds must be lower than phase_timeout_seconds")
         return self
 
 
@@ -161,8 +169,9 @@ class DomainTweakReferenceAnswerPhasePolicy(BaseModel):
 
     validation_retries_per_answer: int = Field(default=1, ge=0)
     invocation_retries_per_answer: int = Field(default=1, ge=0)
-    timeout_seconds: float = Field(default=900.0, gt=0)
+    timeout_seconds: float = Field(default=1800.0, gt=0)
     soft_timeout_seconds: float | None = Field(default=600.0, gt=0)
+    soft_timeout_interval_seconds: float | None = Field(default=300.0, gt=0)
     answer_attempt_multiplier: float = Field(default=1.0, ge=1.0)
     hard_answer_attempt_cap_multiplier: int = Field(default=2, ge=1)
 
@@ -170,6 +179,13 @@ class DomainTweakReferenceAnswerPhasePolicy(BaseModel):
     def _soft_timeout_must_leave_hard_timeout_budget(self) -> DomainTweakReferenceAnswerPhasePolicy:
         if self.soft_timeout_seconds is not None and self.soft_timeout_seconds >= self.timeout_seconds:
             raise ValueError("soft_timeout_seconds must be lower than timeout_seconds")
+        if self.soft_timeout_interval_seconds is not None and self.soft_timeout_seconds is None:
+            raise ValueError("soft_timeout_interval_seconds requires soft_timeout_seconds")
+        if (
+            self.soft_timeout_interval_seconds is not None
+            and self.soft_timeout_interval_seconds >= self.timeout_seconds
+        ):
+            raise ValueError("soft_timeout_interval_seconds must be lower than timeout_seconds")
         return self
 
     def hard_attempt_cap(self, target_count: int) -> int:

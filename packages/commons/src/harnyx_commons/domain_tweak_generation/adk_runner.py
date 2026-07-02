@@ -83,15 +83,29 @@ class DomainTweakAdkRunner:
                 agent_instruction=agent_instruction,
             )
         try:
-            for attempt_index in range(config.max_retries + 1):
+            attempt_index = 0
+            validation_failure_count = 0
+            while True:
                 prompt_kind = _prompt_kind_for_attempt(attempt_index, attempts)
-                turn_prompt = _prompt_for_attempt(prompt, prompt_kind, attempts)
-                remaining_timeout = deadline - time.perf_counter()
+                now = time.perf_counter()
+                turn_prompt = _prompt_for_attempt(
+                    prompt,
+                    prompt_kind,
+                    attempts,
+                    elapsed_seconds=now - started,
+                )
+                remaining_timeout = deadline - now
                 if remaining_timeout <= 0:
                     raise TimeoutError("ADK phase timeout exceeded before retry")
-                turn_timeout = _turn_timeout_seconds(
+                turn_elapsed_seconds = now - started
+                turn_soft_timeout_elapsed_seconds = _next_turn_soft_timeout_elapsed_seconds(
                     config=config,
-                    attempt_index=attempt_index,
+                    attempts=attempts,
+                    elapsed_seconds=turn_elapsed_seconds,
+                )
+                turn_timeout = _turn_timeout_seconds(
+                    soft_timeout_elapsed_seconds=turn_soft_timeout_elapsed_seconds,
+                    elapsed_seconds=turn_elapsed_seconds,
                     remaining_timeout=remaining_timeout,
                 )
                 turn_events: list[DomainTweakAdkEventSummary] = []
@@ -109,11 +123,12 @@ class DomainTweakAdkRunner:
                         timeout=turn_timeout,
                     )
                 except TimeoutError as exc:
+                    timeout_elapsed_seconds = time.perf_counter() - started
                     if _should_soft_timeout_retry(
-                        config=config,
-                        attempt_index=attempt_index,
-                        remaining_timeout=remaining_timeout,
-                        turn_timeout=turn_timeout,
+                        soft_timeout_elapsed_seconds=turn_soft_timeout_elapsed_seconds,
+                        elapsed_seconds=timeout_elapsed_seconds,
+                        deadline=deadline,
+                        started=started,
                     ):
                         total_usage = self._record_failed_attempt(
                             attempts=attempts,
@@ -124,6 +139,7 @@ class DomainTweakAdkRunner:
                             config=config,
                             validation_feedback=SOFT_TIMEOUT_FEEDBACK,
                         )
+                        attempt_index += 1
                         continue
                     return self._failed_phase_result(
                         phase=phase,
@@ -180,14 +196,17 @@ class DomainTweakAdkRunner:
                         tool_usage=total_usage,
                         elapsed_ms=_elapsed_ms(started),
                     )
-            return DomainTweakAdkPhaseResult(
-                phase=phase,
-                terminal_status="validation_failed",
-                parsed_output=None,
-                attempts=tuple(attempts),
-                tool_usage=total_usage,
-                elapsed_ms=_elapsed_ms(started),
-            )
+                validation_failure_count += 1
+                if validation_failure_count > config.max_retries:
+                    return DomainTweakAdkPhaseResult(
+                        phase=phase,
+                        terminal_status="validation_failed",
+                        parsed_output=None,
+                        attempts=tuple(attempts),
+                        tool_usage=total_usage,
+                        elapsed_ms=_elapsed_ms(started),
+                    )
+                attempt_index += 1
         except _FatalAdkRequestError as exc:
             raise exc.original from exc
         except TimeoutError as exc:
@@ -324,39 +343,100 @@ def _prompt_for_attempt(
     initial_prompt: str,
     prompt_kind: DomainTweakAdkPromptKind,
     attempts: list[DomainTweakAdkAttempt],
+    *,
+    elapsed_seconds: float | None = None,
 ) -> str:
     match prompt_kind:
         case "initial":
             return initial_prompt
         case "soft_timeout_feedback":
-            return soft_timeout_feedback_prompt(attempts[-1].validation_feedback)
+            return soft_timeout_feedback_prompt(
+                attempts[-1].validation_feedback,
+                elapsed_seconds=elapsed_seconds,
+            )
         case "feedback":
             return feedback_prompt(attempts[-1].validation_feedback)
 
 
 def _turn_timeout_seconds(
     *,
-    config: DomainTweakAdkRunConfig,
-    attempt_index: int,
+    soft_timeout_elapsed_seconds: float | None,
+    elapsed_seconds: float,
     remaining_timeout: float,
 ) -> float:
-    if config.soft_timeout_seconds is None or attempt_index >= config.max_retries:
+    if soft_timeout_elapsed_seconds is None:
         return remaining_timeout
-    return min(config.soft_timeout_seconds, remaining_timeout)
+    return min(max(soft_timeout_elapsed_seconds - elapsed_seconds, 0.0), remaining_timeout)
 
 
 def _should_soft_timeout_retry(
     *,
-    config: DomainTweakAdkRunConfig,
-    attempt_index: int,
-    remaining_timeout: float,
-    turn_timeout: float,
+    soft_timeout_elapsed_seconds: float | None,
+    elapsed_seconds: float,
+    deadline: float,
+    started: float,
 ) -> bool:
-    return bool(
-        config.soft_timeout_seconds is not None
-        and attempt_index < config.max_retries
-        and turn_timeout < remaining_timeout
+    if soft_timeout_elapsed_seconds is None:
+        return False
+    if elapsed_seconds < soft_timeout_elapsed_seconds:
+        return False
+    return started + elapsed_seconds < deadline
+
+
+def _next_turn_soft_timeout_elapsed_seconds(
+    *,
+    config: DomainTweakAdkRunConfig,
+    attempts: list[DomainTweakAdkAttempt],
+    elapsed_seconds: float,
+) -> float | None:
+    next_soft_timeout_seconds = _next_soft_timeout_elapsed_seconds(
+        config=config,
+        attempts=attempts,
     )
+    if next_soft_timeout_seconds is None:
+        return None
+    return _next_future_soft_timeout_elapsed_seconds(
+        config=config,
+        next_soft_timeout_seconds=next_soft_timeout_seconds,
+        elapsed_seconds=elapsed_seconds,
+    )
+
+
+def _soft_timeout_feedback_count(attempts: list[DomainTweakAdkAttempt]) -> int:
+    return sum(1 for attempt in attempts if attempt.validation_feedback == SOFT_TIMEOUT_FEEDBACK)
+
+
+def _next_soft_timeout_elapsed_seconds(
+    *,
+    config: DomainTweakAdkRunConfig,
+    attempts: list[DomainTweakAdkAttempt],
+) -> float | None:
+    if config.soft_timeout_seconds is None:
+        return None
+    soft_timeout_count = _soft_timeout_feedback_count(attempts)
+    if soft_timeout_count > 0 and config.soft_timeout_interval_seconds is None:
+        return None
+    if soft_timeout_count == 0:
+        return config.soft_timeout_seconds
+    if config.soft_timeout_interval_seconds is None:
+        return None
+    return config.soft_timeout_seconds + soft_timeout_count * config.soft_timeout_interval_seconds
+
+
+def _next_future_soft_timeout_elapsed_seconds(
+    *,
+    config: DomainTweakAdkRunConfig,
+    next_soft_timeout_seconds: float,
+    elapsed_seconds: float,
+) -> float | None:
+    if elapsed_seconds < next_soft_timeout_seconds:
+        return next_soft_timeout_seconds
+    if config.soft_timeout_interval_seconds is None:
+        return None
+    missed_intervals = int(
+        (elapsed_seconds - next_soft_timeout_seconds) // config.soft_timeout_interval_seconds
+    ) + 1
+    return next_soft_timeout_seconds + missed_intervals * config.soft_timeout_interval_seconds
 
 
 class _LiveAdkContext:
