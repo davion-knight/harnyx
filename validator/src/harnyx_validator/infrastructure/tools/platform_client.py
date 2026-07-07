@@ -15,8 +15,10 @@ import httpx
 from pydantic import BaseModel, TypeAdapter
 
 from harnyx_commons.bittensor import build_canonical_request
-from harnyx_commons.domain.session import Session, SessionStatus
+from harnyx_commons.domain.miner_task import EvaluationTrace, MinerTask, Response
+from harnyx_commons.domain.session import LlmUsageTotals, Session, SessionStatus
 from harnyx_commons.domain.tool_call import ToolCall, ToolExecutionFacts
+from harnyx_commons.domain.tool_usage import ToolUsageSummary
 from harnyx_commons.errors import BudgetExceededError, ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
 from harnyx_commons.protocol_headers import PLATFORM_TOOL_PROXY_TOKEN_HEADER
@@ -25,6 +27,8 @@ from harnyx_validator.application.dto.evaluation import (
     MinerTaskWorkAssignment,
     PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
+    ScriptArtifactSpec,
+    TokenUsageSummary,
 )
 from harnyx_validator.application.ports.platform import (
     ChampionWeights,
@@ -42,7 +46,9 @@ _GET_ATTEMPTS = 2
 _PLATFORM_WORK_TASKS_READ_TIMEOUT_SECONDS = 300.0
 _PLATFORM_WORK_RESULT_TIMEOUT_SECONDS = 300.0
 _PLATFORM_TOOL_PROXY_GRANT_RETRY_DELAYS_SECONDS = (0.25, 1.0)
+_LLM_USAGE_TOTALS_ADAPTER = TypeAdapter(dict[str, dict[str, LlmUsageTotals]])
 _TOOL_CALLS_ADAPTER = TypeAdapter(tuple[ToolCall, ...])
+_TOOL_USAGE_ADAPTER = TypeAdapter(ToolUsageSummary)
 
 
 class PlatformClientError(RuntimeError):
@@ -710,41 +716,68 @@ def _platform_scoreable_execution(value: object) -> PlatformOwnedTaskExecution:
     session_payload = item.get("session")
     if not isinstance(session_payload, dict):
         raise PlatformClientError(status_code=None, message="platform scoreable execution session is invalid")
-    artifact_item = cast(dict[str, object], artifact)
-    task_item = cast(dict[str, object], task)
+    artifact_item = dict(cast(dict[str, object], artifact))
+    task_item = dict(cast(dict[str, object], task))
     session_item = cast(dict[str, object], session_payload)
+
+    artifact_id = UUID(str(artifact_item["artifact_id"]))
     task_id = UUID(str(task_item["task_id"]))
+    artifact_item["artifact_id"] = artifact_id
+    task_item["task_id"] = task_id
+
+    miner_hotkey_ss58 = item.get("miner_hotkey_ss58")
+    if not isinstance(miner_hotkey_ss58, str):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution miner hotkey is invalid")
+    response_payload = item.get("response")
+    if not isinstance(response_payload, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution response is invalid")
+    trace_payload = item.get("trace")
+    if trace_payload is not None and not isinstance(trace_payload, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution trace is invalid")
+
+    task_model = MinerTask.model_validate(task_item)
     issued_at = _parse_datetime(session_item["issued_at"])
     expires_at = _parse_datetime(session_item["expires_at"])
-    return PlatformOwnedTaskExecution.model_validate(
-        {
-            "batch_id": item["batch_id"],
-            "artifact": artifact_item,
-            "task": task_item,
-            "artifact_id": artifact_item["artifact_id"],
-            "task_id": task_id,
-            "attempt_number": item["attempt_number"],
-            "max_attempts": item["max_attempts"],
-            "validator_session_id": item["validator_session_id"],
-            "uid": item["uid"],
-            "miner_hotkey_ss58": item["miner_hotkey_ss58"],
-            "started_at": item["started_at"],
-            "execution_completed_at": item["execution_completed_at"],
-            "response": item["response"],
-            "session": Session(
-                session_id=UUID(str(session_item["session_id"])),
-                uid=_required_int(session_item, "uid"),
-                task_id=task_id,
-                issued_at=issued_at,
-                expires_at=expires_at,
-                budget_usd=0.0,
-                status=SessionStatus(str(session_item["status"])),
-            ),
-            "usage": item["usage"],
-            "total_tool_usage": item["total_tool_usage"],
-            "execution_log": item.get("execution_log", ()),
-            "trace": item.get("trace"),
-        }
+    return PlatformOwnedTaskExecution(
+        batch_id=UUID(str(item["batch_id"])),
+        artifact=ScriptArtifactSpec.model_validate(artifact_item),
+        task=task_model,
+        artifact_id=artifact_id,
+        task_id=task_id,
+        attempt_number=_required_int(item, "attempt_number"),
+        max_attempts=_required_int(item, "max_attempts"),
+        validator_session_id=UUID(str(item["validator_session_id"])),
+        uid=_required_int(item, "uid"),
+        miner_hotkey_ss58=miner_hotkey_ss58,
+        started_at=_parse_datetime(item["started_at"]),
+        execution_completed_at=_parse_datetime(item["execution_completed_at"]),
+        response=Response.model_validate(response_payload),
+        session=Session(
+            session_id=UUID(str(session_item["session_id"])),
+            uid=_required_int(session_item, "uid"),
+            task_id=task_id,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            budget_usd=task_model.budget_usd,
+            status=SessionStatus(str(session_item["status"])),
+        ),
+        usage=_scoreable_token_usage_summary(item["usage"]),
+        total_tool_usage=_TOOL_USAGE_ADAPTER.validate_python(item["total_tool_usage"]),
+        execution_log=_TOOL_CALLS_ADAPTER.validate_python(item.get("execution_log", ())),
+        trace=None if trace_payload is None else EvaluationTrace.model_validate(trace_payload),
+    )
+
+
+def _scoreable_token_usage_summary(value: object) -> TokenUsageSummary:
+    if not isinstance(value, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution usage is invalid")
+    usage_item = cast(dict[str, object], value)
+    return TokenUsageSummary(
+        by_provider=_LLM_USAGE_TOTALS_ADAPTER.validate_python(usage_item.get("by_provider", {})),
+        total_prompt_tokens=_required_int(usage_item, "total_prompt_tokens"),
+        total_completion_tokens=_required_int(usage_item, "total_completion_tokens"),
+        total_tokens=_required_int(usage_item, "total_tokens"),
+        call_count=_required_int(usage_item, "call_count"),
     )
 
 

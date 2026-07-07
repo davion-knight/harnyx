@@ -729,6 +729,164 @@ def test_request_scoreable_miner_task_work_executions_posts_limit() -> None:
     }
 
 
+def test_request_scoreable_miner_task_work_executions_parses_wire_payload() -> None:
+    keypair = _keypair()
+    batch_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    validator_session_id = uuid4()
+    started_at = datetime(2026, 7, 7, 0, 0, tzinfo=UTC)
+    completed_at = started_at + timedelta(seconds=2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _assert_signed(request, keypair)
+        if request.method == "POST" and request.url.path == "/v2/miner-task-work/scoreable-executions":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "server_time": "2026-07-07T00:00:00+00:00",
+                    "executions": [
+                        {
+                            "batch_id": str(batch_id),
+                            "artifact": {
+                                "uid": 7,
+                                "artifact_id": str(artifact_id),
+                                "content_hash": "artifact-hash",
+                                "size_bytes": 123,
+                                "miner_hotkey_ss58": "miner-hotkey",
+                            },
+                            "task": {
+                                "task_id": str(task_id),
+                                "query": {"text": "question"},
+                                "reference_answer": {"text": "reference"},
+                                "budget_usd": 0.05,
+                            },
+                            "attempt_number": 1,
+                            "max_attempts": 2,
+                            "validator_session_id": str(validator_session_id),
+                            "uid": 7,
+                            "miner_hotkey_ss58": "miner-hotkey",
+                            "started_at": started_at.isoformat(),
+                            "execution_completed_at": completed_at.isoformat(),
+                            "response": {"text": "answer"},
+                            "session": {
+                                "session_id": str(validator_session_id),
+                                "uid": 7,
+                                "status": "completed",
+                                "issued_at": started_at.isoformat(),
+                                "expires_at": (started_at + timedelta(minutes=5)).isoformat(),
+                            },
+                            "usage": {
+                                "total_prompt_tokens": 5,
+                                "total_completion_tokens": 7,
+                                "total_tokens": 12,
+                                "call_count": 1,
+                                "by_provider": {
+                                    "chutes": {
+                                        "model-a": {
+                                            "prompt_tokens": 5,
+                                            "completion_tokens": 7,
+                                            "total_tokens": 12,
+                                            "call_count": 1,
+                                        }
+                                    }
+                                },
+                            },
+                            "total_tool_usage": {
+                                "search_tool": {
+                                    "call_count": 1,
+                                    "cost": 0.01,
+                                    "reference_cost": 0.01,
+                                },
+                                "search_tool_cost": 0.01,
+                                "llm": {
+                                    "call_count": 1,
+                                    "prompt_tokens": 5,
+                                    "completion_tokens": 7,
+                                    "total_tokens": 12,
+                                    "reasoning_tokens": 0,
+                                    "cost": 0.02,
+                                    "reference_cost": 0.02,
+                                    "providers": {
+                                        "chutes": {
+                                            "model-a": {
+                                                "usage": {
+                                                    "prompt_tokens": 5,
+                                                    "completion_tokens": 7,
+                                                    "total_tokens": 12,
+                                                    "call_count": 1,
+                                                },
+                                                "cost": 0.02,
+                                                "reference_cost": 0.02,
+                                            }
+                                        }
+                                    },
+                                },
+                                "llm_cost": 0.02,
+                                "reference_total_cost_usd": 0.03,
+                                "reference_cost_by_provider": {"chutes": 0.03},
+                            },
+                            "execution_log": [
+                                {
+                                    "receipt_id": "receipt-1",
+                                    "session_id": str(validator_session_id),
+                                    "uid": 7,
+                                    "tool": "search_web",
+                                    "issued_at": started_at.isoformat(),
+                                    "outcome": "ok",
+                                    "details": {
+                                        "request_hash": "request-hash",
+                                        "request_payload": {"query": "smoke"},
+                                        "response_hash": "response-hash",
+                                        "response_payload": {"ok": True},
+                                    },
+                                }
+                            ],
+                            "trace": {
+                                "entrypoint_invocation_ms": 1.0,
+                                "scoring_judge_selected_routes": ["primary"],
+                                "scoring_judge_attempt_count": 1,
+                                "scoring_judge_retry_count": 0,
+                                "scoring_judge_retry_reasons": [],
+                                "scoring_judge_status": "ok",
+                            },
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404)
+
+    client = HttpPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+
+    executions = client.request_scoreable_miner_task_work_executions(limit=1, active_scoring=())
+
+    assert len(executions) == 1
+    execution = executions[0]
+    assert execution.batch_id == batch_id
+    assert execution.artifact_id == artifact_id
+    assert execution.task_id == task_id
+    assert execution.artifact is not None
+    assert execution.artifact.artifact_id == artifact_id
+    assert execution.task is not None
+    assert execution.task.task_id == task_id
+    assert execution.validator_session_id == validator_session_id
+    assert execution.started_at == started_at
+    assert execution.execution_completed_at == completed_at
+    assert execution.response == Response(text="answer")
+    assert execution.session.session_id == validator_session_id
+    assert execution.session.budget_usd == 0.05
+    assert execution.usage.by_provider["chutes"]["model-a"].total_tokens == 12
+    assert execution.total_tool_usage.search_tool.call_count == 1
+    assert execution.total_tool_usage.llm.providers["chutes"]["model-a"].usage.total_tokens == 12
+    assert execution.execution_log[0].session_id == validator_session_id
+    assert execution.execution_log[0].issued_at == started_at
+    assert execution.trace is not None
+    assert execution.trace.scoring_judge_selected_routes == ("primary",)
+
 
 async def test_platform_tool_proxy_grant_posts_attempt_number() -> None:
     batch_id = uuid4()
