@@ -297,6 +297,7 @@ def test_validator_runtime_separates_startup_registration_from_refresh(
 
 
 def test_platform_work_worker_uses_task_capacity_and_artifact_cap() -> None:
+    scoring_services = {entry.model: object() for entry in bootstrap_mod._SCORING_SLOT_CONFIG.entries}
     worker = bootstrap_mod._build_platform_work_worker(
         resolved=SimpleNamespace(),
         platform_client=object(),  # type: ignore[arg-type]
@@ -311,7 +312,7 @@ def test_platform_work_worker_uses_task_capacity_and_artifact_cap() -> None:
             platform_tool_proxy_scopes=object(),
         ),
         batch_blocking_executor=object(),  # type: ignore[arg-type]
-        scoring_service=object(),  # type: ignore[arg-type]
+        scoring_services=scoring_services,  # type: ignore[arg-type]
         orchestrator_factory=lambda _client: object(),  # type: ignore[arg-type]
         options_factory=lambda: object(),  # type: ignore[arg-type]
     )
@@ -319,7 +320,10 @@ def test_platform_work_worker_uses_task_capacity_and_artifact_cap() -> None:
     assert worker is not None
     assert worker._target_concurrency == 20
     assert worker._max_active_artifacts == 4
-    assert worker._scoring_limit == 20
+    assert worker._scoring_slot_config is bootstrap_mod._SCORING_SLOT_CONFIG
+    assert worker._scoring_slot_config.total_slot_limit == 20
+    assert tuple(entry.slot_limit for entry in worker._scoring_slot_config.entries) == (10, 10)
+    assert set(worker._score_execution_by_model) == set(scoring_services)
     assert worker._target_concurrency > worker._max_active_artifacts
 
 
@@ -342,6 +346,11 @@ async def test_platform_work_worker_scoreable_execution_keeps_scoring_errors_val
 
     monkeypatch.setattr(bootstrap_mod, "score_platform_execution", _fake_score_platform_execution)
     scoring_service = object()
+    scoring_services = {
+        entry.model: scoring_service if index == 0 else object()
+        for index, entry in enumerate(bootstrap_mod._SCORING_SLOT_CONFIG.entries)
+    }
+    scoring_model = bootstrap_mod._SCORING_SLOT_CONFIG.entries[0].model
     execution = object()
     worker = bootstrap_mod._build_platform_work_worker(
         resolved=SimpleNamespace(),
@@ -357,18 +366,17 @@ async def test_platform_work_worker_scoreable_execution_keeps_scoring_errors_val
             platform_tool_proxy_scopes=object(),
         ),
         batch_blocking_executor=object(),  # type: ignore[arg-type]
-        scoring_service=scoring_service,  # type: ignore[arg-type]
+        scoring_services=scoring_services,  # type: ignore[arg-type]
         orchestrator_factory=lambda _client: object(),  # type: ignore[arg-type]
         options_factory=lambda: object(),  # type: ignore[arg-type]
     )
 
     assert worker is not None
-    assert worker._score_execution is not None
-    assert await worker._score_execution(execution) == "result"  # type: ignore[arg-type]
+    assert await worker._score_execution_by_model[scoring_model](execution) == "result"  # type: ignore[arg-type]
     assert observed == {
         "scoring_service": scoring_service,
         "execution": execution,
-        "convert_scoring_error": False,
+        "convert_scoring_error": True,
     }
 
 

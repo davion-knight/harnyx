@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -30,7 +30,6 @@ _PLATFORM_WORK_DISPATCH_START_LEASE_SECONDS = 300.0
 This applies only after an assigned artifact has started and a specific
 assignment is dispatchable but still queued.
 """
-_PLATFORM_WORK_SCORING_LIMIT = 20
 
 ArtifactAssignmentExecutor = Callable[
     [
@@ -44,6 +43,39 @@ ArtifactAssignmentExecutor = Callable[
 ScoringExecutor = Callable[[PlatformOwnedTaskExecution], Coroutine[Any, Any, PlatformOwnedTaskResult]]
 _AssignmentKey = tuple[UUID, UUID, UUID, int]
 _ArtifactGroupKey = tuple[UUID, UUID]
+
+
+@dataclass(frozen=True, slots=True)
+class ScoringSlotConfigEntry:
+    model: str
+    slot_limit: int
+
+    def __post_init__(self) -> None:
+        model = self.model.strip()
+        if not model:
+            raise ValueError("scoring slot model must be non-empty")
+        if model != self.model:
+            object.__setattr__(self, "model", model)
+        if self.slot_limit < 1:
+            raise ValueError("scoring slot_limit must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class ScoringSlotConfig:
+    entries: tuple[ScoringSlotConfigEntry, ...]
+
+    def __post_init__(self) -> None:
+        entries = tuple(self.entries)
+        if not entries:
+            raise ValueError("scoring slot entries must be non-empty")
+        models = tuple(entry.model for entry in entries)
+        if len(frozenset(models)) != len(models):
+            raise ValueError("scoring slot models must be unique")
+        object.__setattr__(self, "entries", entries)
+
+    @property
+    def total_slot_limit(self) -> int:
+        return sum(entry.slot_limit for entry in self.entries)
 
 
 class _ArtifactGroupState(StrEnum):
@@ -65,6 +97,12 @@ class _AssignmentRecord:
     dispatchable_at: float | None = None
     session_id: UUID | None = None
     started_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveScoringRecord:
+    identity: PlatformTaskAttemptIdentity
+    model: str
 
 
 @dataclass(slots=True)
@@ -256,10 +294,10 @@ class PlatformWorkWorker:
         *,
         platform: PlatformPort,
         execute_artifact_assignments: ArtifactAssignmentExecutor,
-        score_execution: ScoringExecutor | None = None,
+        score_execution_by_model: Mapping[str, ScoringExecutor] | None = None,
+        scoring_slot_config: ScoringSlotConfig | None = None,
         target_concurrency: int,
         max_active_artifacts: int,
-        scoring_limit: int = _PLATFORM_WORK_SCORING_LIMIT,
         poll_interval_seconds: float = 1.0,
         dispatch_start_lease_seconds: float = _PLATFORM_WORK_DISPATCH_START_LEASE_SECONDS,
         monotonic_clock: Callable[[], float] = time.monotonic,
@@ -268,25 +306,33 @@ class PlatformWorkWorker:
             raise ValueError("target_concurrency must be positive")
         if max_active_artifacts < 1:
             raise ValueError("max_active_artifacts must be positive")
-        if scoring_limit < 1:
-            raise ValueError("scoring_limit must be positive")
         if poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
         if dispatch_start_lease_seconds <= 0:
             raise ValueError("dispatch_start_lease_seconds must be positive")
+        scoring_executors = dict(score_execution_by_model or {})
+        if scoring_executors and scoring_slot_config is None:
+            raise ValueError("scoring_slot_config is required when scoring executors are configured")
+        if scoring_slot_config is not None:
+            configured_models = frozenset(entry.model for entry in scoring_slot_config.entries)
+            executor_models = frozenset(scoring_executors)
+            if executor_models != configured_models:
+                raise ValueError("score_execution_by_model must match scoring_slot_config entries")
         self._platform = platform
         self._execute_artifact_assignments = execute_artifact_assignments
-        self._score_execution = score_execution
+        self._score_execution_by_model = scoring_executors
+        self._scoring_slot_config = scoring_slot_config
         self._target_concurrency = target_concurrency
         self._max_active_artifacts = max_active_artifacts
-        self._scoring_limit = scoring_limit
         self._poll_interval_seconds = poll_interval_seconds
         self._dispatch_start_lease_seconds = dispatch_start_lease_seconds
         self._monotonic_clock = monotonic_clock
         self._active_artifacts: dict[_ArtifactGroupKey, _AssignedArtifactGroup] = {}
-        self._active_scoring: dict[asyncio.Task[PlatformOwnedTaskResult], PlatformTaskAttemptIdentity] = {}
+        self._active_scoring: dict[asyncio.Task[PlatformOwnedTaskResult], _ActiveScoringRecord] = {}
+        self._scoring_models_for_results_pending_submission: dict[PlatformTaskAttemptIdentity, str] = {}
+        self._next_scoring_entry_index = 0
         self._pending_executions: list[PlatformOwnedTaskExecution] = []
-        self._pending_results: list[PlatformOwnedTaskResult] = []
+        self._results_pending_submission: list[PlatformOwnedTaskResult] = []
         self._work_request_task: asyncio.Task[tuple[MinerTaskWorkAssignment, ...]] | None = None
         self._scoreable_execution_request_task: asyncio.Task[tuple[PlatformOwnedTaskExecution, ...]] | None = None
         self._stop = asyncio.Event()
@@ -338,8 +384,8 @@ class PlatformWorkWorker:
         if self._pending_executions:
             if not await self._submit_pending_executions():
                 return
-        if self._pending_results:
-            if not await self._submit_pending_results():
+        if self._results_pending_submission:
+            if not await self._submit_results_pending_submission():
                 return
         self._consume_completed_scoreable_execution_request()
         if self._scoreable_execution_request_task is None:
@@ -393,7 +439,7 @@ class PlatformWorkWorker:
         self._work_request_task = None
 
     def _start_scoreable_execution_request(self) -> None:
-        if self._score_execution is None:
+        if not self._score_execution_by_model or self._scoring_slot_config is None:
             return
         remaining_slots = self._remaining_scoring_slots()
         if remaining_slots <= 0:
@@ -580,10 +626,10 @@ class PlatformWorkWorker:
                 continue
             key = _result_key(result)
             group.assignment_records.pop(key, None)
-            self._pending_results.append(result)
+            self._results_pending_submission.append(result)
         deferred_delivery_failure = group.flush_deferred_delivery_failure_if_idle()
         if deferred_delivery_failure is not None:
-            self._pending_results.append(deferred_delivery_failure)
+            self._results_pending_submission.append(deferred_delivery_failure)
 
     def _collect_closed_artifact_groups(self) -> None:
         for group_key, group in tuple(self._active_artifacts.items()):
@@ -616,7 +662,7 @@ class PlatformWorkWorker:
                 group.clear_assignments()
                 deferred_delivery_failure = group.pop_deferred_delivery_failure()
                 if deferred_delivery_failure is not None:
-                    self._pending_results.append(deferred_delivery_failure)
+                    self._results_pending_submission.append(deferred_delivery_failure)
             del self._active_artifacts[group_key]
 
     async def _submit_pending_executions(self) -> bool:
@@ -661,39 +707,42 @@ class PlatformWorkWorker:
         return not self._pending_executions
 
     def _start_scoring_executions(self, executions: Sequence[PlatformOwnedTaskExecution]) -> None:
-        if self._score_execution is None:
+        if not self._score_execution_by_model or self._scoring_slot_config is None:
             return
         active_keys = set(self._active_scoring_attempts())
         for execution in executions:
-            if self._remaining_scoring_slots() <= 0:
-                break
             identity = _execution_identity(execution)
             if identity in active_keys:
                 continue
+            entry = self._next_scoring_entry_with_slot()
+            if entry is None:
+                break
+            score_execution = self._score_execution_by_model[entry.model]
             task = asyncio.create_task(
-                self._score_execution(execution),
+                score_execution(execution),
                 name=f"validator-platform-work-score-{execution.task_id}",
             )
-            self._active_scoring[task] = identity
+            self._active_scoring[task] = _ActiveScoringRecord(identity=identity, model=entry.model)
             active_keys.add(identity)
 
     def _collect_scoring_results(self) -> None:
         for task in tuple(self._active_scoring):
             if not task.done():
                 continue
-            self._active_scoring.pop(task, None)
+            record = self._active_scoring.pop(task)
             try:
                 result = task.result()
             except Exception as exc:
                 logger.warning("platform scoreable execution scoring failed; will retry", exc_info=exc)
                 continue
-            self._pending_results.append(result)
+            self._results_pending_submission.append(result)
+            self._scoring_models_for_results_pending_submission[_result_identity(result)] = record.model
 
-    async def _submit_pending_results(self) -> bool:
+    async def _submit_results_pending_submission(self) -> bool:
         try:
             acknowledgements = await asyncio.to_thread(
                 self._platform.submit_miner_task_work_results,
-                tuple(self._pending_results),
+                tuple(self._results_pending_submission),
             )
         except Exception as exc:
             logger.warning("platform result submission failed; will retry", exc_info=exc)
@@ -717,15 +766,18 @@ class PlatformWorkWorker:
             (ack.batch_id, ack.artifact_id, ack.task_id, ack.attempt_number)
             for ack in acknowledgements
         }
-        self._pending_results = [
+        for result in self._results_pending_submission:
+            if (result.batch_id, result.artifact_id, result.task_id, result.attempt_number) in acknowledged:
+                self._scoring_models_for_results_pending_submission.pop(_result_identity(result), None)
+        self._results_pending_submission = [
             result
-            for result in self._pending_results
+            for result in self._results_pending_submission
             if (result.batch_id, result.artifact_id, result.task_id, result.attempt_number) not in acknowledged
         ]
-        return not self._pending_results
+        return not self._results_pending_submission
 
     def _active_attempts(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
-        pending = tuple(
+        pending_submission_attempts = tuple(
             PlatformTaskAttemptIdentity(
                 batch_id=execution.batch_id,
                 artifact_id=execution.artifact_id,
@@ -742,7 +794,7 @@ class PlatformWorkWorker:
                 attempt_number=result.attempt_number,
                 validator_session_id=result.terminal_attempt.validator_session_id,
             )
-            for result in self._pending_results
+            for result in self._results_pending_submission
             if not _is_successful_task_result(result)
         )
         active = tuple(
@@ -750,22 +802,47 @@ class PlatformWorkWorker:
             for group in self._active_artifacts.values()
             for identity in group.reportable_identities()
         )
-        return active + pending
+        return active + pending_submission_attempts
 
     def _remaining_scoring_slots(self) -> int:
-        return self._scoring_limit - len(self._active_scoring_attempts())
+        if self._scoring_slot_config is None:
+            return 0
+        counts = self._scoring_counts_by_model()
+        return sum(
+            max(entry.slot_limit - counts.get(entry.model, 0), 0)
+            for entry in self._scoring_slot_config.entries
+        )
+
+    def _next_scoring_entry_with_slot(self) -> ScoringSlotConfigEntry | None:
+        if self._scoring_slot_config is None:
+            return None
+        entries = self._scoring_slot_config.entries
+        counts = self._scoring_counts_by_model()
+        for offset in range(len(entries)):
+            entry_index = (self._next_scoring_entry_index + offset) % len(entries)
+            entry = entries[entry_index]
+            if counts.get(entry.model, 0) >= entry.slot_limit:
+                continue
+            self._next_scoring_entry_index = (entry_index + 1) % len(entries)
+            return entry
+        return None
+
+    def _scoring_counts_by_model(self) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for record in self._active_scoring.values():
+            counts[record.model] += 1
+        for model in self._scoring_models_for_results_pending_submission.values():
+            counts[model] += 1
+        return dict(counts)
 
     def _active_scoring_attempts(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
-        pending_results = tuple(
-            _result_identity(result)
-            for result in self._pending_results
-            if _is_successful_task_result(result)
+        return tuple(record.identity for record in self._active_scoring.values()) + tuple(
+            self._scoring_models_for_results_pending_submission
         )
-        return tuple(self._active_scoring.values()) + pending_results
 
     def _local_inflight_count(self) -> int:
         pending_terminal_results = sum(
-            1 for result in self._pending_results if not _is_successful_task_result(result)
+            1 for result in self._results_pending_submission if not _is_successful_task_result(result)
         )
         return (
             sum(group.local_inflight_count() for group in self._active_artifacts.values())
@@ -897,4 +974,10 @@ def _is_successful_task_result(result: PlatformOwnedTaskResult) -> bool:
         and result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
     )
 
-__all__ = ["ArtifactAssignmentExecutor", "PlatformWorkWorker", "ScoringExecutor"]
+__all__ = [
+    "ArtifactAssignmentExecutor",
+    "PlatformWorkWorker",
+    "ScoringExecutor",
+    "ScoringSlotConfig",
+    "ScoringSlotConfigEntry",
+]

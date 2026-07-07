@@ -602,6 +602,10 @@ def test_local_eval_runtime_create_binds_sandbox_publish_to_loopback(
         captured.update(kwargs)
         return _FakeSandboxManager()
 
+    def resolve_scoring_judge_route(_settings: object, *, model: str) -> object:
+        assert model == local_eval._DIRECT_SCORING_LLM_MODEL
+        return SimpleNamespace(provider="chutes")
+
     monkeypatch.setattr(local_eval.Settings, "load", staticmethod(lambda: settings))
     monkeypatch.setattr(
         local_eval,
@@ -626,7 +630,7 @@ def test_local_eval_runtime_create_binds_sandbox_publish_to_loopback(
     monkeypatch.setattr(
         local_eval,
         "_resolve_scoring_judge_route",
-        lambda _settings: SimpleNamespace(provider="chutes"),
+        resolve_scoring_judge_route,
     )
     monkeypatch.setattr(local_eval, "_build_local_provider_tooling", lambda **_: (object(), _UnusedToolExecutor()))
     monkeypatch.setattr(

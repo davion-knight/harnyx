@@ -333,6 +333,21 @@ async def test_score_platform_execution_explicit_failed_result_is_response_free(
     assert result.result.run.details.scoring_judge_usage == _judge_usage()
 
 
+async def test_score_platform_execution_does_not_convert_unexpected_scoring_failure() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="Harnyx Subnet demo"),
+        reference_answer=ReferenceAnswer(text="A direct answer"),
+    )
+
+    with pytest.raises(RuntimeError, match="scoring failed"):
+        await score_platform_execution(
+            FailingScoringService(),
+            _platform_execution(task),
+            convert_scoring_error=True,
+        )
+
+
 async def test_application_use_cases_cooperate_for_single_task_run() -> None:
     session_registry = FakeSessionRegistry()
     receipt_log = FakeReceiptLog()

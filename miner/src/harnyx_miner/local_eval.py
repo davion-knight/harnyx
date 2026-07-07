@@ -79,6 +79,7 @@ from harnyx_validator.application.services.evaluation_runner import (
 from harnyx_validator.infrastructure.http.local_tool_host import LocalToolHostHandle, start_local_tool_host
 from harnyx_validator.infrastructure.state.run_progress import FileBackedRunProgress
 from harnyx_validator.runtime.bootstrap import (
+    _DIRECT_SCORING_LLM_MODEL,
     _build_local_provider_tooling,
     _build_state,
     _create_scoring_service,
@@ -361,7 +362,7 @@ class LocalEvaluationRuntime:
             vertex_settings=settings.vertex,
             build_routed_tool_llm_provider=False,
         )
-        scoring_route = _resolve_scoring_judge_route(settings)
+        scoring_route = _resolve_scoring_judge_route(settings, model=_DIRECT_SCORING_LLM_MODEL)
         scoring_llm_provider = build_routed_llm_provider(
             surface="scoring",
             default_provider=settings.llm.scoring_llm_provider,

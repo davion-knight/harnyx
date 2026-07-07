@@ -205,7 +205,6 @@ class LlmSettings(BaseSettings):
     scoring_llm_max_output_tokens: int = Field(
         default=DEFAULT_SCORING_MAX_OUTPUT_TOKENS, alias="SCORING_LLM_MAX_OUTPUT_TOKENS"
     )
-    scoring_llm_model_override: str | None = Field(default=None, alias="SCORING_LLM_MODEL_OVERRIDE")
     scoring_llm_retry_attempts: int = Field(
         default=DEFAULT_SCORING_LLM_RETRY_ATTEMPTS,
         alias="SCORING_LLM_RETRY_ATTEMPTS",
@@ -304,13 +303,6 @@ class LlmSettings(BaseSettings):
     @property
     def openrouter_api_key_value(self) -> str:
         return self.openrouter_api_key.get_secret_value().strip()
-
-    @property
-    def scoring_llm_model_override_value(self) -> str | None:
-        if self.scoring_llm_model_override is None:
-            return None
-        normalized = self.scoring_llm_model_override.strip()
-        return normalized or None
 
     @property
     def similarity_llm_model_override_value(self) -> str | None:

@@ -95,7 +95,7 @@ def test_similarity_llm_non_retry_config_uses_similarity_env_aliases() -> None:
     assert settings.similarity_llm_max_output_tokens == 4096
     assert settings.similarity_llm_model_override_value == "moonshotai/Kimi-K2.5-TEE"
     assert settings.scoring_llm_provider == "chutes"
-    assert settings.scoring_llm_model_override_value is None
+    assert not hasattr(settings, "scoring_llm_model_override_value")
 
 
 def test_build_cached_llm_provider_resolver_caches_by_provider_name(

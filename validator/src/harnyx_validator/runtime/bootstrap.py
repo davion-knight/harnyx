@@ -92,19 +92,26 @@ from harnyx_validator.infrastructure.tools.platform_client import (
     HttpPlatformClient,
 )
 from harnyx_validator.runtime.agent_artifact import create_platform_agent_resolver
-from harnyx_validator.runtime.platform_work_worker import PlatformWorkWorker
+from harnyx_validator.runtime.platform_work_worker import (
+    PlatformWorkWorker,
+    ScoringExecutor,
+    ScoringSlotConfig,
+    ScoringSlotConfigEntry,
+)
 from harnyx_validator.runtime.registration_metadata import resolve_validator_registration_metadata
 from harnyx_validator.runtime.resource_usage import ValidatorResourceUsageProvider
 from harnyx_validator.runtime.settings import Settings
 
 logger = logging.getLogger("harnyx_validator.runtime")
 
-_SCORING_LLM_MODEL = "google/gemma-4-31B-turbo-TEE"
+_DIRECT_SCORING_LLM_MODEL = "google/gemma-4-31B-turbo-TEE"
 _SCORING_LLM_REASONING_EFFORT = "high"
 _DUPLICATION_DETECTION_LLM_MODEL = "google/gemma-4-31B-turbo-TEE"
-_SCORING_JUDGE_FALLBACK_TAIL_MODELS = (
-    "moonshotai/Kimi-K2.5-TEE",
-    "zai-org/GLM-5-TEE",
+_SCORING_SLOT_CONFIG = ScoringSlotConfig(
+    entries=(
+        ScoringSlotConfigEntry(model="google/gemma-4-31B-turbo-TEE", slot_limit=10),
+        ScoringSlotConfigEntry(model="Qwen/Qwen3.6-27B-TEE", slot_limit=10),
+    )
 )
 _DUPLICATION_DETECTION_FALLBACK_MODELS = (
     "moonshotai/Kimi-K2.5-TEE",
@@ -259,7 +266,7 @@ class RuntimeLlmClients:
     tool_llm_provider: LlmProviderPort | None
     scoring_llm_provider: LlmProviderPort | None
     similarity_llm_provider: LlmProviderPort | None
-    scoring_route: ResolvedLlmRoute
+    scoring_routes: Mapping[str, ResolvedLlmRoute]
     similarity_route: ResolvedLlmRoute
 
 
@@ -296,15 +303,16 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         platform_tool_proxy_platform_client=platform_tool_proxy_platform_client,
     )
 
-    scoring_service, similarity_judge, weight_submission_service = _build_services(
+    scoring_services, similarity_judge, weight_submission_service = _build_services(
         resolved=resolved,
         scoring_llm_provider=llm_clients.scoring_llm_provider,
         similarity_llm_provider=llm_clients.similarity_llm_provider,
-        scoring_route=llm_clients.scoring_route,
+        scoring_routes=llm_clients.scoring_routes,
         similarity_route=llm_clients.similarity_route,
         subtensor_client=subtensor_client,
         platform_client=platform_client,
     )
+    scoring_service = _direct_scoring_service(scoring_services)
 
     sandbox_manager = create_sandbox_manager(logger_name="harnyx_validator.sandbox")
     _cleanup_stale_sandbox_containers(sandbox_manager)
@@ -340,7 +348,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         batch_blocking_executor=batch_blocking_executor,
         subtensor_client=subtensor_client,
         platform_client=platform_client,
-        scoring_service=scoring_service,
+        scoring_services=scoring_services,
         orchestrator_factory=orchestrator_factory,
         options_factory=options_factory,
     )
@@ -393,7 +401,7 @@ def _build_platform_work_worker(
     batch_blocking_executor: Executor,
     subtensor_client: SubtensorClientPort,
     platform_client: PlatformPort | None,
-    scoring_service: EvaluationScoringService,
+    scoring_services: Mapping[str, EvaluationScoringService],
     orchestrator_factory: Callable[[SandboxClient], TaskRunOrchestrator],
     options_factory: Callable[[], SandboxOptions],
 ) -> PlatformWorkWorker | None:
@@ -453,18 +461,35 @@ def _build_platform_work_worker(
             result_queue=result_queue,
         )
 
+    score_execution_by_model = {
+        model: _score_platform_execution_with(scoring_service)
+        for model, scoring_service in scoring_services.items()
+    }
     return PlatformWorkWorker(
         platform=platform_client,
         execute_artifact_assignments=execute_artifact_assignments,
-        score_execution=lambda execution: score_platform_execution(
-            scoring_service,
-            execution,
-            convert_scoring_error=False,
-        ),
+        score_execution_by_model=score_execution_by_model,
+        scoring_slot_config=_SCORING_SLOT_CONFIG,
         target_concurrency=config.artifact_task_parallelism,
         max_active_artifacts=config.artifact_parallelism,
-        scoring_limit=20,
     )
+
+
+def _score_platform_execution_with(scoring_service: EvaluationScoringService) -> ScoringExecutor:
+    async def score(execution: PlatformOwnedTaskExecution) -> PlatformOwnedTaskResult:
+        return await score_platform_execution(
+            scoring_service,
+            execution,
+            convert_scoring_error=True,
+        )
+
+    return score
+
+
+def _direct_scoring_service(
+    scoring_services: Mapping[str, EvaluationScoringService],
+) -> EvaluationScoringService:
+    return scoring_services[_DIRECT_SCORING_LLM_MODEL]
 
 
 def _cleanup_stale_sandbox_containers(sandbox_manager: DockerSandboxManager) -> None:
@@ -522,7 +547,10 @@ def _build_llm_clients(settings: Settings) -> RuntimeLlmClients:
         bedrock_settings=settings.bedrock,
         vertex_settings=settings.vertex,
     )
-    scoring_route = _resolve_scoring_judge_route(settings)
+    scoring_routes = {
+        entry.model: _resolve_scoring_judge_route(settings, model=entry.model)
+        for entry in _SCORING_SLOT_CONFIG.entries
+    }
     similarity_route = _resolve_similarity_judge_route(settings)
     scoring_provider = build_routed_llm_provider(
         surface="scoring",
@@ -546,29 +574,22 @@ def _build_llm_clients(settings: Settings) -> RuntimeLlmClients:
         tool_llm_provider=None,
         scoring_llm_provider=scoring_provider,
         similarity_llm_provider=similarity_provider,
-        scoring_route=scoring_route,
+        scoring_routes=scoring_routes,
         similarity_route=similarity_route,
     )
 
 
-def _resolve_scoring_judge_route(settings: Settings) -> ResolvedLlmRoute:
+def _resolve_scoring_judge_route(settings: Settings, *, model: str) -> ResolvedLlmRoute:
     if settings.llm.scoring_llm_provider == BEDROCK_PROVIDER:
         raise ValueError("SCORING_LLM_PROVIDER='bedrock' is not supported")
     return resolve_llm_route(
         surface="scoring",
         default_provider=settings.llm.scoring_llm_provider,
-        model=_effective_scoring_llm_model(settings),
+        model=model,
         overrides=settings.llm.llm_model_provider_overrides,
         allowed_providers={"bedrock", "chutes", "vertex"},
         allow_custom_openai_compatible=True,
     )
-
-
-def _effective_scoring_llm_model(settings: Settings) -> str:
-    override = settings.llm.scoring_llm_model_override_value
-    if override is not None:
-        return override
-    return _SCORING_LLM_MODEL
 
 
 def _resolve_similarity_judge_route(settings: Settings) -> ResolvedLlmRoute:
@@ -587,14 +608,6 @@ def _effective_similarity_llm_model(settings: Settings) -> str:
     if override is not None:
         return override
     return _DUPLICATION_DETECTION_LLM_MODEL
-
-
-def _scoring_judge_fallback_models(settings: Settings) -> tuple[str, ...]:
-    return _fallback_tail_after_primary(
-        primary_model=_effective_scoring_llm_model(settings),
-        ordered_models=(_SCORING_LLM_MODEL, *_SCORING_JUDGE_FALLBACK_TAIL_MODELS),
-        fallback_tail=_SCORING_JUDGE_FALLBACK_TAIL_MODELS,
-    )
 
 
 def _similarity_judge_fallback_models(settings: Settings) -> tuple[str, ...]:
@@ -683,16 +696,19 @@ def _build_services(
     resolved: Settings,
     scoring_llm_provider: LlmProviderPort | None,
     similarity_llm_provider: LlmProviderPort | None,
-    scoring_route: ResolvedLlmRoute,
+    scoring_routes: Mapping[str, ResolvedLlmRoute],
     similarity_route: ResolvedLlmRoute,
     subtensor_client: SubtensorClientPort,
     platform_client: PlatformPort,
-) -> tuple[EvaluationScoringService, SimilarityJudge, WeightSubmissionService]:
-    scoring_service = _create_scoring_service(
-        resolved,
-        scoring_llm_provider,
-        scoring_route=scoring_route,
-    )
+) -> tuple[dict[str, EvaluationScoringService], SimilarityJudge, WeightSubmissionService]:
+    scoring_services = {
+        model: _create_scoring_service(
+            resolved,
+            scoring_llm_provider,
+            scoring_route=scoring_route,
+        )
+        for model, scoring_route in scoring_routes.items()
+    }
     similarity_judge = _create_similarity_judge(
         resolved,
         similarity_llm_provider,
@@ -703,7 +719,7 @@ def _build_services(
         subtensor_client=subtensor_client,
         platform_client=platform_client,
     )
-    return scoring_service, similarity_judge, weight_submission_service
+    return scoring_services, similarity_judge, weight_submission_service
 
 
 def _build_factories(
@@ -1077,7 +1093,7 @@ def _create_scoring_service(
     config = EvaluationScoringConfig(
         provider=settings.llm.scoring_llm_provider,
         model=scoring_route.model,
-        fallback_models=_scoring_judge_fallback_models(settings),
+        fallback_models=(),
         temperature=settings.llm.scoring_llm_temperature,
         max_output_tokens=settings.llm.scoring_llm_max_output_tokens,
         reasoning_effort=_SCORING_LLM_REASONING_EFFORT,

@@ -509,7 +509,7 @@ async def score_platform_execution(
                 outcome="error",
                 error_code=error_code,
             )
-            if not convert_scoring_error:
+            if not convert_scoring_error or not isinstance(exc, LlmRetryExhaustedError):
                 raise
             return _platform_execution_result(
                 execution,

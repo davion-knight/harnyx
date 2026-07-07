@@ -177,11 +177,10 @@ def test_build_llm_clients_uses_shared_provider_registry(monkeypatch: pytest.Mon
     assert _routed_surface(clients.scoring_llm_provider) == "scoring"
     assert _routed_surface(clients.similarity_llm_provider) == "duplication_detection"
     assert type(clients.llm_provider_registry).__name__ == "_FakeRegistry"
-    assert clients.scoring_route == ResolvedLlmRoute(
-        surface="scoring",
-        provider="vertex",
-        model=bootstrap._SCORING_LLM_MODEL,
-    )
+    assert clients.scoring_routes == {
+        entry.model: ResolvedLlmRoute(surface="scoring", provider="vertex", model=entry.model)
+        for entry in bootstrap._SCORING_SLOT_CONFIG.entries
+    }
     assert clients.similarity_route == ResolvedLlmRoute(
         surface="duplication_detection",
         provider="chutes",
@@ -220,9 +219,13 @@ def test_validator_runtime_llm_clients_do_not_build_local_tool_invocation_client
     assert clients.tool_llm_provider is None
 
 
-def test_build_llm_clients_uses_scoring_model_override_for_route_resolution(
+def test_build_llm_clients_resolves_route_for_each_scoring_slot_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    scoring_routes = {
+        "google/gemma-4-31B-turbo-TEE": "custom-openai-compatible:gemma4-cloud-run-turbo",
+        "Qwen/Qwen3.6-27B-TEE": "custom-openai-compatible:qwen36-cloud-run",
+    }
     settings = Settings.model_construct(
         llm=LlmSettings.model_construct(
             search_provider="parallel",
@@ -231,8 +234,21 @@ def test_build_llm_clients_uses_scoring_model_override_for_route_resolution(
             parallel_max_concurrent=7,
             tool_llm_provider="chutes",
             scoring_llm_provider="vertex",
-            scoring_llm_model_override="custom/internal-model",
-            llm_model_provider_overrides_json=json.dumps({"scoring": {"custom/internal-model": "bedrock"}}),
+            llm_model_provider_overrides_json=json.dumps({"scoring": scoring_routes}),
+            openai_compatible_endpoints_json=json.dumps(
+                [
+                    {
+                        "id": "gemma4-cloud-run-turbo",
+                        "base_url": "https://gemma-4-31b-turbo-obbrpx3ppa-uc.a.run.app/v1",
+                        "auth": {"type": "none"},
+                    },
+                    {
+                        "id": "qwen36-cloud-run",
+                        "base_url": "https://qwen3-6-27b-obbrpx3ppa-uc.a.run.app/v1",
+                        "auth": {"type": "none"},
+                    },
+                ]
+            ),
         ),
         vertex=VertexSettings.model_construct(
             gcp_project_id="project",
@@ -252,11 +268,10 @@ def test_build_llm_clients_uses_scoring_model_override_for_route_resolution(
     clients = _build_llm_clients(settings)
 
     assert _routed_surface(clients.scoring_llm_provider) == "scoring"
-    assert clients.scoring_route == ResolvedLlmRoute(
-        surface="scoring",
-        provider="bedrock",
-        model="custom/internal-model",
-    )
+    assert clients.scoring_routes == {
+        model: ResolvedLlmRoute(surface="scoring", provider=provider, model=model)
+        for model, provider in scoring_routes.items()
+    }
 
 
 def test_build_state_uses_single_tool_concurrency_cap(tmp_path: Path) -> None:
@@ -594,12 +609,20 @@ def test_build_runtime_cleans_stale_sandbox_containers_on_startup(
             tool_llm_provider=None,
             scoring_llm_provider=None,
             similarity_llm_provider=None,
-            scoring_route=object(),
+            scoring_routes=object(),
             similarity_route=object(),
         ),
     )
     monkeypatch.setattr(bootstrap, "_build_proxy_tooling", lambda **_kwargs: (object(), object()))
-    monkeypatch.setattr(bootstrap, "_build_services", lambda **_kwargs: (object(), object(), object()))
+    monkeypatch.setattr(
+        bootstrap,
+        "_build_services",
+        lambda **_kwargs: (
+            {entry.model: object() for entry in bootstrap._SCORING_SLOT_CONFIG.entries},
+            object(),
+            object(),
+        ),
+    )
     monkeypatch.setattr(
         bootstrap,
         "_build_factories",
@@ -677,17 +700,14 @@ def test_create_scoring_service_does_not_require_vertex_config_at_bootstrap() ->
         scoring_route=ResolvedLlmRoute(
             surface="scoring",
             provider="chutes",
-            model=bootstrap._SCORING_LLM_MODEL,
+            model=bootstrap._DIRECT_SCORING_LLM_MODEL,
         ),
     )
 
     assert service is not None
     assert service._config.provider == "chutes"
-    assert service._config.model == bootstrap._SCORING_LLM_MODEL
-    assert service._config.fallback_models == (
-        "moonshotai/Kimi-K2.5-TEE",
-        "zai-org/GLM-5-TEE",
-    )
+    assert service._config.model == bootstrap._DIRECT_SCORING_LLM_MODEL
+    assert service._config.fallback_models == ()
     assert service._config.reasoning_effort == bootstrap._SCORING_LLM_REASONING_EFFORT
     assert service._config.retry_policy == settings.llm.scoring_llm_retry_policy
 
@@ -748,130 +768,68 @@ def test_create_scoring_service_uses_effective_route_model_and_default_provider(
 
     assert service._config.provider == "vertex"
     assert service._config.model == "custom/internal-model"
-    assert service._config.fallback_models == (
-        "moonshotai/Kimi-K2.5-TEE",
-        "zai-org/GLM-5-TEE",
-    )
+    assert service._config.fallback_models == ()
     assert service._config.retry_policy == settings.llm.scoring_llm_retry_policy
 
 
-def test_create_scoring_service_uses_full_tail_after_internal_model_override() -> None:
-    settings = Settings.model_construct(
-        llm=LlmSettings.model_construct(
-            scoring_llm_provider="vertex",
-            scoring_llm_model_override="custom/internal-model",
-            scoring_llm_temperature=None,
-            scoring_llm_max_output_tokens=20480,
-            scoring_llm_timeout_seconds=30.0,
+def test_scoring_slot_config_entries_are_hard_coded() -> None:
+    assert tuple(bootstrap._SCORING_SLOT_CONFIG.entries) == (
+        bootstrap.ScoringSlotConfigEntry(
+            model="google/gemma-4-31B-turbo-TEE",
+            slot_limit=10,
+        ),
+        bootstrap.ScoringSlotConfigEntry(
+            model="Qwen/Qwen3.6-27B-TEE",
+            slot_limit=10,
         ),
     )
 
-    service = _create_scoring_service(
-        settings,
-        provider=SimpleNamespace(),
-        scoring_route=ResolvedLlmRoute(
-            surface="scoring",
-            provider="bedrock",
-            model="custom/internal-model",
-        ),
+
+def test_direct_scoring_service_uses_explicit_direct_model() -> None:
+    direct_service = object()
+    other_service = object()
+
+    selected = bootstrap._direct_scoring_service(
+        {
+            "Qwen/Qwen3.6-27B-TEE": other_service,
+            bootstrap._DIRECT_SCORING_LLM_MODEL: direct_service,
+        }
     )
 
-    assert service._config.provider == "vertex"
-    assert service._config.model == "custom/internal-model"
-    assert service._config.fallback_models == (
-        "moonshotai/Kimi-K2.5-TEE",
-        "zai-org/GLM-5-TEE",
-    )
-    assert service._config.retry_policy == settings.llm.scoring_llm_retry_policy
+    assert selected is direct_service
 
 
-def test_create_scoring_service_uses_tail_after_in_chain_model_override() -> None:
-    settings = Settings.model_construct(
-        llm=LlmSettings.model_construct(
-            scoring_llm_provider="vertex",
-            scoring_llm_model_override="moonshotai/Kimi-K2.5-TEE",
-            scoring_llm_temperature=None,
-            scoring_llm_max_output_tokens=20480,
-            scoring_llm_timeout_seconds=30.0,
-        ),
-    )
+@pytest.mark.anyio("asyncio")
+async def test_score_platform_execution_executor_converts_scoring_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scoring_service = object()
+    execution = object()
+    expected = object()
+    observed: dict[str, object] = {}
 
-    service = _create_scoring_service(
-        settings,
-        provider=SimpleNamespace(),
-        scoring_route=ResolvedLlmRoute(
-            surface="scoring",
-            provider="bedrock",
-            model="moonshotai/Kimi-K2.5-TEE",
-        ),
-    )
+    async def fake_score_platform_execution(
+        service: object,
+        scoreable_execution: object,
+        *,
+        convert_scoring_error: bool,
+    ) -> object:
+        observed["service"] = service
+        observed["execution"] = scoreable_execution
+        observed["convert_scoring_error"] = convert_scoring_error
+        return expected
 
-    assert service._config.provider == "vertex"
-    assert service._config.model == "moonshotai/Kimi-K2.5-TEE"
-    assert service._config.fallback_models == ("zai-org/GLM-5-TEE",)
-    assert service._config.retry_policy == settings.llm.scoring_llm_retry_policy
+    monkeypatch.setattr(bootstrap, "score_platform_execution", fake_score_platform_execution)
 
+    executor = bootstrap._score_platform_execution_with(scoring_service)  # type: ignore[arg-type]
+    result = await executor(execution)  # type: ignore[arg-type]
 
-def test_scoring_fallback_tail_only_uses_candidates_after_primary() -> None:
-    assert bootstrap._fallback_tail_after_primary(
-        primary_model=bootstrap._SCORING_LLM_MODEL,
-        ordered_models=(
-            bootstrap._SCORING_LLM_MODEL,
-            "moonshotai/Kimi-K2.5-TEE",
-            "zai-org/GLM-5-TEE",
-        ),
-        fallback_tail=(
-            "moonshotai/Kimi-K2.5-TEE",
-            "zai-org/GLM-5-TEE",
-        ),
-    ) == (
-        "moonshotai/Kimi-K2.5-TEE",
-        "zai-org/GLM-5-TEE",
-    )
-    assert bootstrap._fallback_tail_after_primary(
-        primary_model="moonshotai/Kimi-K2.5-TEE",
-        ordered_models=(
-            bootstrap._SCORING_LLM_MODEL,
-            "moonshotai/Kimi-K2.5-TEE",
-            "zai-org/GLM-5-TEE",
-        ),
-        fallback_tail=(
-            "moonshotai/Kimi-K2.5-TEE",
-            "zai-org/GLM-5-TEE",
-        ),
-    ) == (
-        "zai-org/GLM-5-TEE",
-    )
-    assert (
-        bootstrap._fallback_tail_after_primary(
-            primary_model="zai-org/GLM-5-TEE",
-            ordered_models=(
-                bootstrap._SCORING_LLM_MODEL,
-                "moonshotai/Kimi-K2.5-TEE",
-                "zai-org/GLM-5-TEE",
-            ),
-            fallback_tail=(
-                "moonshotai/Kimi-K2.5-TEE",
-                "zai-org/GLM-5-TEE",
-            ),
-        )
-        == ()
-    )
-    assert bootstrap._fallback_tail_after_primary(
-        primary_model="custom/internal-model",
-        ordered_models=(
-            bootstrap._SCORING_LLM_MODEL,
-            "moonshotai/Kimi-K2.5-TEE",
-            "zai-org/GLM-5-TEE",
-        ),
-        fallback_tail=(
-            "moonshotai/Kimi-K2.5-TEE",
-            "zai-org/GLM-5-TEE",
-        ),
-    ) == (
-        "moonshotai/Kimi-K2.5-TEE",
-        "zai-org/GLM-5-TEE",
-    )
+    assert result is expected
+    assert observed == {
+        "service": scoring_service,
+        "execution": execution,
+        "convert_scoring_error": True,
+    }
 
 
 def test_create_similarity_judge_uses_similarity_llm_config() -> None:
@@ -945,9 +903,13 @@ def test_similarity_model_override_participates_in_duplication_detection_route_o
     )
 
 
-def test_build_llm_clients_routes_primary_scoring_gemma_to_custom_endpoint(
+def test_build_llm_clients_routes_configured_scoring_entries_to_custom_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    scoring_routes = {
+        "google/gemma-4-31B-turbo-TEE": "custom-openai-compatible:gemma4-cloud-run-turbo",
+        "Qwen/Qwen3.6-27B-TEE": "custom-openai-compatible:qwen36-cloud-run",
+    }
     settings = Settings.model_construct(
         llm=LlmSettings.model_construct(
             search_provider="parallel",
@@ -957,13 +919,18 @@ def test_build_llm_clients_routes_primary_scoring_gemma_to_custom_endpoint(
             tool_llm_provider="chutes",
             scoring_llm_provider="vertex",
             llm_model_provider_overrides_json=json.dumps(
-                {"scoring": {bootstrap._SCORING_LLM_MODEL: "custom-openai-compatible:gemma4-cloud-run-turbo"}}
+                {"scoring": scoring_routes}
             ),
             openai_compatible_endpoints_json=json.dumps(
                 [
                     {
                         "id": "gemma4-cloud-run-turbo",
                         "base_url": "https://gemma-4-31b-turbo-obbrpx3ppa-uc.a.run.app/v1",
+                        "auth": {"type": "none"},
+                    },
+                    {
+                        "id": "qwen36-cloud-run",
+                        "base_url": "https://qwen3-6-27b-obbrpx3ppa-uc.a.run.app/v1",
                         "auth": {"type": "none"},
                     }
                 ]
@@ -987,11 +954,10 @@ def test_build_llm_clients_routes_primary_scoring_gemma_to_custom_endpoint(
     clients = _build_llm_clients(settings)
 
     assert _routed_surface(clients.scoring_llm_provider) == "scoring"
-    assert clients.scoring_route == ResolvedLlmRoute(
-        surface="scoring",
-        provider="custom-openai-compatible:gemma4-cloud-run-turbo",
-        model=bootstrap._SCORING_LLM_MODEL,
-    )
+    assert clients.scoring_routes == {
+        model: ResolvedLlmRoute(surface="scoring", provider=provider, model=model)
+        for model, provider in scoring_routes.items()
+    }
 
 
 class _Closable:

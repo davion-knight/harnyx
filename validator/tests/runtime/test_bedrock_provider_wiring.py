@@ -8,7 +8,7 @@ from pydantic import SecretStr
 from harnyx_commons.config.bedrock import BedrockSettings
 from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.config.vertex import VertexSettings
-from harnyx_commons.llm.routing import RoutedLlmProvider
+from harnyx_commons.llm.routing import ResolvedLlmRoute, RoutedLlmProvider
 from harnyx_commons.llm.schema import (
     AbstractLlmRequest,
     LlmChoice,
@@ -176,17 +176,17 @@ def test_local_tool_invocation_clients_still_reject_tool_override_to_bedrock() -
 
 
 @pytest.mark.anyio("asyncio")
-@pytest.mark.parametrize("fallback_model", ("moonshotai/Kimi-K2.5-TEE", "zai-org/GLM-5-TEE"))
-async def test_validator_runtime_routes_scoring_fallbacks_to_bedrock(
+@pytest.mark.parametrize("explicit_model", ("moonshotai/Kimi-K2.5-TEE", "zai-org/GLM-5-TEE"))
+async def test_validator_runtime_routes_explicit_scoring_request_to_bedrock(
     monkeypatch: pytest.MonkeyPatch,
-    fallback_model: str,
+    explicit_model: str,
 ) -> None:
     settings = _settings()
     settings = settings.model_copy(
         update={
             "llm": settings.llm.model_copy(
                 update={
-                    "llm_model_provider_overrides_json": json.dumps({"scoring": {fallback_model: "bedrock"}}),
+                    "llm_model_provider_overrides_json": json.dumps({"scoring": {explicit_model: "bedrock"}}),
                 }
             )
         }
@@ -198,7 +198,7 @@ async def test_validator_runtime_routes_scoring_fallbacks_to_bedrock(
     response = await clients.scoring_llm_provider.invoke(
         LlmRequest(
             provider=settings.llm.scoring_llm_provider,
-            model=fallback_model,
+            model=explicit_model,
             messages=(),
             temperature=None,
             max_output_tokens=128,
@@ -207,34 +207,35 @@ async def test_validator_runtime_routes_scoring_fallbacks_to_bedrock(
 
     assert _routed_surface(clients.scoring_llm_provider) == "scoring"
     assert registry.provider.requests[0].provider == "bedrock"
-    assert registry.provider.requests[0].model == fallback_model
+    assert registry.provider.requests[0].model == explicit_model
     assert response.metadata is not None
     assert response.metadata["selected_provider"] == "bedrock"
-    assert response.metadata["selected_model"] == fallback_model
+    assert response.metadata["selected_model"] == explicit_model
 
 
-def test_validator_runtime_routes_primary_scoring_gemma_to_custom_endpoint(
+def test_validator_runtime_routes_configured_scoring_entries_to_custom_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    scoring_routes = {
+        "google/gemma-4-31B-turbo-TEE": "custom-openai-compatible:gemma4-cloud-run-turbo",
+        "Qwen/Qwen3.6-27B-TEE": "custom-openai-compatible:qwen36-cloud-run",
+    }
     settings = _settings()
     settings = settings.model_copy(
         update={
             "llm": settings.llm.model_copy(
                 update={
-                    "llm_model_provider_overrides_json": json.dumps(
-                        {
-                            "scoring": {
-                                bootstrap._SCORING_LLM_MODEL: (
-                                    "custom-openai-compatible:gemma4-cloud-run-turbo"
-                                )
-                            }
-                        }
-                    ),
+                    "llm_model_provider_overrides_json": json.dumps({"scoring": scoring_routes}),
                     "openai_compatible_endpoints_json": json.dumps(
                         [
                             {
                                 "id": "gemma4-cloud-run-turbo",
                                 "base_url": "https://gemma-4-31b-turbo-obbrpx3ppa-uc.a.run.app/v1",
+                                "auth": {"type": "none"},
+                            },
+                            {
+                                "id": "qwen36-cloud-run",
+                                "base_url": "https://qwen3-6-27b-obbrpx3ppa-uc.a.run.app/v1",
                                 "auth": {"type": "none"},
                             }
                         ]
@@ -249,8 +250,10 @@ def test_validator_runtime_routes_primary_scoring_gemma_to_custom_endpoint(
     clients = _build_llm_clients(settings)
 
     assert _routed_surface(clients.scoring_llm_provider) == "scoring"
-    assert clients.scoring_route.provider == "custom-openai-compatible:gemma4-cloud-run-turbo"
-    assert clients.scoring_route.model == bootstrap._SCORING_LLM_MODEL
+    assert clients.scoring_routes == {
+        model: ResolvedLlmRoute(surface="scoring", provider=provider, model=model)
+        for model, provider in scoring_routes.items()
+    }
 
 
 @pytest.mark.anyio("asyncio")
@@ -332,5 +335,5 @@ def test_validator_runtime_routes_similarity_default_provider_independently_from
 
     assert _routed_surface(clients.scoring_llm_provider) == "scoring"
     assert _routed_surface(clients.similarity_llm_provider) == "duplication_detection"
-    assert clients.scoring_route.provider == "vertex"
+    assert {route.provider for route in clients.scoring_routes.values()} == {"vertex"}
     assert clients.similarity_route.provider == "chutes"

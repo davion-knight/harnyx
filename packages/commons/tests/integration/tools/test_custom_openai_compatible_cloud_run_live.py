@@ -152,6 +152,24 @@ async def test_qwen36_cloud_run_custom_openai_compatible_live() -> None:
 
 @pytest.mark.expensive
 @pytest.mark.anyio("asyncio")
+async def test_qwen36_cloud_run_custom_openai_compatible_scoring_route_live() -> None:
+    response = await _invoke_live_tool_model(
+        model=_QWEN36_MODEL,
+        endpoint_id=_QWEN36_ENDPOINT_ID,
+        route_target=_QWEN36_ROUTE_TARGET,
+        prompt='Reply with only "ok".',
+        max_output_tokens=32,
+        surface="scoring",
+    )
+
+    assert response.raw_text
+    assert response.metadata is not None
+    assert response.metadata["effective_provider"] == _QWEN36_ROUTE_TARGET
+    assert response.metadata["effective_model"] == _QWEN36_MODEL
+
+
+@pytest.mark.expensive
+@pytest.mark.anyio("asyncio")
 async def test_gemma_cloud_run_json_object_live() -> None:
     response = await _invoke_live_gemma(
         LlmRequest(
@@ -252,6 +270,7 @@ def test_qwen36_live_settings_use_test_endpoint_and_route() -> None:
     assert auth.credential_source == "service_account_json_b64_env"
     assert auth.credential_env == "GCP_SERVICE_ACCOUNT_CREDENTIAL_BASE64"
     assert settings.llm_model_provider_overrides["tool"][_QWEN36_MODEL] == _QWEN36_ROUTE_TARGET
+    assert settings.llm_model_provider_overrides["scoring"][_QWEN36_MODEL] == _QWEN36_ROUTE_TARGET
 
 
 def test_qwen36_live_settings_requires_service_account_credentials() -> None:
@@ -349,6 +368,7 @@ async def _invoke_live_tool_model(
     route_target: str,
     prompt: str,
     max_output_tokens: int,
+    surface: Literal["tool", "scoring", "duplication_detection"] = "tool",
 ) -> LlmResponse:
     request = LlmRequest(
         provider="chutes",
@@ -371,7 +391,7 @@ async def _invoke_live_tool_model(
         required_route=route_target,
         service_url=_QWEN36_SERVICE_URL,
     )
-    return await _invoke_live_request(settings=settings, request=request)
+    return await _invoke_live_request(settings=settings, request=request, surface=surface)
 
 
 async def _invoke_live_gemma(
