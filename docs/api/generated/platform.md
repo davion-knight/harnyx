@@ -283,6 +283,7 @@ Body: [CreateBatchRequest](#model-createbatchrequest)
 |  |  | `query` | req | [Query](#model-query) |
 |  |  | `reference_answer` | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `task_id` | req | `string` (format: uuid) |
+| `use_previous_task_dataset` |  |  | opt | `boolean` (default: False) |
 
 **Responses**
 `202` Successful Response
@@ -1398,6 +1399,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `query` | req | [Query](#model-query) |
 |  |  | `reference_answer` | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `task_id` | req | `string` (format: uuid) |
+| `use_previous_task_dataset` |  |  | opt | `boolean` (default: False) |
 
 <details>
 <summary>JSON schema</summary>
@@ -1427,6 +1429,11 @@ Body: [WeightsResponse](#model-weightsresponse)
           "type": "null"
         }
       ]
+    },
+    "use_previous_task_dataset": {
+      "default": false,
+      "title": "Use Previous Task Dataset",
+      "type": "boolean"
     }
   },
   "title": "CreateBatchRequest",
