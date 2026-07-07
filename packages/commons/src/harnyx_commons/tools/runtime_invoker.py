@@ -67,6 +67,7 @@ from harnyx_commons.tools.search_models import (
 )
 from harnyx_commons.tools.types import TOOL_NAMES, SearchToolName, ToolInvocationTimeout, ToolName, is_search_tool
 from harnyx_commons.tools.usage_tracker import ToolCallUsage  # noqa: F401 - compatibility
+from harnyx_miner_sdk.tools.llm_provider_extra import OpenRouterExtra, validate_provider_extra
 
 MINER_SANDBOX_TOOL_NAMES: tuple[ToolName, ...] = tuple(sorted(TOOL_NAMES))
 DEFAULT_TOOL_LLM_TIMEOUT_SECONDS = PLATFORM_TOOL_PROXY_LLM_CHAT_DEFAULT_TIMEOUT_SECONDS
@@ -158,8 +159,26 @@ class LlmToolInvocation(BaseModel):
     tool_choice: Literal["auto", "required"] | None = None
     include: tuple[str, ...] | None = None
     thinking: LlmThinkingConfigPayload | None = None
+    provider_extra: OpenRouterExtra | None = None
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_provider_extra(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        data = cast(Mapping[str, object], value)
+        if "provider_extra" not in data:
+            return value
+        provider = data.get("provider")
+        if not isinstance(provider, str):
+            return value
+
+        parsed = validate_provider_extra(provider=provider, provider_extra=data.get("provider_extra"))
+        normalized = dict(data)
+        normalized["provider_extra"] = parsed
+        return normalized
 
 
 def build_miner_sandbox_tool_invoker(
@@ -578,6 +597,7 @@ class RuntimeToolInvoker(ToolInvoker):
         tools: tuple[LlmTool, ...] | None,
         max_output_tokens: int | None,
     ) -> LlmRequest:
+        request_extra = invocation.provider_extra.to_request_extra() if invocation.provider_extra is not None else None
         return LlmRequest(
             provider=invocation.provider,
             model=invocation.model,
@@ -593,6 +613,7 @@ class RuntimeToolInvoker(ToolInvoker):
                 effective_timeout=invocation.timeout,
             ),
             thinking=invocation.thinking.to_schema() if invocation.thinking is not None else None,
+            extra=request_extra,
             use_case="tool_runtime_invoker",
         )
 

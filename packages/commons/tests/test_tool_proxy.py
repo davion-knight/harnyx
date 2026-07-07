@@ -729,6 +729,78 @@ async def test_llm_chat_helper_invokes_tool_proxy_with_timeout() -> None:
     assert payload["kwargs"]["timeout"] == 5.0
 
 
+async def test_llm_chat_helper_forwards_openrouter_provider_extra() -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json=_tool_response_payload(
+                receipt_id="chat-openrouter-extra",
+                response={
+                    "id": "resp-openrouter-extra",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "hi"}],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+            ),
+        )
+
+    proxy = ToolProxy(
+        base_url="http://validator",
+        token=TEST_TOKEN,
+        session_id=SESSION_ID,
+        client=httpx.AsyncClient(base_url="http://validator", transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with bind_tool_invoker(proxy):
+            result = await llm_chat(
+                provider="openrouter",
+                messages=[{"role": "user", "content": "hi"}],
+                model="openai/gpt-oss-120b",
+                provider_extra={"provider": {"only": ["cerebras"]}},
+            )
+    finally:
+        await proxy.aclose()
+
+    assert result.receipt_id == "chat-openrouter-extra"
+    payload = captured["payload"]
+    assert payload["tool"] == "llm_chat"
+    assert payload["kwargs"]["provider"] == "openrouter"
+    assert payload["kwargs"]["provider_extra"] == {"provider": {"only": ["cerebras"]}}
+
+
+async def test_llm_chat_helper_rejects_chutes_provider_extra_before_proxy_call() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("llm_chat should reject chutes provider_extra before invoking the tool proxy")
+
+    proxy = ToolProxy(
+        base_url="http://validator",
+        token=TEST_TOKEN,
+        session_id=SESSION_ID,
+        client=httpx.AsyncClient(base_url="http://validator", transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with bind_tool_invoker(proxy):
+            with pytest.raises(ValidationError):
+                await llm_chat(
+                    provider="chutes",
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="demo-model",
+                    provider_extra={"provider": {"only": ["cerebras"]}},
+                )
+    finally:
+        await proxy.aclose()
+
+
 async def test_llm_chat_helper_rejects_thinking_effort_and_budget() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("llm_chat should reject invalid thinking before invoking the tool proxy")

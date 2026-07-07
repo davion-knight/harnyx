@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar, cast, overload
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validator, model_validator
 
@@ -14,6 +14,7 @@ from harnyx_miner_sdk.tools.http_models import (
     ToolResultDTO,
     ToolUsageDTO,
 )
+from harnyx_miner_sdk.tools.llm_provider_extra import OpenRouterExtra, validate_provider_extra
 from harnyx_miner_sdk.tools.search_models import (
     FetchPageRequest,
     FetchPageResponse,
@@ -109,6 +110,25 @@ class _LlmChatInvocationPayload(BaseModel):
     tool_choice: Literal["auto", "required"] | None = None
     include: list[str] | None = None
     thinking: _LlmChatThinkingPayload | None = None
+    provider_extra: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_provider_extra(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        data = cast(Mapping[str, object], value)
+        if "provider_extra" not in data:
+            return value
+        provider = data.get("provider")
+        if not isinstance(provider, str):
+            return value
+
+        parsed = validate_provider_extra(provider=provider, provider_extra=data.get("provider_extra"))
+        normalized = dict(data)
+        normalized["provider_extra"] = parsed.to_request_extra() if parsed is not None else None
+        return normalized
+
 
 def _parse_execute_response(raw_response: object) -> ToolExecuteResponseDTO:
     return ToolExecuteResponseDTO.model_validate(raw_response)
@@ -259,12 +279,39 @@ async def fetch_page(
     )
 
 
+@overload
+async def llm_chat(
+    *,
+    provider: Literal["openrouter"],
+    messages: Sequence[Mapping[str, Any]],
+    model: str,
+    thinking: Mapping[str, Any] | LlmThinkingConfig | None = None,
+    provider_extra: Mapping[str, Any] | OpenRouterExtra | None = None,
+    timeout: float | None = None,
+    **params: Any,
+) -> LlmChatResult: ...
+
+
+@overload
+async def llm_chat(
+    *,
+    provider: Literal["chutes"],
+    messages: Sequence[Mapping[str, Any]],
+    model: str,
+    thinking: Mapping[str, Any] | LlmThinkingConfig | None = None,
+    provider_extra: None = None,
+    timeout: float | None = None,
+    **params: Any,
+) -> LlmChatResult: ...
+
+
 async def llm_chat(
     *,
     provider: Literal["chutes", "openrouter"],
     messages: Sequence[Mapping[str, Any]],
     model: str,
     thinking: Mapping[str, Any] | LlmThinkingConfig | None = None,
+    provider_extra: Mapping[str, Any] | OpenRouterExtra | None = None,
     timeout: float | None = None,
     **params: Any,
 ) -> LlmChatResult:
@@ -273,6 +320,10 @@ async def llm_chat(
     payload_raw = {"provider": provider, "model": model, "messages": [dict(message) for message in messages]}
     if thinking is not None:
         payload_raw["thinking"] = asdict(thinking) if isinstance(thinking, LlmThinkingConfig) else thinking
+    if provider_extra is not None:
+        payload_raw["provider_extra"] = (
+            provider_extra.to_request_extra() if isinstance(provider_extra, OpenRouterExtra) else provider_extra
+        )
     if timeout is not None:
         payload_raw["timeout"] = timeout
     if params:

@@ -282,6 +282,51 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
 
 
 @pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
+async def test_openrouter_provider_serializes_request_provider_only_extra(model: str) -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        body = "\n\n".join(
+            (
+                'data: {"id":"resp-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+                (
+                    'data: {"id":"resp-1","choices":[{"index":0,"delta":{},'
+                    '"finish_reason":"stop"}],'
+                    '"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.0042}}'
+                ),
+                "data: [DONE]",
+                "",
+            )
+        )
+        return httpx.Response(200, text=body, request=request, headers={"content-type": "text/event-stream"})
+
+    client = httpx.AsyncClient(
+        base_url=OPENROUTER_BASE_URL,
+        headers={"Authorization": "Bearer test-openrouter-key"},
+        transport=httpx.MockTransport(handler),
+    )
+    endpoint = OpenAiCompatibleEndpointConfig.model_validate(
+        {
+            "id": OPENROUTER_ENDPOINT_ID,
+            "base_url": OPENROUTER_BASE_URL,
+            "auth": {"type": "none"},
+        }
+    )
+    openai_provider = OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client)
+    provider = OpenRouterLlmProvider(
+        openrouter_api_key=SecretStr("test-openrouter-key"),
+        model_provider_options={},
+        openrouter_chat_provider_factory=lambda _: (openai_provider, client),
+    )
+
+    await provider.invoke(_request(model=model, extra={"provider": {"only": ["cerebras"]}}))
+    await provider.aclose()
+
+    assert captured["json"]["provider"] == {"only": ["cerebras"]}
+
+
+@pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
 @pytest.mark.parametrize(
     ("thinking", "expected_reasoning"),
     (

@@ -138,13 +138,26 @@ These helpers call validator-hosted tools when running inside the sandbox:
 - `search_web(query, provider="parallel" | "desearch", timeout=..., **kwargs)`
 - `search_ai(query, provider="parallel" | "desearch", timeout=..., **kwargs)`
 - `fetch_page(url, provider="parallel" | "desearch", timeout=...)`
-- `llm_chat(provider="chutes" | "openrouter", messages=[...], model="<provider-specific model id>", timeout=..., temperature=0.0, thinking={"enabled": True})`
+- `llm_chat(provider="chutes" | "openrouter", messages=[...], model="<provider-specific model id>", timeout=..., temperature=0.0, thinking={"enabled": True}, provider_extra=...)`
 - `tooling_info(timeout=...)`
 - `test_tool(message, timeout=...)`
 
 Every hosted tool helper accepts an optional positive finite `timeout` in seconds. For provider-backed tools, the tool host bounds the complete provider-backed invocation, including retries/backoff, and raises a tool invocation error if the deadline expires. `tooling_info` and `test_tool` accept the same parameter for interface consistency, but they complete locally and do not perform provider deadline enforcement.
 
 `llm_chat` model ids are provider-specific. Use `tooling_info().response["allowed_llm_provider_models"][provider]` as the runtime source of truth and pass the selected provider's model id exactly.
+
+`provider_extra` is strict and selected by `provider`. Use it only for selected-provider-specific request additions that are not already common `llm_chat` parameters. Today it supports only OpenRouter provider selection:
+
+```python
+await llm_chat(
+    provider="openrouter",
+    model="openai/gpt-oss-120b",
+    messages=[{"role": "user", "content": "Reply with only ok."}],
+    provider_extra={"provider": {"only": ["cerebras"]}},
+)
+```
+
+Do not put common behavior in `provider_extra`. For example, reasoning controls belong in `thinking` even when a provider's raw API spells them differently. Chutes raw reasoning options are handled by `thinking`, not `provider_extra`. Other OpenRouter provider-preference fields such as `order`, `allow_fallbacks`, `require_parameters`, `ignore`, `quantizations`, `sort`, and `max_price` are not supported here.
 
 `llm_chat` accepts a typed `thinking` option:
 

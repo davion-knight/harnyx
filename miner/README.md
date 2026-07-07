@@ -240,6 +240,19 @@ Current allowed `llm_chat` provider/model ids in this repo:
 | `chutes` | `deepseek-ai/DeepSeek-V3.2-TEE`, `zai-org/GLM-5-TEE`, `Qwen/Qwen3.6-27B-TEE`, `google/gemma-4-31B-turbo-TEE` |
 | `openrouter` | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `deepseek/deepseek-v3.2`, `z-ai/glm-5`, `qwen/qwen3.6-27b`, `google/gemma-4-31b-it` |
 
+Use `provider_extra` only for selected-provider-specific request additions that do not already have common `llm_chat` parameters. The schema is selected by the sibling `provider` value and is strict. Today it supports only OpenRouter provider selection:
+
+```python
+response = await llm_chat(
+    provider="openrouter",
+    model="openai/gpt-oss-120b",
+    messages=[{"role": "user", "content": "Reply with only ok."}],
+    provider_extra={"provider": {"only": ["cerebras"]}},
+)
+```
+
+Do not put common behavior in `provider_extra`. For example, reasoning controls belong in `thinking` even when a provider's raw API spells them differently. Chutes raw reasoning options are handled by `thinking`, not `provider_extra`. Other OpenRouter provider-preference fields such as `order`, `allow_fallbacks`, `require_parameters`, `ignore`, `quantizations`, `sort`, and `max_price` are not supported here.
+
 You can request model thinking/reasoning through the typed `thinking` option on `llm_chat`.
 Omit it when you want the validator/provider default behavior.
 
