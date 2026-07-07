@@ -44,9 +44,11 @@ from harnyx_validator.application.dto.evaluation import (
     MinerTaskRunRequest,
     MinerTaskRunSubmission,
     MinerTaskWorkAssignment,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
     SandboxFailureDiagnostics,
     ScriptArtifactSpec,
+    TaskExecutionOutcome,
     TaskRunOutcome,
     TokenUsageSummary,
     ValidatorBatchFailureDetail,
@@ -512,6 +514,73 @@ async def _run_assigned_task_queue_until_results(
         close_requested.set()
     await asyncio.wait_for(execution, timeout=1.0)
     return tuple(results)
+
+
+async def test_evaluate_assigned_task_queue_success_queues_execution_before_scoring(tmp_path: Path) -> None:
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(tmp_path)
+    assignment = MinerTaskWorkAssignment(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=2,
+        assignment_token=_ASSIGNMENT_TOKEN,
+    )
+    completed_at = datetime(2025, 10, 17, 12, 3, tzinfo=UTC)
+
+    class _ExecutionOnlyOrchestrator:
+        async def execute(self, request: MinerTaskRunRequest, *, phase_recorder=None) -> TaskExecutionOutcome:
+            _ = phase_recorder
+            return TaskExecutionOutcome(
+                batch_id=request.batch_id,
+                artifact_id=request.artifact_id,
+                task=request.task,
+                session=Session(
+                    session_id=request.session_id,
+                    uid=request.uid,
+                    task_id=request.task.task_id,
+                    issued_at=datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+                    expires_at=datetime(2025, 10, 17, 12, 5, tzinfo=UTC),
+                    budget_usd=request.task.budget_usd,
+                    usage=SessionUsage(),
+                    status=SessionStatus.ACTIVE,
+                ),
+                uid=request.uid,
+                response=Response(text="execution response"),
+                execution_completed_at=completed_at,
+                usage=TokenUsageSummary.empty(),
+                total_tool_usage=ToolUsageSummary.zero(),
+                trace=EvaluationTrace(entrypoint_invocation_ms=12.0, scoring_ms=0.0),
+            )
+
+    result_queue: asyncio.Queue[PlatformOwnedTaskExecution | PlatformOwnedTaskResult] = asyncio.Queue()
+    close_requested = asyncio.Event()
+    execution_task = asyncio.create_task(
+        runner.evaluate_assigned_task_queue(
+            batch_id=batch_id,
+            artifact=artifact,
+            initial_assignments=(assignment,),
+            assigned_work=_AssignedWork(),
+            close_requested=close_requested,
+            result_queue=result_queue,
+            orchestrator=cast(TaskRunOrchestrator, _ExecutionOnlyOrchestrator()),
+        )
+    )
+    try:
+        queued = await asyncio.wait_for(result_queue.get(), timeout=1.0)
+    finally:
+        close_requested.set()
+    await asyncio.wait_for(execution_task, timeout=1.0)
+
+    assert isinstance(queued, PlatformOwnedTaskExecution)
+    assert queued.batch_id == batch_id
+    assert queued.artifact == artifact
+    assert queued.task == task
+    assert queued.attempt_number == 1
+    assert queued.max_attempts == 2
+    assert queued.response == Response(text="execution response")
+    assert queued.execution_completed_at == completed_at
+    assert queued.session.status is SessionStatus.COMPLETED
 
 
 async def test_evaluate_assigned_task_queue_drains_same_tick_results_before_delivery_failure(

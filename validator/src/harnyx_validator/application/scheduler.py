@@ -34,6 +34,7 @@ from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptStatus,
     MinerTaskAttemptTerminalEffect,
     MinerTaskWorkAssignment,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
     SandboxFailureDiagnostics,
     ScriptArtifactSpec,
@@ -198,7 +199,7 @@ class EvaluationScheduler:
         initial_assignments: Sequence[MinerTaskWorkAssignment],
         assigned_work: AssignedArtifactWork,
         close_requested: asyncio.Event,
-        result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+        result_queue: asyncio.Queue[PlatformOwnedTaskResult | PlatformOwnedTaskExecution],
     ) -> None:
         assignments = tuple(initial_assignments)
         if not assignments:

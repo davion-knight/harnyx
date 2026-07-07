@@ -9,9 +9,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from harnyx_commons.domain.miner_task import MinerTask, Query, Response
+from harnyx_commons.domain.miner_task import EvaluationTrace, MinerTask, Query, Response
 from harnyx_commons.domain.session import LlmUsageTotals, Session, SessionUsage
 from harnyx_commons.domain.tool_call import ToolCall
+from harnyx_commons.domain.tool_usage import ToolUsageSummary
 from harnyx_validator.domain.evaluation import MinerTaskRun
 from harnyx_validator.domain.shared_config import VALIDATOR_STRICT_CONFIG
 
@@ -177,6 +178,24 @@ class TaskRunOutcome(BaseModel):
     usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary.empty)
 
 
+class TaskExecutionOutcome(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    """Execution evidence for a miner task query before scoring."""
+
+    batch_id: UUID
+    artifact_id: UUID
+    task: MinerTask
+    session: Session
+    uid: int = Field(ge=0)
+    response: Response
+    execution_completed_at: datetime
+    execution_log: tuple[ToolCall, ...] = ()
+    usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary.empty)
+    total_tool_usage: ToolUsageSummary = Field(default_factory=ToolUsageSummary.zero)
+    trace: EvaluationTrace | None = None
+
+
 class MinerTaskRunSubmission(BaseModel):
     model_config = VALIDATOR_STRICT_CONFIG
 
@@ -287,6 +306,8 @@ class MinerTaskAttemptAuditRecord(BaseModel):
 
     validator_session_id: UUID
     batch_id: UUID
+    artifact: ScriptArtifactSpec | None = None
+    task: MinerTask | None = None
     artifact_id: UUID
     task_id: UUID
     attempt_number: int = Field(ge=1)
@@ -350,6 +371,31 @@ class PlatformOwnedTaskResult(BaseModel):
     terminal_attempt: MinerTaskAttemptAuditRecord
 
 
+class PlatformOwnedTaskExecution(BaseModel):
+    model_config = VALIDATOR_STRICT_CONFIG
+
+    """Completed execution evidence for one platform-assigned miner-task attempt."""
+
+    batch_id: UUID
+    artifact: ScriptArtifactSpec | None = None
+    task: MinerTask | None = None
+    artifact_id: UUID
+    task_id: UUID
+    attempt_number: int = Field(ge=1)
+    max_attempts: int = Field(ge=1)
+    validator_session_id: UUID
+    uid: int = Field(ge=0)
+    miner_hotkey_ss58: str = Field(min_length=1)
+    started_at: datetime
+    execution_completed_at: datetime
+    response: Response
+    session: Session
+    usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary.empty)
+    total_tool_usage: ToolUsageSummary = Field(default_factory=ToolUsageSummary.zero)
+    execution_log: tuple[ToolCall, ...] = ()
+    trace: EvaluationTrace | None = None
+
+
 __all__ = [
     "DIAGNOSTIC_ID_MAX_LENGTH",
     "DIAGNOSTIC_LOG_TAIL_MAX_LENGTH",
@@ -366,9 +412,11 @@ __all__ = [
     "MinerTaskWorkAssignment",
     "MinerTaskRunRequest",
     "MinerTaskRunSubmission",
+    "PlatformOwnedTaskExecution",
     "PlatformOwnedTaskResult",
     "SandboxFailureDiagnostics",
     "ScriptArtifactSpec",
+    "TaskExecutionOutcome",
     "TaskRunOutcome",
     "TokenUsageSummary",
     "ValidatorBatchFailureDetail",

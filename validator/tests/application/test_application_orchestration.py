@@ -12,6 +12,7 @@ from harnyx_commons.application.dto.session import SessionTokenRequest
 from harnyx_commons.application.session_manager import SessionManager
 from harnyx_commons.domain.judge_usage import JudgeModelUsage, JudgeUsageSummary
 from harnyx_commons.domain.miner_task import (
+    EvaluationError,
     EvaluationTrace,
     MinerTask,
     MinerTaskErrorCode,
@@ -20,7 +21,7 @@ from harnyx_commons.domain.miner_task import (
     Response,
     ScoreBreakdown,
 )
-from harnyx_commons.domain.session import LlmUsageTotals, Session
+from harnyx_commons.domain.session import LlmUsageTotals, Session, SessionStatus
 from harnyx_commons.domain.tool_call import ToolCall
 from harnyx_commons.domain.tool_usage import ToolUsageSummary
 from harnyx_commons.errors import SessionBudgetExhaustedError
@@ -30,8 +31,12 @@ from harnyx_commons.miner_task_scoring import EvaluationScoringResult
 from harnyx_commons.tools.dto import ToolInvocationRequest
 from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext, ToolInvocationOutput
 from harnyx_commons.tools.usage_tracker import UsageTracker
-from harnyx_validator.application.dto.evaluation import MinerTaskRunRequest, TokenUsageSummary
-from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
+from harnyx_validator.application.dto.evaluation import (
+    MinerTaskRunRequest,
+    PlatformOwnedTaskExecution,
+    TokenUsageSummary,
+)
+from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator, score_platform_execution
 from harnyx_validator.application.invoke_entrypoint import EntrypointInvoker
 from validator.tests.fixtures.fakes import FakeReceiptLog, FakeSessionRegistry
 
@@ -195,6 +200,19 @@ class RetryExhaustedScoringService:
         raise LlmRetryExhaustedError("scoring retries exhausted")
 
 
+class RetryExhaustedWithJudgeUsageScoringService:
+    async def score(
+        self,
+        *,
+        task: MinerTask,
+        response: Response,
+    ) -> ScoreBreakdown:
+        _ = task, response
+        exc = LlmRetryExhaustedError("scoring retries exhausted")
+        exc.__dict__["judge_usage"] = _judge_usage()
+        raise exc
+
+
 class _ClockSequence:
     def __init__(self, *values: datetime) -> None:
         self._values = list(values)
@@ -215,6 +233,60 @@ class _MonotonicSequence:
         return self._values.pop(0)
 
 
+def _judge_usage() -> JudgeUsageSummary:
+    return JudgeUsageSummary(
+        call_count=1,
+        prompt_tokens=70,
+        completion_tokens=30,
+        total_tokens=100,
+        reasoning_tokens=5,
+        actual_cost_usd=0.019,
+        models=(
+            JudgeModelUsage(
+                provider="chutes",
+                model="judge-model",
+                call_count=1,
+                prompt_tokens=70,
+                completion_tokens=30,
+                total_tokens=100,
+                reasoning_tokens=5,
+                actual_cost_usd=0.019,
+                actual_cost_source="provider_actual",
+            ),
+        ),
+    )
+
+
+def _platform_execution(task: MinerTask) -> PlatformOwnedTaskExecution:
+    session_id = uuid4()
+    issued_at = datetime(2025, 10, 17, 12, tzinfo=UTC)
+    return PlatformOwnedTaskExecution(
+        batch_id=uuid4(),
+        artifact_id=uuid4(),
+        task_id=task.task_id,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        validator_session_id=session_id,
+        uid=7,
+        miner_hotkey_ss58="miner-hotkey",
+        started_at=issued_at,
+        execution_completed_at=issued_at,
+        response=Response(text="A direct answer"),
+        session=Session(
+            session_id=session_id,
+            uid=7,
+            task_id=task.task_id,
+            issued_at=issued_at,
+            expires_at=issued_at.replace(hour=13),
+            budget_usd=0.5,
+            status=SessionStatus.COMPLETED,
+        ),
+        usage=TokenUsageSummary.empty(),
+        total_tool_usage=ToolUsageSummary.zero(),
+    )
+
+
 class TailObservedUsageSummarizer(evaluate_task_run_module.UsageSummarizer):
     def summarize(
         self,
@@ -223,6 +295,42 @@ class TailObservedUsageSummarizer(evaluate_task_run_module.UsageSummarizer):
     ) -> tuple[TokenUsageSummary, ToolUsageSummary]:
         evaluate_task_run_module.time.monotonic()
         return super().summarize(session, receipts)
+
+
+async def test_score_platform_execution_raises_scoring_failure_by_default() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="Harnyx Subnet demo"),
+        reference_answer=ReferenceAnswer(text="A direct answer"),
+    )
+
+    with pytest.raises(LlmRetryExhaustedError, match="scoring retries exhausted"):
+        await score_platform_execution(
+            RetryExhaustedScoringService(),
+            _platform_execution(task),
+        )
+
+
+async def test_score_platform_execution_explicit_failed_result_is_response_free() -> None:
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="Harnyx Subnet demo"),
+        reference_answer=ReferenceAnswer(text="A direct answer"),
+    )
+
+    result = await score_platform_execution(
+        RetryExhaustedWithJudgeUsageScoringService(),
+        _platform_execution(task),
+        convert_scoring_error=True,
+    )
+
+    assert result.result is not None
+    assert result.result.run.response is None
+    assert result.result.run.details.error == EvaluationError(
+        code=MinerTaskErrorCode.SCORING_LLM_RETRY_EXHAUSTED,
+        message="scoring retries exhausted",
+    )
+    assert result.result.run.details.scoring_judge_usage == _judge_usage()
 
 
 async def test_application_use_cases_cooperate_for_single_task_run() -> None:
@@ -345,10 +453,10 @@ async def test_task_orchestration_success_persists_consolidated_evaluation_trace
     monotonic = _MonotonicSequence(
         10.0,  # orchestration starts
         11.0,  # entrypoint invocation completes
-        20.0,  # scoring starts
-        23.0,  # scoring completes
-        24.0,  # usage summarization consumes post-scoring time
-        80.0,  # orchestration trace is finalized after run assembly
+        20.0,  # usage summarization observes post-execution time
+        23.0,  # execution trace is finalized
+        24.0,  # scoring starts
+        27.0,  # scoring completes
     )
     monkeypatch.setattr(evaluate_task_run_module, "time", SimpleNamespace(monotonic=monotonic.monotonic))
     session_registry = FakeSessionRegistry()
@@ -405,7 +513,7 @@ async def test_task_orchestration_success_persists_consolidated_evaluation_trace
     assert trace is not None
     assert trace.entrypoint_invocation_ms == pytest.approx(1000.0)
     assert trace.scoring_ms == pytest.approx(3000.0)
-    assert trace.orchestration_ms == pytest.approx(70000.0)
+    assert trace.orchestration_ms == pytest.approx(4000.0)
     assert trace.scoring_judge_selected_routes == ("chutes/judge-model",)
     assert trace.scoring_judge_attempt_count == 3
     assert trace.scoring_judge_retry_count == 1

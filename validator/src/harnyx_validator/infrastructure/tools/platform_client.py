@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, TypeAdapter
 
 from harnyx_commons.bittensor import build_canonical_request
+from harnyx_commons.domain.session import Session, SessionStatus
 from harnyx_commons.domain.tool_call import ToolCall, ToolExecutionFacts
 from harnyx_commons.errors import BudgetExceededError, ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
@@ -22,6 +23,7 @@ from harnyx_commons.protocol_headers import PLATFORM_TOOL_PROXY_TOKEN_HEADER
 from harnyx_commons.tools.types import ToolName
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskWorkAssignment,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
 )
 from harnyx_validator.application.ports.platform import (
@@ -297,6 +299,76 @@ class HttpPlatformClient(PlatformPort):
         if not isinstance(items, list):
             raise PlatformClientError(status_code=response.status_code, message="platform result items are invalid")
         return tuple(_platform_result_acknowledgement(item) for item in items)
+
+    def submit_miner_task_work_executions(
+        self,
+        executions: Sequence[PlatformOwnedTaskExecution],
+    ) -> tuple[PlatformTaskResultAcknowledgement, ...]:
+        path = "/v2/miner-task-work/executions"
+        response = self._post_json(
+            path,
+            {
+                "executions": [_platform_task_execution_payload(execution) for execution in executions],
+            },
+            timeout=_PLATFORM_WORK_RESULT_TIMEOUT_SECONDS,
+        )
+        if response.status_code != httpx.codes.OK:
+            raise PlatformClientError(
+                status_code=response.status_code,
+                message=f"platform returned {response.status_code} for POST {path}",
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise PlatformClientError(
+                status_code=response.status_code,
+                message="platform execution response is invalid",
+            )
+        items = payload.get("executions", ())
+        if not isinstance(items, list):
+            raise PlatformClientError(status_code=response.status_code, message="platform execution items are invalid")
+        return tuple(_platform_result_acknowledgement(item) for item in items)
+
+    def request_scoreable_miner_task_work_executions(
+        self,
+        *,
+        active_scoring: Sequence[PlatformTaskAttemptIdentity],
+    ) -> tuple[PlatformOwnedTaskExecution, ...]:
+        path = "/v2/miner-task-work/scoreable-executions"
+        response = self._post_json(
+            path,
+            {
+                "active_scoring": [
+                    {
+                        "batch_id": str(attempt.batch_id),
+                        "artifact_id": str(attempt.artifact_id),
+                        "task_id": str(attempt.task_id),
+                        "attempt_number": attempt.attempt_number,
+                        "validator_session_id": (
+                            None
+                            if attempt.validator_session_id is None
+                            else str(attempt.validator_session_id)
+                        ),
+                    }
+                    for attempt in active_scoring
+                ],
+            },
+            timeout=_PLATFORM_WORK_RESULT_TIMEOUT_SECONDS,
+        )
+        if response.status_code != httpx.codes.OK:
+            raise PlatformClientError(
+                status_code=response.status_code,
+                message=f"platform returned {response.status_code} for POST {path}",
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise PlatformClientError(
+                status_code=response.status_code,
+                message="platform scoreable response is invalid",
+            )
+        items = payload.get("executions", ())
+        if not isinstance(items, list):
+            raise PlatformClientError(status_code=response.status_code, message="platform scoreable items are invalid")
+        return tuple(_platform_scoreable_execution(item) for item in items)
 
 
 @dataclass
@@ -597,6 +669,83 @@ def _platform_task_result_payload(result: PlatformOwnedTaskResult) -> JsonObject
     }
 
 
+def _platform_task_execution_payload(execution: PlatformOwnedTaskExecution) -> JsonObject:
+    return {
+        "batch_id": str(execution.batch_id),
+        "artifact_id": str(execution.artifact_id),
+        "task_id": str(execution.task_id),
+        "attempt_number": execution.attempt_number,
+        "validator_session_id": str(execution.validator_session_id),
+        "uid": execution.uid,
+        "miner_hotkey_ss58": execution.miner_hotkey_ss58,
+        "started_at": execution.started_at.isoformat(),
+        "execution_completed_at": execution.execution_completed_at.isoformat(),
+        "response": _jsonable(execution.response),
+        "session": {
+            "session_id": str(execution.session.session_id),
+            "uid": execution.session.uid,
+            "status": execution.session.status.value,
+            "issued_at": execution.session.issued_at.isoformat(),
+            "expires_at": execution.session.expires_at.isoformat(),
+        },
+        "usage": _jsonable(execution.usage),
+        "total_tool_usage": _jsonable(execution.total_tool_usage),
+        "execution_log": _execution_log_payload(execution.execution_log),
+        "trace": _jsonable(execution.trace),
+    }
+
+
+def _platform_scoreable_execution(value: object) -> PlatformOwnedTaskExecution:
+    if not isinstance(value, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution item is invalid")
+    item = cast(dict[str, object], value)
+    artifact = item.get("artifact")
+    if not isinstance(artifact, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution artifact is invalid")
+    task = item.get("task")
+    if not isinstance(task, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution task is invalid")
+    session_payload = item.get("session")
+    if not isinstance(session_payload, dict):
+        raise PlatformClientError(status_code=None, message="platform scoreable execution session is invalid")
+    artifact_item = cast(dict[str, object], artifact)
+    task_item = cast(dict[str, object], task)
+    session_item = cast(dict[str, object], session_payload)
+    task_id = UUID(str(task_item["task_id"]))
+    issued_at = _parse_datetime(session_item["issued_at"])
+    expires_at = _parse_datetime(session_item["expires_at"])
+    return PlatformOwnedTaskExecution.model_validate(
+        {
+            "batch_id": item["batch_id"],
+            "artifact": artifact_item,
+            "task": task_item,
+            "artifact_id": artifact_item["artifact_id"],
+            "task_id": task_id,
+            "attempt_number": item["attempt_number"],
+            "max_attempts": item["max_attempts"],
+            "validator_session_id": item["validator_session_id"],
+            "uid": item["uid"],
+            "miner_hotkey_ss58": item["miner_hotkey_ss58"],
+            "started_at": item["started_at"],
+            "execution_completed_at": item["execution_completed_at"],
+            "response": item["response"],
+            "session": Session(
+                session_id=UUID(str(session_item["session_id"])),
+                uid=_required_int(session_item, "uid"),
+                task_id=task_id,
+                issued_at=issued_at,
+                expires_at=expires_at,
+                budget_usd=0.0,
+                status=SessionStatus(str(session_item["status"])),
+            ),
+            "usage": item["usage"],
+            "total_tool_usage": item["total_tool_usage"],
+            "execution_log": item.get("execution_log", ()),
+            "trace": item.get("trace"),
+        }
+    )
+
+
 def _run_submission_payload(submission: Any) -> JsonObject:
     return {
         "batch_id": str(submission.batch_id),
@@ -650,6 +799,14 @@ def _attempt_payload(attempt: Any) -> JsonObject:
     return payload
 
 
+def _parse_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        raise PlatformClientError(status_code=None, message="platform datetime field is invalid")
+    return datetime.fromisoformat(value)
+
+
 def _execution_log_payload(execution_log: tuple[ToolCall, ...]) -> list[JsonValue]:
     return cast(list[JsonValue], _TOOL_CALLS_ADAPTER.dump_python(execution_log, mode="json"))
 
@@ -679,6 +836,8 @@ def _platform_result_acknowledgement(value: object) -> PlatformTaskResultAcknowl
 def _jsonable(value: object) -> JsonValue:
     if isinstance(value, BaseModel):
         return cast(JsonValue, value.model_dump(mode="json"))
+    if is_dataclass(value) and not isinstance(value, type):
+        return _jsonable(asdict(value))
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):

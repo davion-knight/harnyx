@@ -51,10 +51,11 @@ from harnyx_commons.tools.usage_tracker import UsageTracker
 from harnyx_validator.application.assigned_work import AssignedArtifactWork
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskBatchSpec,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
 )
 from harnyx_validator.application.dto.registration import ValidatorRegistrationMetadata
-from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator
+from harnyx_validator.application.evaluate_task_run import TaskRunOrchestrator, score_platform_execution
 from harnyx_validator.application.invoke_entrypoint import EntrypointInvoker, SandboxClient
 from harnyx_validator.application.platform_tool_proxy import (
     PlatformToolProxyProxyToolInvoker,
@@ -339,6 +340,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         batch_blocking_executor=batch_blocking_executor,
         subtensor_client=subtensor_client,
         platform_client=platform_client,
+        scoring_service=scoring_service,
         orchestrator_factory=orchestrator_factory,
         options_factory=options_factory,
     )
@@ -391,6 +393,7 @@ def _build_platform_work_worker(
     batch_blocking_executor: Executor,
     subtensor_client: SubtensorClientPort,
     platform_client: PlatformPort | None,
+    scoring_service: EvaluationScoringService,
     orchestrator_factory: Callable[[SandboxClient], TaskRunOrchestrator],
     options_factory: Callable[[], SandboxOptions],
 ) -> PlatformWorkWorker | None:
@@ -418,7 +421,7 @@ def _build_platform_work_worker(
         artifact_id: UUID,
         assigned_work: AssignedArtifactWork,
         close_requested: asyncio.Event,
-        result_queue: asyncio.Queue[PlatformOwnedTaskResult],
+        result_queue: asyncio.Queue[PlatformOwnedTaskResult | PlatformOwnedTaskExecution],
     ) -> None:
         first_assignment = await assigned_work.take_for_startup()
         if first_assignment.artifact.artifact_id != artifact_id:
@@ -453,6 +456,11 @@ def _build_platform_work_worker(
     return PlatformWorkWorker(
         platform=platform_client,
         execute_artifact_assignments=execute_artifact_assignments,
+        score_execution=lambda execution: score_platform_execution(
+            scoring_service,
+            execution,
+            convert_scoring_error=False,
+        ),
         target_concurrency=config.artifact_task_parallelism,
         max_active_artifacts=config.artifact_parallelism,
     )

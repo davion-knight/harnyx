@@ -311,6 +311,7 @@ def test_platform_work_worker_uses_task_capacity_and_artifact_cap() -> None:
             platform_tool_proxy_scopes=object(),
         ),
         batch_blocking_executor=object(),  # type: ignore[arg-type]
+        scoring_service=object(),  # type: ignore[arg-type]
         orchestrator_factory=lambda _client: object(),  # type: ignore[arg-type]
         options_factory=lambda: object(),  # type: ignore[arg-type]
     )
@@ -319,6 +320,55 @@ def test_platform_work_worker_uses_task_capacity_and_artifact_cap() -> None:
     assert worker._target_concurrency == 20
     assert worker._max_active_artifacts == 4
     assert worker._target_concurrency > worker._max_active_artifacts
+
+
+@pytest.mark.anyio
+async def test_platform_work_worker_scoreable_execution_keeps_scoring_errors_validator_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def _fake_score_platform_execution(
+        scoring_service: object,
+        execution: object,
+        *,
+        convert_scoring_error: bool,
+    ) -> object:
+        observed["scoring_service"] = scoring_service
+        observed["execution"] = execution
+        observed["convert_scoring_error"] = convert_scoring_error
+        return "result"
+
+    monkeypatch.setattr(bootstrap_mod, "score_platform_execution", _fake_score_platform_execution)
+    scoring_service = object()
+    execution = object()
+    worker = bootstrap_mod._build_platform_work_worker(
+        resolved=SimpleNamespace(),
+        platform_client=object(),  # type: ignore[arg-type]
+        subtensor_client=object(),  # type: ignore[arg-type]
+        sandbox_manager=object(),  # type: ignore[arg-type]
+        state=SimpleNamespace(
+            session_manager=object(),
+            evaluation_records=object(),
+            receipt_log=object(),
+            progress_tracker=object(),
+            batch_activity=object(),
+            platform_tool_proxy_scopes=object(),
+        ),
+        batch_blocking_executor=object(),  # type: ignore[arg-type]
+        scoring_service=scoring_service,  # type: ignore[arg-type]
+        orchestrator_factory=lambda _client: object(),  # type: ignore[arg-type]
+        options_factory=lambda: object(),  # type: ignore[arg-type]
+    )
+
+    assert worker is not None
+    assert worker._score_execution is not None
+    assert await worker._score_execution(execution) == "result"  # type: ignore[arg-type]
+    assert observed == {
+        "scoring_service": scoring_service,
+        "execution": execution,
+        "convert_scoring_error": False,
+    }
 
 
 @pytest.mark.anyio

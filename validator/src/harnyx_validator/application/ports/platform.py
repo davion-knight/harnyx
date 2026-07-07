@@ -13,6 +13,7 @@ from harnyx_commons.json_types import JsonObject, JsonValue
 from harnyx_commons.tools.types import ToolName
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskWorkAssignment,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
 )
 
@@ -43,6 +44,21 @@ class PlatformPort(Protocol):
         results: Sequence[PlatformOwnedTaskResult],
     ) -> tuple[PlatformTaskResultAcknowledgement, ...]:
         """Submit completed platform-assigned attempts."""
+        ...
+
+    def submit_miner_task_work_executions(
+        self,
+        executions: Sequence[PlatformOwnedTaskExecution],
+    ) -> tuple[PlatformTaskResultAcknowledgement, ...]:
+        """Submit completed platform-assigned execution evidence."""
+        ...
+
+    def request_scoreable_miner_task_work_executions(
+        self,
+        *,
+        active_scoring: Sequence[PlatformTaskAttemptIdentity],
+    ) -> tuple[PlatformOwnedTaskExecution, ...]:
+        """Return accepted execution evidence that still needs final scoring."""
         ...
 
 

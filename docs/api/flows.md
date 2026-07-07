@@ -161,7 +161,7 @@ sequenceDiagram
   S-->>V: 200 { ok:true, result:{ text: "..." } }
 ```
 
-#### 4) Validator submits task results to platform
+#### 4) Validator persists execution evidence, then submits final results
 
 ```mermaid
 sequenceDiagram
@@ -170,12 +170,19 @@ sequenceDiagram
   participant DB as Platform DB
 
   Note over P,V: Authorization: Bittensor ss58="...",sig="..."
-  V->>P: POST /v2/miner-task-work/results<br/>{ results:[{ batch_id, artifact_id, task_id, attempt_number, ... }] }
-  P->>DB: Accept or reject result against existing task/session state
+  V->>P: POST /v2/miner-task-work/executions<br/>{ executions:[{ batch_id, artifact_id, task_id, attempt_number, response, ... }] }
+  P->>DB: Persist accepted execution evidence on the existing run row
+  P-->>V: 200 { executions:[{ outcome:"accepted"|"rejected", canonical:true|false, reason_code:null|... }] }
+
+  V->>P: POST /v2/miner-task-work/scoreable-executions<br/>{ active_scoring:[...] }
+  P-->>V: 200 { executions:[persisted execution evidence still needing scoring] }
+
+  V->>P: POST /v2/miner-task-work/results<br/>{ results:[{ batch_id, artifact_id, task_id, attempt_number, result, terminal_attempt }] }
+  P->>DB: Accept or reject final scored result against persisted execution state
   P-->>V: 200 { results:[{ outcome:"accepted"|"rejected", canonical:true|false, reason_code:null|"already_accepted"|... }] }
   Note over V: Act only on outcome; reason_code is diagnostic.
 
-  Note over V,P: Validator retries only pending result submissions whose outcome is unknown or transient.
+  Note over V,P: Validator retries pending execution/result submissions whose outcome is unknown or transient.
 ```
 
 **Endpoints involved**
@@ -183,6 +190,8 @@ sequenceDiagram
   - [POST /v1/miner-task-batches/batch](generated/platform.md#endpoint-post-v1-miner-task-batches-batch)
   - [GET /v1/miner-task-batches/{batch_id}/artifacts/{artifact_id}](generated/platform.md#endpoint-get-v1-miner-task-batches-batch_id-artifacts-artifact_id)
   - [POST /v2/miner-task-work/tasks](generated/platform.md#endpoint-post-v2-miner-task-work-tasks)
+  - [POST /v2/miner-task-work/executions](generated/platform.md#endpoint-post-v2-miner-task-work-executions)
+  - [POST /v2/miner-task-work/scoreable-executions](generated/platform.md#endpoint-post-v2-miner-task-work-scoreable-executions)
   - [POST /v2/miner-task-work/results](generated/platform.md#endpoint-post-v2-miner-task-work-results)
 - Validator:
   - [GET /validator/status](generated/validator.md#endpoint-get-validator-status) (health snapshot; not miner-task lifecycle progress)

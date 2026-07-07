@@ -21,6 +21,7 @@ from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptStatus,
     MinerTaskAttemptTerminalEffect,
     MinerTaskRunSubmission,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
     SandboxFailureDiagnostics,
     TokenUsageSummary,
@@ -591,6 +592,86 @@ def test_submit_miner_task_work_results_serializes_run_execution_log() -> None:
     assert execution_log[0]["tool"] == "search_web"
     assert execution_log[0]["outcome"] == "ok"
     assert execution_log[0]["details"]["request_payload"] == {"query": "smoke"}
+    assert acknowledgements[0].outcome == "accepted"
+    assert acknowledgements[0].canonical is True
+
+
+def test_submit_miner_task_work_executions_does_not_send_platform_owned_attempt_budget() -> None:
+    keypair = _keypair()
+    batch_id = uuid4()
+    artifact_id = uuid4()
+    task_id = uuid4()
+    session_id = uuid4()
+    started_at = datetime(2026, 6, 22, 0, 0, tzinfo=UTC)
+    seen_body: dict[str, object] | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_body
+        _assert_signed(request, keypair)
+        if request.method == "POST" and request.url.path == "/v2/miner-task-work/executions":
+            seen_body = json.loads(request.content)
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "server_time": "2026-06-22T00:00:02+00:00",
+                    "executions": [
+                        {
+                            "batch_id": str(batch_id),
+                            "artifact_id": str(artifact_id),
+                            "task_id": str(task_id),
+                            "attempt_number": 1,
+                            "outcome": "accepted",
+                            "canonical": True,
+                            "reason_code": None,
+                            "reason": None,
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404)
+
+    client = HttpPlatformClient(
+        base_url="https://mock.local",
+        hotkey=keypair,
+        transport=httpx.MockTransport(handler),
+    )
+    session = Session(
+        session_id=session_id,
+        uid=7,
+        task_id=task_id,
+        issued_at=started_at,
+        expires_at=started_at + timedelta(minutes=5),
+        budget_usd=0.05,
+        status=SessionStatus.COMPLETED,
+    )
+
+    acknowledgements = client.submit_miner_task_work_executions(
+        (
+            PlatformOwnedTaskExecution(
+                batch_id=batch_id,
+                artifact_id=artifact_id,
+                task_id=task_id,
+                attempt_number=1,
+                max_attempts=2,
+                validator_session_id=session_id,
+                uid=7,
+                miner_hotkey_ss58="miner-hotkey",
+                started_at=started_at,
+                execution_completed_at=started_at + timedelta(seconds=1),
+                response=Response(text="answer"),
+                session=session,
+                usage=TokenUsageSummary.empty(),
+                execution_log=(_tool_call(session_id=session_id, issued_at=started_at),),
+                trace=None,
+            ),
+        )
+    )
+
+    assert seen_body is not None
+    item = seen_body["executions"][0]  # type: ignore[index]
+    assert "max_attempts" not in item
+    assert item["response"]["text"] == "answer"
+    assert item["session"]["status"] == "completed"
     assert acknowledgements[0].outcome == "accepted"
     assert acknowledgements[0].canonical is True
 

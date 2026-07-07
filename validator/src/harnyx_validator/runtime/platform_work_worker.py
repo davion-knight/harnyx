@@ -17,6 +17,7 @@ from harnyx_validator.application.assigned_work import AssignedArtifactWork
 from harnyx_validator.application.dto.evaluation import (
     MinerTaskAttemptTerminalEffect,
     MinerTaskWorkAssignment,
+    PlatformOwnedTaskExecution,
     PlatformOwnedTaskResult,
 )
 from harnyx_validator.application.ports.platform import PlatformPort, PlatformTaskAttemptIdentity
@@ -35,10 +36,11 @@ ArtifactAssignmentExecutor = Callable[
         UUID,
         AssignedArtifactWork,
         asyncio.Event,
-        asyncio.Queue[PlatformOwnedTaskResult],
+        asyncio.Queue[PlatformOwnedTaskResult | PlatformOwnedTaskExecution],
     ],
     Coroutine[Any, Any, None],
 ]
+ScoringExecutor = Callable[[PlatformOwnedTaskExecution], Coroutine[Any, Any, PlatformOwnedTaskResult]]
 _AssignmentKey = tuple[UUID, UUID, UUID, int]
 _ArtifactGroupKey = tuple[UUID, UUID]
 
@@ -90,7 +92,7 @@ class _AssignedArtifactGroup:
     state: _ArtifactGroupState
     assignment_queue: asyncio.Queue[MinerTaskWorkAssignment]
     close_requested: asyncio.Event
-    result_queue: asyncio.Queue[PlatformOwnedTaskResult]
+    result_queue: asyncio.Queue[PlatformOwnedTaskResult | PlatformOwnedTaskExecution]
     assignment_records: dict[_AssignmentKey, _AssignmentRecord]
     starting_records: dict[_AssignmentKey, _AssignmentRecord]
     monotonic_clock: Callable[[], float]
@@ -253,6 +255,7 @@ class PlatformWorkWorker:
         *,
         platform: PlatformPort,
         execute_artifact_assignments: ArtifactAssignmentExecutor,
+        score_execution: ScoringExecutor | None = None,
         target_concurrency: int,
         max_active_artifacts: int,
         poll_interval_seconds: float = 1.0,
@@ -269,14 +272,18 @@ class PlatformWorkWorker:
             raise ValueError("dispatch_start_lease_seconds must be positive")
         self._platform = platform
         self._execute_artifact_assignments = execute_artifact_assignments
+        self._score_execution = score_execution
         self._target_concurrency = target_concurrency
         self._max_active_artifacts = max_active_artifacts
         self._poll_interval_seconds = poll_interval_seconds
         self._dispatch_start_lease_seconds = dispatch_start_lease_seconds
         self._monotonic_clock = monotonic_clock
         self._active_artifacts: dict[_ArtifactGroupKey, _AssignedArtifactGroup] = {}
+        self._active_scoring: dict[asyncio.Task[PlatformOwnedTaskResult], PlatformTaskAttemptIdentity] = {}
+        self._pending_executions: list[PlatformOwnedTaskExecution] = []
         self._pending_results: list[PlatformOwnedTaskResult] = []
         self._work_request_task: asyncio.Task[tuple[MinerTaskWorkAssignment, ...]] | None = None
+        self._scoreable_execution_request_task: asyncio.Task[tuple[PlatformOwnedTaskExecution, ...]] | None = None
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -295,7 +302,9 @@ class PlatformWorkWorker:
         try:
             await asyncio.wait_for(task, timeout=timeout)
         finally:
+            await self._cancel_scoreable_execution_request_task()
             await self._cancel_work_request_task()
+            await self._cancel_scoring_tasks()
             await self._cancel_artifact_group_tasks()
             self._task = None
 
@@ -318,11 +327,18 @@ class PlatformWorkWorker:
 
     async def run_once(self) -> None:
         self._collect_artifact_group_results()
+        self._collect_scoring_results()
         self._release_expired_dispatchable_assignments()
         self._collect_closed_artifact_groups()
+        if self._pending_executions:
+            if not await self._submit_pending_executions():
+                return
         if self._pending_results:
             if not await self._submit_pending_results():
                 return
+        self._consume_completed_scoreable_execution_request()
+        if self._scoreable_execution_request_task is None:
+            self._start_scoreable_execution_request()
         refilled_artifact_ids = self._consume_completed_work_request()
         self._request_idle_artifact_groups_close(refilled_artifact_ids)
         free_slots = self._target_concurrency - self._local_inflight_count()
@@ -371,6 +387,44 @@ class PlatformWorkWorker:
         await asyncio.gather(task, return_exceptions=True)
         self._work_request_task = None
 
+    def _start_scoreable_execution_request(self) -> None:
+        if self._score_execution is None:
+            return
+        if not hasattr(self._platform, "request_scoreable_miner_task_work_executions"):
+            return
+        self._scoreable_execution_request_task = asyncio.create_task(
+            self._request_scoreable_executions(),
+            name="validator-platform-scoreable-execution-request",
+        )
+
+    async def _request_scoreable_executions(self) -> tuple[PlatformOwnedTaskExecution, ...]:
+        request_scoreable = self._platform.request_scoreable_miner_task_work_executions
+        return await asyncio.to_thread(
+            request_scoreable,
+            active_scoring=self._active_scoring_attempts(),
+        )
+
+    def _consume_completed_scoreable_execution_request(self) -> None:
+        task = self._scoreable_execution_request_task
+        if task is None or not task.done():
+            return
+        self._scoreable_execution_request_task = None
+        try:
+            executions = task.result()
+        except Exception as exc:
+            logger.warning("platform scoreable execution request failed; will retry", exc_info=exc)
+            return
+        self._start_scoring_executions(executions)
+
+    async def _cancel_scoreable_execution_request_task(self) -> None:
+        task = self._scoreable_execution_request_task
+        if task is None or task.done():
+            self._scoreable_execution_request_task = None
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._scoreable_execution_request_task = None
+
     def _enqueue_assignments(
         self,
         assignments: Sequence[MinerTaskWorkAssignment],
@@ -400,7 +454,7 @@ class PlatformWorkWorker:
     ) -> _AssignedArtifactGroup:
         assignment_queue: asyncio.Queue[MinerTaskWorkAssignment] = asyncio.Queue()
         close_requested = asyncio.Event()
-        result_queue: asyncio.Queue[PlatformOwnedTaskResult] = asyncio.Queue()
+        result_queue: asyncio.Queue[PlatformOwnedTaskResult | PlatformOwnedTaskExecution] = asyncio.Queue()
 
         group = _AssignedArtifactGroup(
             artifact_id=artifact_id,
@@ -491,6 +545,14 @@ class PlatformWorkWorker:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._active_artifacts.clear()
 
+    async def _cancel_scoring_tasks(self) -> None:
+        tasks = tuple(task for task in self._active_scoring if not task.done())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._active_scoring.clear()
+
     def _collect_artifact_group_results(self) -> None:
         for group in tuple(self._active_artifacts.values()):
             self._collect_results_for_group(group)
@@ -498,9 +560,14 @@ class PlatformWorkWorker:
     def _collect_results_for_group(self, group: _AssignedArtifactGroup) -> None:
         while True:
             try:
-                result = group.result_queue.get_nowait()
+                event = group.result_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            if isinstance(event, PlatformOwnedTaskExecution):
+                group.assignment_records.pop(_execution_key(event), None)
+                self._pending_executions.append(event)
+                continue
+            result = event
             if _is_delivery_failure_result(result):
                 group.close_for_delivery_failure(result)
                 continue
@@ -545,6 +612,74 @@ class PlatformWorkWorker:
                     self._pending_results.append(deferred_delivery_failure)
             del self._active_artifacts[group_key]
 
+    async def _submit_pending_executions(self) -> bool:
+        try:
+            acknowledgements = await asyncio.to_thread(
+                self._platform.submit_miner_task_work_executions,
+                tuple(self._pending_executions),
+            )
+        except Exception as exc:
+            logger.warning("platform execution submission failed; will retry", exc_info=exc)
+            return False
+
+        for ack in acknowledgements:
+            if ack.outcome == "rejected":
+                logger.warning(
+                    "platform rejected miner task execution",
+                    extra={
+                        "batch_id": str(ack.batch_id),
+                        "artifact_id": str(ack.artifact_id),
+                        "task_id": str(ack.task_id),
+                        "attempt_number": ack.attempt_number,
+                        "reason_code": ack.reason_code,
+                        "reason": ack.reason,
+                    },
+                )
+
+        acknowledged = {
+            (ack.batch_id, ack.artifact_id, ack.task_id, ack.attempt_number)
+            for ack in acknowledgements
+        }
+        self._pending_executions = [
+            execution
+            for execution in self._pending_executions
+            if (
+                execution.batch_id,
+                execution.artifact_id,
+                execution.task_id,
+                execution.attempt_number,
+            )
+            not in acknowledged
+        ]
+        return not self._pending_executions
+
+    def _start_scoring_executions(self, executions: Sequence[PlatformOwnedTaskExecution]) -> None:
+        if self._score_execution is None:
+            return
+        active_keys = set(self._active_scoring_attempts())
+        for execution in executions:
+            identity = _execution_identity(execution)
+            if identity in active_keys:
+                continue
+            task = asyncio.create_task(
+                self._score_execution(execution),
+                name=f"validator-platform-work-score-{execution.task_id}",
+            )
+            self._active_scoring[task] = identity
+            active_keys.add(identity)
+
+    def _collect_scoring_results(self) -> None:
+        for task in tuple(self._active_scoring):
+            if not task.done():
+                continue
+            self._active_scoring.pop(task, None)
+            try:
+                result = task.result()
+            except Exception as exc:
+                logger.warning("platform scoreable execution scoring failed; will retry", exc_info=exc)
+                continue
+            self._pending_results.append(result)
+
     async def _submit_pending_results(self) -> bool:
         try:
             acknowledgements = await asyncio.to_thread(
@@ -583,6 +718,15 @@ class PlatformWorkWorker:
     def _active_attempts(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
         pending = tuple(
             PlatformTaskAttemptIdentity(
+                batch_id=execution.batch_id,
+                artifact_id=execution.artifact_id,
+                task_id=execution.task_id,
+                attempt_number=execution.attempt_number,
+                validator_session_id=execution.validator_session_id,
+            )
+            for execution in self._pending_executions
+        ) + tuple(
+            PlatformTaskAttemptIdentity(
                 batch_id=result.batch_id,
                 artifact_id=result.artifact_id,
                 task_id=result.task_id,
@@ -590,6 +734,7 @@ class PlatformWorkWorker:
                 validator_session_id=result.terminal_attempt.validator_session_id,
             )
             for result in self._pending_results
+            if not _is_successful_task_result(result)
         )
         active = tuple(
             identity
@@ -598,9 +743,22 @@ class PlatformWorkWorker:
         )
         return active + pending
 
+    def _active_scoring_attempts(self) -> tuple[PlatformTaskAttemptIdentity, ...]:
+        pending_results = tuple(
+            _result_identity(result)
+            for result in self._pending_results
+            if _is_successful_task_result(result)
+        )
+        return tuple(self._active_scoring.values()) + pending_results
+
     def _local_inflight_count(self) -> int:
-        return sum(group.local_inflight_count() for group in self._active_artifacts.values()) + len(
-            self._pending_results
+        pending_terminal_results = sum(
+            1 for result in self._pending_results if not _is_successful_task_result(result)
+        )
+        return (
+            sum(group.local_inflight_count() for group in self._active_artifacts.values())
+            + len(self._pending_executions)
+            + pending_terminal_results
         )
 
     def _active_artifact_capacity_count(self) -> int:
@@ -653,6 +811,16 @@ def _result_identity(result: PlatformOwnedTaskResult) -> PlatformTaskAttemptIden
     )
 
 
+def _execution_identity(execution: PlatformOwnedTaskExecution) -> PlatformTaskAttemptIdentity:
+    return PlatformTaskAttemptIdentity(
+        batch_id=execution.batch_id,
+        artifact_id=execution.artifact_id,
+        task_id=execution.task_id,
+        attempt_number=execution.attempt_number,
+        validator_session_id=execution.validator_session_id,
+    )
+
+
 def _drain_assignment_queue(
     assignment_queue: asyncio.Queue[MinerTaskWorkAssignment],
     removed_keys: frozenset[_AssignmentKey] | None = None,
@@ -697,8 +865,24 @@ def _result_key(result: PlatformOwnedTaskResult) -> _AssignmentKey:
     )
 
 
+def _execution_key(execution: PlatformOwnedTaskExecution) -> _AssignmentKey:
+    return (
+        execution.batch_id,
+        execution.artifact_id,
+        execution.task_id,
+        execution.attempt_number,
+    )
+
+
 def _is_delivery_failure_result(result: PlatformOwnedTaskResult) -> bool:
     return result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.DELIVERY_FAILURE
 
 
-__all__ = ["ArtifactAssignmentExecutor", "PlatformWorkWorker"]
+def _is_successful_task_result(result: PlatformOwnedTaskResult) -> bool:
+    return (
+        result.result is not None
+        and result.result.run.response is not None
+        and result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    )
+
+__all__ = ["ArtifactAssignmentExecutor", "PlatformWorkWorker", "ScoringExecutor"]
