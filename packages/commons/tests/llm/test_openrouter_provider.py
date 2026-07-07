@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from harnyx_commons.config.llm import OpenAiCompatibleEndpointConfig, OpenRouterModelProviderOptions
+from harnyx_commons.config.llm import OpenAiCompatibleEndpointConfig
 from harnyx_commons.llm.provider import LlmProviderConfigurationError
 from harnyx_commons.llm.provider_types import OPENROUTER_PROVIDER
 from harnyx_commons.llm.providers.openai_compatible import OpenAiCompatibleLlmProvider
@@ -96,7 +96,6 @@ async def test_openrouter_provider_requires_key_only_when_openrouter_model_is_in
     factory_calls: list[str] = []
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr(""),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda api_key: _fake_factory(api_key, factory_calls),
     )
 
@@ -110,7 +109,6 @@ async def test_openrouter_provider_rejects_unsupported_model_before_key_lookup()
     factory_calls: list[str] = []
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr(""),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda api_key: _fake_factory(api_key, factory_calls),
     )
 
@@ -121,55 +119,11 @@ async def test_openrouter_provider_rejects_unsupported_model_before_key_lookup()
 
 
 @pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
-async def test_openrouter_provider_merges_per_model_provider_options(model: str) -> None:
-    fake_provider = _FakeOpenAiProvider()
-    fake_client = _FakeClient()
-    seen_api_keys: list[str] = []
-
-    provider = OpenRouterLlmProvider(
-        openrouter_api_key=SecretStr(" test-openrouter-key "),
-        model_provider_options={
-            model: OpenRouterModelProviderOptions(
-                order=("Cerebras", "Groq"),
-                require_parameters=True,
-            )
-        },
-        openrouter_chat_provider_factory=lambda api_key: _fake_provider_factory(
-            api_key,
-            seen_api_keys,
-            fake_provider,
-            fake_client,
-        ),
-    )
-
-    response = await provider.invoke(
-        _request(
-            model=model,
-            extra={"provider": {"existing": "value"}, "metadata": {"trace": "test"}},
-        )
-    )
-    await provider.aclose()
-
-    assert seen_api_keys == ["test-openrouter-key"]
-    assert fake_provider.requests[0].provider == "openrouter"
-    assert fake_provider.requests[0].extra == {
-        "provider": {"existing": "value", "order": ["Cerebras", "Groq"], "require_parameters": True},
-        "metadata": {"trace": "test"},
-    }
-    assert response.metadata is not None
-    assert response.metadata["effective_provider"] == "openrouter"
-    assert response.metadata["effective_model"] == model
-    assert fake_provider.closed is True
-    assert fake_client.closed is True
-
-
-@pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
-async def test_openrouter_provider_omits_provider_options_when_model_has_no_config(model: str) -> None:
+async def test_openrouter_provider_omits_extra_when_request_has_no_extra(model: str) -> None:
     fake_provider = _FakeOpenAiProvider()
     fake_client = _FakeClient()
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda api_key: _fake_provider_factory(
             api_key,
             [],
@@ -189,7 +143,6 @@ async def test_openrouter_provider_preserves_request_retry_policy_for_delegate()
     retry_policy = RetryPolicy(attempts=2, initial_ms=0, max_ms=0, jitter=0.0)
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda api_key: _fake_provider_factory(
             api_key,
             [],
@@ -201,14 +154,6 @@ async def test_openrouter_provider_preserves_request_retry_policy_for_delegate()
     await provider.invoke(_request(model=OPENROUTER_NATIVE_SUPPORTED_MODELS[0], retry_policy=retry_policy))
 
     assert fake_provider.requests[0].retry_policy == retry_policy
-
-
-def test_openrouter_provider_rejects_options_for_models_it_does_not_own() -> None:
-    with pytest.raises(ValueError, match="unsupported models: unknown-model"):
-        OpenRouterLlmProvider(
-            openrouter_api_key=SecretStr("test-openrouter-key"),
-            model_provider_options={"unknown-model": OpenRouterModelProviderOptions(require_parameters=True)},
-        )
 
 
 def test_build_openrouter_chat_provider_rejects_blank_key() -> None:
@@ -253,23 +198,17 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     openai_provider = OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client)
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={
-            model: OpenRouterModelProviderOptions(
-                order=("Cerebras",),
-                require_parameters=True,
-            )
-        },
         openrouter_chat_provider_factory=lambda _: (openai_provider, client),
     )
 
-    response = await provider.invoke(_request(model=model))
+    response = await provider.invoke(_request(model=model, extra={"provider": {"only": ["cerebras"]}}))
     await provider.aclose()
 
     expected_payload_model = OPENROUTER_INTERNAL_TO_NATIVE_MODEL.get(model, model)
     assert captured["url"] == f"{OPENROUTER_BASE_URL}/chat/completions"
     assert captured["authorization"] == "Bearer test-openrouter-key"
     assert captured["json"]["model"] == expected_payload_model
-    assert captured["json"]["provider"] == {"order": ["Cerebras"], "require_parameters": True}
+    assert captured["json"]["provider"] == {"only": ["cerebras"]}
     assert response.raw_text == "ok"
     assert response.usage.total_tokens == 2
     assert response.metadata is not None
@@ -316,7 +255,6 @@ async def test_openrouter_provider_serializes_request_provider_only_extra(model:
     openai_provider = OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client)
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda _: (openai_provider, client),
     )
 
@@ -371,12 +309,6 @@ async def test_openrouter_provider_serializes_thinking_as_reasoning(
     openai_provider = OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client)
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={
-            model: OpenRouterModelProviderOptions(
-                order=("Cerebras",),
-                require_parameters=True,
-            )
-        },
         openrouter_chat_provider_factory=lambda _: (openai_provider, client),
     )
 
@@ -384,7 +316,7 @@ async def test_openrouter_provider_serializes_thinking_as_reasoning(
     await provider.aclose()
 
     assert captured["json"]["reasoning"] == expected_reasoning
-    assert captured["json"]["provider"] == {"order": ["Cerebras"], "require_parameters": True}
+    assert "provider" not in captured["json"]
 
 
 @pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
@@ -395,7 +327,6 @@ async def test_openrouter_provider_rejects_non_object_request_reasoning_extra(
 ) -> None:
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda api_key: _fake_factory(api_key, []),
     )
 
@@ -415,7 +346,6 @@ async def test_openrouter_provider_merges_request_reasoning_extra_with_typed_thi
     fake_client = _FakeClient()
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
-        model_provider_options={},
         openrouter_chat_provider_factory=lambda api_key: _fake_provider_factory(
             api_key,
             [],

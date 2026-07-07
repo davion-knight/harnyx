@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from harnyx_commons.config.llm import LlmSettings, OpenRouterModelProviderOptions
+from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.llm.provider_factory import build_miner_paid_llm_provider
 from harnyx_commons.llm.providers.openrouter import OPENROUTER_SUPPORTED_MODELS, OpenRouterLlmProvider
 from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest, LlmThinkingConfig
@@ -51,9 +51,6 @@ async def test_openrouter_provider_invokes_supported_model_live(model: str) -> N
 
     provider = OpenRouterLlmProvider(
         openrouter_api_key=settings.openrouter_api_key,
-        model_provider_options={
-            model: OpenRouterModelProviderOptions(require_parameters=True),
-        },
     )
     request = _openrouter_request(model=model)
 
@@ -74,16 +71,11 @@ async def test_openrouter_provider_invokes_supported_model_live(model: str) -> N
 
 async def test_openrouter_provider_reasoning_live() -> None:
     model = "openai/gpt-oss-20b"
-    settings = LlmSettings(
-        OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON='{"openai/gpt-oss-20b":{"require_parameters":true}}',
-    )
+    settings = LlmSettings()
     assert settings.openrouter_api_key_value, "OPENROUTER_API_KEY must be configured"
 
     provider = OpenRouterLlmProvider(
         openrouter_api_key=settings.openrouter_api_key,
-        model_provider_options={
-            model: OpenRouterModelProviderOptions(require_parameters=True),
-        },
     )
     try:
         response = await provider.invoke(_openrouter_reasoning_request(model=model))
@@ -101,9 +93,7 @@ async def test_openrouter_provider_reasoning_live() -> None:
 
 async def test_miner_paid_openrouter_helper_completion_live() -> None:
     model = "openai/gpt-oss-20b"
-    settings = LlmSettings(
-        OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON='{"openai/gpt-oss-20b":{"require_parameters":true}}',
-    )
+    settings = LlmSettings()
     assert settings.openrouter_api_key_value, "OPENROUTER_API_KEY must be configured"
 
     provider = build_miner_paid_llm_provider(

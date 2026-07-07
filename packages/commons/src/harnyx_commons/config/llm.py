@@ -125,43 +125,6 @@ class OpenAiCompatibleEndpointConfig(BaseModel):
 
 _OPENAI_COMPATIBLE_ENDPOINTS_ADAPTER = TypeAdapter(list[OpenAiCompatibleEndpointConfig])
 
-
-class OpenRouterModelProviderOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    order: tuple[str, ...] | None = None
-    require_parameters: bool | None = None
-
-    @field_validator("order", mode="before")
-    @classmethod
-    def _normalize_order(cls, value: object) -> tuple[str, ...] | None:
-        if value is None:
-            return None
-        if not isinstance(value, list | tuple):
-            raise ValueError("OpenRouter provider.order must be a JSON array")
-        normalized_entries: list[str] = []
-        for provider in value:
-            if not isinstance(provider, str):
-                raise ValueError("OpenRouter provider.order entries must be strings")
-            normalized_entries.append(provider.strip())
-        normalized = tuple(normalized_entries)
-        if not all(normalized):
-            raise ValueError("OpenRouter provider.order entries must be non-empty")
-        return normalized
-
-    def to_request_extra(self) -> Mapping[str, object]:
-        provider: dict[str, object] = {}
-        if self.order is not None:
-            provider["order"] = list(self.order)
-        if self.require_parameters is not None:
-            provider["require_parameters"] = self.require_parameters
-        if not provider:
-            return {}
-        return {"provider": provider}
-
-
-_OPENROUTER_PROVIDER_OPTIONS_ADAPTER = TypeAdapter(dict[str, OpenRouterModelProviderOptions])
-
 SearchProviderName = Literal["desearch", "parallel"]
 SEARCH_PROVIDER_NAMES: tuple[SearchProviderName, ...] = ("desearch", "parallel")
 
@@ -226,10 +189,6 @@ class LlmSettings(BaseSettings):
     llm_model_provider_overrides_json: str | None = Field(default=None, alias="LLM_MODEL_PROVIDER_OVERRIDES_JSON")
     openai_compatible_endpoints_json: str | None = Field(default=None, alias="LLM_OPENAI_COMPATIBLE_ENDPOINTS_JSON")
     openrouter_api_key: SecretStr = Field(default_factory=lambda: SecretStr(""), alias="OPENROUTER_API_KEY")
-    openrouter_model_provider_options_json: str | None = Field(
-        default=None,
-        alias="OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON",
-    )
 
     # --- Timeouts ---
     llm_timeout_seconds: float = Field(default=300.0, alias="PLATFORM_LLM_TIMEOUT_SECONDS")
@@ -347,10 +306,6 @@ class LlmSettings(BaseSettings):
         return self.openrouter_api_key.get_secret_value().strip()
 
     @property
-    def openrouter_model_provider_options(self) -> Mapping[str, OpenRouterModelProviderOptions]:
-        return parse_openrouter_model_provider_options_json(self.openrouter_model_provider_options_json)
-
-    @property
     def scoring_llm_model_override_value(self) -> str | None:
         if self.scoring_llm_model_override is None:
             return None
@@ -413,30 +368,6 @@ def parse_openai_compatible_endpoints_json(raw: str | None) -> Mapping[str, Open
     return result
 
 
-def parse_openrouter_model_provider_options_json(raw: str | None) -> Mapping[str, OpenRouterModelProviderOptions]:
-    if raw is None:
-        return {}
-    normalized_raw = raw.strip()
-    if not normalized_raw:
-        return {}
-    try:
-        payload = json.loads(normalized_raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON must be valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON must decode to a JSON object")
-    parsed = _OPENROUTER_PROVIDER_OPTIONS_ADAPTER.validate_python(payload)
-    result: dict[str, OpenRouterModelProviderOptions] = {}
-    for model, options in parsed.items():
-        normalized_model = model.strip()
-        if not normalized_model:
-            raise ValueError("OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON model keys must be non-empty")
-        if normalized_model in result:
-            raise ValueError(f"OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON model key {normalized_model!r} is duplicated")
-        result[normalized_model] = options
-    return result
-
-
 __all__ = [
     "LlmSettings",
     "DEFAULT_MAX_OUTPUT_TOKENS",
@@ -446,10 +377,8 @@ __all__ = [
     "OpenAiCompatibleEndpointConfig",
     "OpenAiCompatibleGoogleIdTokenAuthConfig",
     "OpenAiCompatibleNoAuthConfig",
-    "OpenRouterModelProviderOptions",
     "SEARCH_PROVIDER_NAMES",
     "SearchProviderName",
     "parse_openai_compatible_endpoints_json",
-    "parse_openrouter_model_provider_options_json",
     "parse_search_provider_name",
 ]

@@ -522,7 +522,6 @@ def test_execute_tool_endpoint_records_openrouter_missing_key_as_failed_receipt(
     provider = TrackingDependencyProvider(
         llm_provider=OpenRouterLlmProvider(
             openrouter_api_key=SecretStr(""),
-            model_provider_options={},
         ),
         llm_provider_name="openrouter",
     )

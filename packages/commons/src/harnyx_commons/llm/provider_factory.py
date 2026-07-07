@@ -138,7 +138,6 @@ def build_miner_paid_llm_provider(
             provider_name=provider_name,
             delegate=OpenRouterLlmProvider(
                 openrouter_api_key=SecretStr(explicit_key),
-                model_provider_options=llm_settings.openrouter_model_provider_options,
             ),
         )
     raise AssertionError(f"unsupported parsed miner-paid llm provider: {provider_name}")
@@ -156,7 +155,6 @@ def _build_provider(
             provider_name=route_target,
             delegate=OpenRouterLlmProvider(
                 openrouter_api_key=llm_settings.openrouter_api_key,
-                model_provider_options=llm_settings.openrouter_model_provider_options,
             ),
         )
 

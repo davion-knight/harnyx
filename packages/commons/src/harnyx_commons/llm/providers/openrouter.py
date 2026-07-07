@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from pydantic import SecretStr
 
-from harnyx_commons.config.llm import OpenAiCompatibleEndpointConfig, OpenRouterModelProviderOptions
+from harnyx_commons.config.llm import OpenAiCompatibleEndpointConfig
 from harnyx_commons.llm.provider import LlmProviderConfigurationError, LlmProviderPort
 from harnyx_commons.llm.provider_types import OPENROUTER_PROVIDER
 from harnyx_commons.llm.providers.openai_compatible import OpenAiCompatibleLlmProvider
@@ -45,15 +45,9 @@ class OpenRouterLlmProvider(LlmProviderPort):
         self,
         *,
         openrouter_api_key: SecretStr,
-        model_provider_options: Mapping[str, OpenRouterModelProviderOptions],
         openrouter_chat_provider_factory: OpenRouterChatProviderFactory | None = None,
     ) -> None:
-        unknown_models = set(model_provider_options) - set(OPENROUTER_SUPPORTED_MODELS)
-        if unknown_models:
-            unknown = ", ".join(sorted(unknown_models))
-            raise ValueError(f"OpenRouter provider options configured for unsupported models: {unknown}")
         self._openrouter_api_key = openrouter_api_key
-        self._model_provider_options = dict(model_provider_options)
         self._openrouter_chat_provider_factory = openrouter_chat_provider_factory or build_openrouter_chat_provider
         self._openrouter_provider: OpenAiCompatibleLlmProvider | None = None
         self._openrouter_client: httpx.AsyncClient | None = None
@@ -100,7 +94,7 @@ class OpenRouterLlmProvider(LlmProviderPort):
         return provider
 
     def _openrouter_request(self, request: AbstractLlmRequest, *, model: str) -> AbstractLlmRequest:
-        extra = _merge_extra(request.extra, self._model_provider_options.get(model))
+        extra = dict(request.extra or {})
         extra = _merge_reasoning_extra(extra, request.thinking)
         return replace(
             request,
@@ -126,28 +120,6 @@ def build_openrouter_chat_provider(api_key: str) -> tuple[OpenAiCompatibleLlmPro
         }
     )
     return OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client), client
-
-
-def _merge_extra(
-    request_extra: Mapping[str, Any] | None,
-    options: OpenRouterModelProviderOptions | None,
-) -> dict[str, Any]:
-    merged: dict[str, Any] = dict(request_extra or {})
-    if options is None:
-        return merged
-    options_extra = dict(options.to_request_extra())
-    provider_options = options_extra.get("provider")
-    if provider_options is None:
-        return merged
-    if not isinstance(provider_options, Mapping):
-        raise AssertionError("OpenRouter provider options must serialize provider as an object")
-    request_provider = merged.get("provider")
-    if request_provider is not None and not isinstance(request_provider, Mapping):
-        raise ValueError("OpenRouter request extra.provider must be an object")
-    merged_provider = dict(request_provider or {})
-    merged_provider.update(dict(provider_options))
-    merged["provider"] = merged_provider
-    return merged
 
 
 def _merge_reasoning_extra(

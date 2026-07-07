@@ -247,10 +247,7 @@ def test_miner_paid_openrouter_provider_uses_explicit_key(
     monkeypatch.setattr(provider_factory, "OpenRouterLlmProvider", _FakeOpenRouterProvider)
     monkeypatch.setattr(provider_factory, "LlmProviderAdapter", _FakeAdapter)
 
-    settings = LlmSettings(
-        OPENROUTER_API_KEY="operator-openrouter-key",
-        OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON='{"openai/gpt-oss-20b":{"require_parameters":true}}',
-    )
+    settings = LlmSettings(OPENROUTER_API_KEY="operator-openrouter-key")
     provider = provider_factory.build_miner_paid_llm_provider(
         provider="openrouter",
         api_key=SecretStr("miner-openrouter-key"),
@@ -261,7 +258,7 @@ def test_miner_paid_openrouter_provider_uses_explicit_key(
     openrouter_api_key = captured_providers[0]["openrouter_api_key"]
     assert isinstance(openrouter_api_key, SecretStr)
     assert openrouter_api_key.get_secret_value() == "miner-openrouter-key"
-    assert captured_providers[0]["model_provider_options"] == settings.openrouter_model_provider_options
+    assert set(captured_providers[0]) == {"openrouter_api_key"}
     adapter = cast(_FakeAdapter, provider)
     assert captured_adapters == [("openrouter", adapter.delegate)]
 
@@ -432,13 +429,7 @@ def test_build_cached_llm_provider_registry_builds_hardcoded_openrouter_target(
     monkeypatch.setattr(provider_factory, "OpenRouterLlmProvider", _FakeOpenRouterProvider)
     monkeypatch.setattr(provider_factory, "LlmProviderAdapter", _FakeAdapter)
 
-    settings = LlmSettings(
-        OPENROUTER_API_KEY="test-openrouter-key",
-        OPENROUTER_MODEL_PROVIDER_OPTIONS_JSON=(
-            '{"openai/gpt-oss-20b":{"require_parameters":true},'
-            '"openai/gpt-oss-120b":{"require_parameters":true}}'
-        ),
-    )
+    settings = LlmSettings(OPENROUTER_API_KEY="test-openrouter-key")
     registry = provider_factory.build_cached_llm_provider_registry(
         llm_settings=settings,
         bedrock_settings=BedrockSettings.model_construct(region="us-east-1"),
@@ -456,7 +447,7 @@ def test_build_cached_llm_provider_registry_builds_hardcoded_openrouter_target(
     assert first is second
     assert len(captured_providers) == 1
     assert captured_providers[0]["openrouter_api_key"] == settings.openrouter_api_key
-    assert captured_providers[0]["model_provider_options"] == settings.openrouter_model_provider_options
+    assert set(captured_providers[0]) == {"openrouter_api_key"}
     first_adapter = cast(_FakeAdapter, first)
     assert captured_adapters == [("openrouter", first_adapter.delegate)]
 
