@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from typing import cast
 
 from harnyx_commons.json_types import JsonObject
-from harnyx_commons.llm.provider_types import CHUTES_PROVIDER, OPENROUTER_PROVIDER, VERTEX_PROVIDER
+from harnyx_commons.llm.provider_types import (
+    AI_GATEWAY_PROVIDER,
+    CHUTES_PROVIDER,
+    OPENROUTER_PROVIDER,
+    VERTEX_PROVIDER,
+)
 from harnyx_commons.llm.providers.vertex.anthropic import is_claude_model, normalize_claude_model
 from harnyx_commons.llm.schema import LlmUsage, extract_vertex_gemini_model_id
 from harnyx_commons.llm.tool_models import (
@@ -83,6 +88,16 @@ MINER_TOOL_LLM_PRICING: Mapping[MinerSelectedLlmProviderName, Mapping[str, Model
         "z-ai/glm-5": MODEL_PRICING["zai-org/GLM-5-TEE"],
         "qwen/qwen3.6-27b": MODEL_PRICING["Qwen/Qwen3.6-27B-TEE"],
         "google/gemma-4-31b-it": MODEL_PRICING["google/gemma-4-31B-turbo-TEE"],
+    },
+    AI_GATEWAY_PROVIDER: {
+        "zai/glm-5.2-fast": ModelPricing(2.10, 6.60, 0.0),
+        "openai/gpt-oss-20b": ModelPricing(0.03, 0.14, 0.0),
+        "zai/glm-4.7": ModelPricing(0.43, 1.75, 0.0),
+        "google/gemma-4-31b-it": ModelPricing(0.14, 0.40, 0.0),
+        "openai/gpt-oss-120b": ModelPricing(0.10, 0.50, 0.0),
+        "alibaba/qwen3.7-plus": ModelPricing(0.32, 1.28, 0.0),
+        "minimax/minimax-m2.7": ModelPricing(0.30, 1.20, 0.0),
+        "zai/glm-4.7-flash": ModelPricing(0.07, 0.40, 0.0),
     },
 }
 

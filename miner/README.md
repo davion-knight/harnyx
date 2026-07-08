@@ -60,6 +60,7 @@ Create a `.env` at the repo root (copy from `.env.example`) and fill:
 |----------|---------|
 | `CHUTES_API_KEY` | Evaluation scoring and `llm_chat` tool calls |
 | `OPENROUTER_API_KEY` | Optional: required only for local tooling that calls OpenRouter with an operator-owned key; miner-paid `provider="openrouter"` calls use the OpenRouter credential stored in miner config |
+| `AI_GATEWAY_API_KEY` | Optional: required only for local tooling that calls AI Gateway with an operator-owned key; miner-paid `provider="ai_gateway"` calls use the AI Gateway credential stored in miner config |
 | `DESEARCH_API_KEY` | Optional: required if your agent uses search tools |
 | `SEARCH_PROVIDER` | Optional: required if your agent uses search tools |
 | `PLATFORM_BASE_URL` | Public monitoring and script uploads |
@@ -81,7 +82,7 @@ harnyx-miner-config --wallet-name <wallet> --hotkey-name <hotkey> --provider chu
 harnyx-miner-config --wallet-name <wallet> --hotkey-name <hotkey> --delete-provider chutes
 ```
 
-Supported providers are `chutes`, `openrouter`, `desearch`, and `parallel`.
+Supported providers are `chutes`, `openrouter`, `ai_gateway`, `desearch`, and `parallel`.
 Reads return only whether each provider credential exists and timestamps; raw API keys are never returned.
 Active miner-task batch execution uses these stored credentials through platform tool proxy execution. Validators receive only short-lived platform-tool-proxy tokens for one batch artifact/task/validator attempt. Retry attempts receive fresh validator sessions and fresh tokens, while the platform still enforces each artifact snapshot's configured `task_retry_count`. Raw provider API keys stay inside the platform boundary.
 When your artifact becomes the active champion and receives champion emission, the platform also uses those stored provider API keys to run benchmark suites for that champion artifact.
@@ -239,8 +240,11 @@ Current allowed `llm_chat` provider/model ids in this repo:
 |----------|-----------|
 | `chutes` | `deepseek-ai/DeepSeek-V3.2-TEE`, `zai-org/GLM-5-TEE`, `Qwen/Qwen3.6-27B-TEE`, `google/gemma-4-31B-turbo-TEE` |
 | `openrouter` | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `deepseek/deepseek-v3.2`, `z-ai/glm-5`, `qwen/qwen3.6-27b`, `google/gemma-4-31b-it` |
+| `ai_gateway` | `zai/glm-5.2-fast`, `openai/gpt-oss-20b`, `zai/glm-4.7`, `google/gemma-4-31b-it`, `openai/gpt-oss-120b`, `alibaba/qwen3.7-plus`, `minimax/minimax-m2.7`, `zai/glm-4.7-flash` |
 
-Use `provider_extra` only for selected-provider-specific request additions that do not already have common `llm_chat` parameters. The schema is selected by the sibling `provider` value and is strict. Today it supports only OpenRouter provider selection:
+`tooling_info().response["pricing"]["llm_chat"]["provider_models"]` exposes representative static rates for each provider/model pair. For OpenRouter and AI Gateway, those are reference prices for budgeting and fallback settlement; actual provider-returned cost wins when the provider returns one.
+
+Use `provider_extra` only for selected-provider-specific request additions that do not already have common `llm_chat` parameters. The schema is selected by the sibling `provider` value and is strict. OpenRouter supports provider selection:
 
 ```python
 response = await llm_chat(
@@ -250,6 +254,26 @@ response = await llm_chat(
     provider_extra={"provider": {"only": ["cerebras"]}},
 )
 ```
+
+AI Gateway accepts Vercel's top-level `provider` shorthand or the `providerOptions.gateway` form. Use these for request-level upstream provider selection, for example Cerebras through AI Gateway:
+
+```python
+await llm_chat(
+    provider="ai_gateway",
+    model="openai/gpt-oss-120b",
+    messages=[{"role": "user", "content": "Reply with only ok."}],
+    provider_extra={"provider": {"only": ["cerebras"]}},
+)
+
+await llm_chat(
+    provider="ai_gateway",
+    model="openai/gpt-oss-120b",
+    messages=[{"role": "user", "content": "Reply with only ok."}],
+    provider_extra={"providerOptions": {"gateway": {"only": ["cerebras"]}}},
+)
+```
+
+Do not pass `provider_extra={"provider": "cerebras"}`. Vercel expects provider routing options as objects, and the SDK/runtime rejects the raw string form.
 
 Do not put common behavior in `provider_extra`. For example, reasoning controls belong in `thinking` even when a provider's raw API spells them differently. Chutes raw reasoning options are handled by `thinking`, not `provider_extra`. Other OpenRouter provider-preference fields such as `order`, `allow_fallbacks`, `require_parameters`, `ignore`, `quantizations`, `sort`, and `max_price` are not supported here.
 
@@ -263,6 +287,7 @@ Thinking controls are provider/model specific:
 | `openrouter` | `openai/gpt-oss-20b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
 | `openrouter` | `openai/gpt-oss-120b` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
 | `openrouter` | `deepseek/deepseek-v3.2`, `z-ai/glm-5`, `qwen/qwen3.6-27b`, `google/gemma-4-31b-it` | Supported via OpenRouter `reasoning.enabled` / `reasoning.effort="none"` | Supported via OpenRouter `reasoning.effort` | Supported via OpenRouter `reasoning.max_tokens` |
+| `ai_gateway` | All allowed AI Gateway models | Supported via AI Gateway `reasoning.enabled` / `reasoning.effort="none"` | Supported via AI Gateway `reasoning.effort` | Supported via AI Gateway `reasoning.max_tokens` |
 | `chutes` | `deepseek-ai/DeepSeek-V3.2-TEE` | Supported via `chat_template_kwargs.thinking` | Unsupported for Chutes; not serialized | Unsupported for Chutes; not serialized |
 | `chutes` | `zai-org/GLM-5-TEE` | Supported via `chat_template_kwargs.enable_thinking` | Unsupported for Chutes; not serialized | Unsupported for Chutes; not serialized |
 | `chutes` | `Qwen/Qwen3.6-27B-TEE`, `google/gemma-4-31B-turbo-TEE` | Supported via `chat_template_kwargs.enable_thinking` | Unsupported for Chutes; not serialized | Unsupported for Chutes; not serialized |
@@ -291,7 +316,7 @@ response = await llm_chat(
 )
 ```
 
-`effort` (`"low"`, `"medium"`, `"high"`) and `budget` are supported when the selected provider/model uses OpenRouter reasoning controls. They cannot be sent together, and invalid scalar values are rejected; for example, `"false"` is not accepted as a boolean. Thinking controls are best effort across providers: if the selected model/provider has no verified control, the request still runs and unsupported hints are not serialized into guessed provider fields.
+`effort` (`"low"`, `"medium"`, `"high"`) and `budget` are supported when the selected provider/model uses OpenRouter or AI Gateway reasoning controls. They cannot be sent together, and invalid scalar values are rejected; for example, `"false"` is not accepted as a boolean. Thinking controls are best effort across providers: if the selected model/provider has no verified control, the request still runs and unsupported hints are not serialized into guessed provider fields.
 
 Core subnet-facing tools today:
 - `search_web`: web search results; pass `timeout=<seconds>` to bound the full search call

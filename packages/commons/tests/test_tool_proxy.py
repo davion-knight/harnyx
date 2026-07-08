@@ -778,6 +778,55 @@ async def test_llm_chat_helper_forwards_openrouter_provider_extra() -> None:
     assert payload["kwargs"]["provider_extra"] == {"provider": {"only": ["cerebras"]}}
 
 
+async def test_llm_chat_helper_forwards_ai_gateway_provider_extra() -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json=_tool_response_payload(
+                receipt_id="chat-ai-gateway-extra",
+                response={
+                    "id": "resp-ai-gateway-extra",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "hi"}],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                },
+            ),
+        )
+
+    proxy = ToolProxy(
+        base_url="http://validator",
+        token=TEST_TOKEN,
+        session_id=SESSION_ID,
+        client=httpx.AsyncClient(base_url="http://validator", transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with bind_tool_invoker(proxy):
+            result = await llm_chat(
+                provider="ai_gateway",
+                messages=[{"role": "user", "content": "hi"}],
+                model="zai/glm-5.2-fast",
+                provider_extra={"providerOptions": {"gateway": {"only": ["cerebras"]}}},
+            )
+    finally:
+        await proxy.aclose()
+
+    assert result.receipt_id == "chat-ai-gateway-extra"
+    payload = captured["payload"]
+    assert payload["tool"] == "llm_chat"
+    assert payload["kwargs"]["provider"] == "ai_gateway"
+    assert payload["kwargs"]["provider_extra"] == {"providerOptions": {"gateway": {"only": ["cerebras"]}}}
+
+
 async def test_llm_chat_helper_rejects_chutes_provider_extra_before_proxy_call() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("llm_chat should reject chutes provider_extra before invoking the tool proxy")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -322,36 +322,58 @@ async def iter_openai_sse_events(
     invalid_data_message: str,
     invalid_event_message: str,
 ) -> AsyncIterator[_OpenAiStreamEvent]:
+    async for payload in iter_openai_sse_payloads(
+        response,
+        invalid_data_message=invalid_data_message,
+        invalid_event_message=invalid_event_message,
+    ):
+        try:
+            yield _OpenAiStreamEvent.model_validate(payload)
+        except ValidationError as exc:
+            raise OpenAiStreamError(
+                message=invalid_event_message,
+                error_type="server_error",
+                code=502,
+            ) from exc
+
+
+async def iter_openai_sse_payloads(
+    response: httpx.Response,
+    *,
+    invalid_data_message: str,
+    invalid_event_message: str,
+) -> AsyncIterator[dict[str, Any]]:
     data_lines: list[str] = []
     async for line in response.aiter_lines():
         if line == "":
-            event = _parse_sse_event_payload(
+            payload = _parse_sse_payload(
                 data_lines,
                 invalid_data_message=invalid_data_message,
                 invalid_event_message=invalid_event_message,
             )
             data_lines.clear()
-            if event is not None:
-                yield event
+            if payload is not None:
+                yield payload
             continue
         if line.startswith(":"):
             continue
         if line.startswith("data:"):
             data_lines.append(line[5:].lstrip())
-    event = _parse_sse_event_payload(
+    payload = _parse_sse_payload(
         data_lines,
         invalid_data_message=invalid_data_message,
         invalid_event_message=invalid_event_message,
     )
-    if event is not None:
-        yield event
+    if payload is not None:
+        yield payload
 
-def _parse_sse_event_payload(
+
+def _parse_sse_payload(
     data_lines: list[str],
     *,
     invalid_data_message: str,
     invalid_event_message: str,
-) -> _OpenAiStreamEvent | None:
+) -> dict[str, Any] | None:
     if not data_lines:
         return None
     raw_payload = "\n".join(data_lines).strip()
@@ -383,14 +405,13 @@ def _parse_sse_event_payload(
             error_type=envelope.error.type,
             code=envelope.error.code,
         )
-    try:
-        return _OpenAiStreamEvent.model_validate(payload)
-    except ValidationError as exc:
+    if not isinstance(payload, dict):
         raise OpenAiStreamError(
             message=invalid_event_message,
             error_type="server_error",
             code=502,
-        ) from exc
+        )
+    return cast(dict[str, Any], payload)
 
 
 def normalize_openai_text_fragments(
@@ -448,6 +469,7 @@ __all__ = [
     "OpenAiToolCall",
     "OpenAiToolCallState",
     "iter_openai_sse_events",
+    "iter_openai_sse_payloads",
     "normalize_openai_reasoning_fragments",
     "normalize_openai_text_fragments",
 ]

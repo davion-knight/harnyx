@@ -67,7 +67,7 @@ from harnyx_commons.tools.search_models import (
 )
 from harnyx_commons.tools.types import TOOL_NAMES, SearchToolName, ToolInvocationTimeout, ToolName, is_search_tool
 from harnyx_commons.tools.usage_tracker import ToolCallUsage  # noqa: F401 - compatibility
-from harnyx_miner_sdk.tools.llm_provider_extra import OpenRouterExtra, validate_provider_extra
+from harnyx_miner_sdk.tools.llm_provider_extra import ProviderExtra, validate_provider_extra
 
 MINER_SANDBOX_TOOL_NAMES: tuple[ToolName, ...] = tuple(sorted(TOOL_NAMES))
 DEFAULT_TOOL_LLM_TIMEOUT_SECONDS = PLATFORM_TOOL_PROXY_LLM_CHAT_DEFAULT_TIMEOUT_SECONDS
@@ -147,7 +147,7 @@ class LlmThinkingConfigPayload(BaseModel):
 class LlmToolInvocation(BaseModel):
     """Request payload for llm_chat tool calls."""
 
-    provider: Literal["chutes", "openrouter"]
+    provider: Literal["chutes", "openrouter", "ai_gateway"]
     model: str
     messages: tuple[LlmToolMessage, ...]
     timeout: ToolInvocationTimeout | None = None
@@ -159,7 +159,7 @@ class LlmToolInvocation(BaseModel):
     tool_choice: Literal["auto", "required"] | None = None
     include: tuple[str, ...] | None = None
     thinking: LlmThinkingConfigPayload | None = None
-    provider_extra: OpenRouterExtra | None = None
+    provider_extra: ProviderExtra | None = None
 
     model_config = ConfigDict(extra="forbid")
 

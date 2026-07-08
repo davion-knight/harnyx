@@ -38,7 +38,7 @@ uv run --package harnyx-miner harnyx-miner-config \
   --api-key <provider-api-key>
 ```
 
-3. Use only supported providers: `chutes`, `openrouter`, `desearch`, `parallel`.
+3. Use only supported providers: `chutes`, `openrouter`, `ai_gateway`, `desearch`, `parallel`.
 4. Set retry behavior only when intentional:
 
 ```bash

@@ -123,6 +123,25 @@ def test_delete_provider_credential_sends_key_only_payload(monkeypatch: pytest.M
     assert json.loads(requests[0]["content"]) == {"key": "provider_credentials.parallel"}
 
 
+def test_put_ai_gateway_provider_credential_sends_supported_provider_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hotkey, requests = _install_fakes(monkeypatch)
+
+    config_module.put_provider_credential(
+        provider=" AI_GATEWAY ",
+        api_key="secret-ai-gateway-key",
+        wallet_name="wallet",
+        hotkey_name="hotkey",
+    )
+
+    assert requests[0]["method"] == "PUT"
+    assert json.loads(requests[0]["content"]) == {
+        "key": "provider_credentials.ai_gateway",
+        "value": "secret-ai-gateway-key",
+    }
+
+
 def test_put_task_retry_count_sends_supported_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     _hotkey, requests = _install_fakes(monkeypatch)
 

@@ -51,6 +51,53 @@ def test_openrouter_missing_usage_cost_uses_static_pricing() -> None:
     assert cost.evidence["reasoning_tokens"] is None
 
 
+def test_ai_gateway_provider_metadata_cost_wins() -> None:
+    cost = settled_response_cost(
+        _response(
+            metadata={
+                "raw_response": {
+                    "providerMetadata": {
+                        "gateway": {
+                            "cost": "0.0123",
+                        },
+                    },
+                },
+            },
+        ),
+        provider="ai_gateway",
+        model="zai/glm-5.2-fast",
+    )
+
+    assert cost is not None
+    assert cost.cost_usd == pytest.approx(0.0123)
+    assert cost.provider == "ai_gateway"
+    assert cost.evidence["settlement_source"] == "provider_returned"
+    assert cost.evidence["pricing_origin"] == "ai_gateway_provider_metadata_cost"
+
+
+@pytest.mark.parametrize("raw_cost", [True, "not-a-decimal", float("nan"), -0.01])
+def test_ai_gateway_malformed_provider_metadata_cost_falls_back_to_static_pricing(raw_cost: object) -> None:
+    cost = settled_response_cost(
+        _response(
+            metadata={
+                "raw_response": {
+                    "providerMetadata": {
+                        "gateway": {
+                            "cost": raw_cost,
+                        },
+                    },
+                },
+            },
+        ),
+        provider="ai_gateway",
+        model="openai/gpt-oss-20b",
+    )
+
+    assert cost is not None
+    assert cost.evidence["settlement_source"] == "static_pricing"
+    assert cost.evidence["pricing_origin"] == "miner_tool_llm_pricing"
+
+
 def test_static_pricing_evidence_preserves_reported_reasoning_tokens() -> None:
     cost = settled_response_cost(
         _response(usage=LlmUsage(prompt_tokens=1_000, completion_tokens=2_000, reasoning_tokens=7, total_tokens=3_007)),

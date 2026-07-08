@@ -125,6 +125,23 @@ async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
     assert model_prices["openrouter"]["deepseek/deepseek-v3.2"]["input_per_million"] == pytest.approx(
         MODEL_PRICING[model].input_per_million
     )
+    assert provider_models["ai_gateway"] == list(MINER_SELECTED_LLM_PROVIDER_MODELS["ai_gateway"])
+    assert model_prices["ai_gateway"]["zai/glm-5.2-fast"]["input_per_million"] == pytest.approx(2.10)
+    assert model_prices["ai_gateway"]["zai/glm-5.2-fast"]["output_per_million"] == pytest.approx(6.60)
+    assert model_prices["ai_gateway"]["openai/gpt-oss-20b"]["input_per_million"] == pytest.approx(0.03)
+    assert model_prices["ai_gateway"]["openai/gpt-oss-20b"]["output_per_million"] == pytest.approx(0.14)
+    assert model_prices["ai_gateway"]["zai/glm-4.7"]["input_per_million"] == pytest.approx(0.43)
+    assert model_prices["ai_gateway"]["zai/glm-4.7"]["output_per_million"] == pytest.approx(1.75)
+    assert model_prices["ai_gateway"]["google/gemma-4-31b-it"]["input_per_million"] == pytest.approx(0.14)
+    assert model_prices["ai_gateway"]["google/gemma-4-31b-it"]["output_per_million"] == pytest.approx(0.40)
+    assert model_prices["ai_gateway"]["openai/gpt-oss-120b"]["input_per_million"] == pytest.approx(0.10)
+    assert model_prices["ai_gateway"]["openai/gpt-oss-120b"]["output_per_million"] == pytest.approx(0.50)
+    assert model_prices["ai_gateway"]["alibaba/qwen3.7-plus"]["input_per_million"] == pytest.approx(0.32)
+    assert model_prices["ai_gateway"]["alibaba/qwen3.7-plus"]["output_per_million"] == pytest.approx(1.28)
+    assert model_prices["ai_gateway"]["minimax/minimax-m2.7"]["input_per_million"] == pytest.approx(0.30)
+    assert model_prices["ai_gateway"]["minimax/minimax-m2.7"]["output_per_million"] == pytest.approx(1.20)
+    assert model_prices["ai_gateway"]["zai/glm-4.7-flash"]["input_per_million"] == pytest.approx(0.07)
+    assert model_prices["ai_gateway"]["zai/glm-4.7-flash"]["output_per_million"] == pytest.approx(0.40)
 
 
 async def test_tooling_info_default_surface_matches_miner_contract() -> None:
@@ -155,6 +172,8 @@ def test_zero_reasoning_price_falls_back_to_output_price() -> None:
     assert price_llm(parse_tool_model("openai/gpt-oss-120b"), usage) == pytest.approx(0.399)
     assert price_miner_llm("openrouter", "deepseek/deepseek-v3.2", usage) == pytest.approx(1.12)
     assert price_miner_llm("chutes", "deepseek-ai/DeepSeek-V3.2-TEE", usage) == pytest.approx(1.12)
+    assert price_miner_llm("ai_gateway", "openai/gpt-oss-20b", usage) == pytest.approx(0.31)
+    assert price_miner_llm("ai_gateway", "zai/glm-5.2-fast", usage) == pytest.approx(15.30)
 
 
 @pytest.mark.parametrize(

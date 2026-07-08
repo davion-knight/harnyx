@@ -12,6 +12,7 @@ CHUTES_PROVIDER = "chutes"
 VERTEX_PROVIDER = "vertex"
 CUSTOM_OPENAI_COMPATIBLE_PROVIDER_TAG = "custom-openai-compatible"
 OPENROUTER_PROVIDER = "openrouter"
+AI_GATEWAY_PROVIDER = "ai_gateway"
 
 LlmProviderName = Literal["bedrock", "chutes", "vertex"]
 LlmRouteTarget = str
@@ -78,6 +79,7 @@ def normalize_reasoning_effort(reasoning_effort: str | None) -> str | None:
 
 __all__ = [
     "ALLOWED_LLM_PROVIDERS",
+    "AI_GATEWAY_PROVIDER",
     "BEDROCK_PROVIDER",
     "CHUTES_PROVIDER",
     "CUSTOM_OPENAI_COMPATIBLE_PROVIDER_TAG",

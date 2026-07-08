@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from harnyx_commons.llm.provider_types import (
+    AI_GATEWAY_PROVIDER,
     CHUTES_PROVIDER,
     CUSTOM_OPENAI_COMPATIBLE_PROVIDER_TAG,
+    OPENROUTER_PROVIDER,
     VERTEX_PROVIDER,
 )
 
@@ -26,7 +28,7 @@ ToolModelThinkingField = Literal[
     "chat_template_kwargs.enable_thinking",
 ]
 ToolModelThinkingProvider = Literal["chutes", "vertex", "custom-openai-compatible"]
-MinerSelectedLlmProviderName = Literal["chutes", "openrouter"]
+MinerSelectedLlmProviderName = Literal["chutes", "openrouter", "ai_gateway"]
 MinerSelectedLlmModelName = str
 
 ALLOWED_TOOL_MODELS: tuple[ToolModelName, ...] = (
@@ -39,27 +41,38 @@ ALLOWED_TOOL_MODELS: tuple[ToolModelName, ...] = (
 )
 
 MINER_SELECTED_LLM_PROVIDERS: tuple[MinerSelectedLlmProviderName, ...] = (
-    "chutes",
-    "openrouter",
+    CHUTES_PROVIDER,
+    OPENROUTER_PROVIDER,
+    AI_GATEWAY_PROVIDER,
 )
 
 MINER_SELECTED_LLM_PROVIDER_MODELS: Mapping[
     MinerSelectedLlmProviderName,
     tuple[MinerSelectedLlmModelName, ...],
 ] = {
-    "chutes": (
+    CHUTES_PROVIDER: (
         "deepseek-ai/DeepSeek-V3.2-TEE",
         "zai-org/GLM-5-TEE",
         "Qwen/Qwen3.6-27B-TEE",
         "google/gemma-4-31B-turbo-TEE",
     ),
-    "openrouter": (
+    OPENROUTER_PROVIDER: (
         "openai/gpt-oss-20b",
         "openai/gpt-oss-120b",
         "deepseek/deepseek-v3.2",
         "z-ai/glm-5",
         "qwen/qwen3.6-27b",
         "google/gemma-4-31b-it",
+    ),
+    AI_GATEWAY_PROVIDER: (
+        "zai/glm-5.2-fast",
+        "openai/gpt-oss-20b",
+        "zai/glm-4.7",
+        "google/gemma-4-31b-it",
+        "openai/gpt-oss-120b",
+        "alibaba/qwen3.7-plus",
+        "minimax/minimax-m2.7",
+        "zai/glm-4.7-flash",
     ),
 }
 

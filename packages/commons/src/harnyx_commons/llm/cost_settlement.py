@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from typing import cast
 
 from harnyx_commons.json_types import JsonObject
@@ -14,7 +15,7 @@ from harnyx_commons.llm.pricing import (
     price_miner_llm,
     price_static_llm_model,
 )
-from harnyx_commons.llm.provider_types import OPENROUTER_PROVIDER
+from harnyx_commons.llm.provider_types import AI_GATEWAY_PROVIDER, OPENROUTER_PROVIDER
 from harnyx_commons.llm.schema import LlmResponse, LlmUsage
 from harnyx_commons.llm.tool_models import MinerSelectedLlmProviderName
 
@@ -88,6 +89,10 @@ def settled_response_cost(
         openrouter_cost = _openrouter_provider_returned_cost(response=response, model=model)
         if openrouter_cost is not None:
             return openrouter_cost
+    if normalized_provider == AI_GATEWAY_PROVIDER:
+        ai_gateway_cost = _ai_gateway_provider_returned_cost(response=response, model=model)
+        if ai_gateway_cost is not None:
+            return ai_gateway_cost
 
     return settled_static_llm_cost(
         provider=normalized_provider,
@@ -168,6 +173,38 @@ def _openrouter_provider_returned_cost(
     )
 
 
+def _ai_gateway_provider_returned_cost(
+    *,
+    response: LlmResponse,
+    model: str,
+) -> SettledLlmCost | None:
+    raw_response = (response.metadata or {}).get("raw_response")
+    if not isinstance(raw_response, Mapping):
+        return None
+    raw_response_mapping = cast(Mapping[str, object], raw_response)
+    provider_metadata = raw_response_mapping.get("providerMetadata")
+    if not isinstance(provider_metadata, Mapping):
+        return None
+    provider_metadata_mapping = cast(Mapping[str, object], provider_metadata)
+    gateway = provider_metadata_mapping.get("gateway")
+    if not isinstance(gateway, Mapping):
+        return None
+    gateway_mapping = cast(Mapping[str, object], gateway)
+    cost_usd = _normalized_ai_gateway_cost(gateway_mapping.get("cost"))
+    if cost_usd is None:
+        return None
+    return SettledLlmCost(
+        cost_usd=cost_usd,
+        provider=AI_GATEWAY_PROVIDER,
+        evidence={
+            "settlement_source": "provider_returned",
+            "pricing_origin": "ai_gateway_provider_metadata_cost",
+            "provider": AI_GATEWAY_PROVIDER,
+            "model": model,
+        },
+    )
+
+
 def _has_miner_static_pricing(*, provider: str, model: str) -> bool:
     if provider not in MINER_TOOL_LLM_PRICING:
         return False
@@ -197,6 +234,28 @@ def _normalized_cost(
             raise ValueError(f"{field_name} must be non-negative when supplied")
         return None
     return cost
+
+
+def _normalized_ai_gateway_cost(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        cost = float(value)
+        if not math.isfinite(cost) or cost < 0.0:
+            return None
+        return cost
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        decimal_cost = Decimal(normalized)
+    except InvalidOperation:
+        return None
+    if not decimal_cost.is_finite() or decimal_cost < 0:
+        return None
+    return float(decimal_cost)
 
 
 __all__ = [

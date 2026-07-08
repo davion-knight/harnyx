@@ -14,7 +14,12 @@ from harnyx_miner_sdk.tools.http_models import (
     ToolResultDTO,
     ToolUsageDTO,
 )
-from harnyx_miner_sdk.tools.llm_provider_extra import OpenRouterExtra, validate_provider_extra
+from harnyx_miner_sdk.tools.llm_provider_extra import (
+    AiGatewayExtra,
+    OpenRouterExtra,
+    ProviderExtra,
+    validate_provider_extra,
+)
 from harnyx_miner_sdk.tools.search_models import (
     FetchPageRequest,
     FetchPageResponse,
@@ -98,7 +103,7 @@ class _LlmChatThinkingPayload(BaseModel):
 class _LlmChatInvocationPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["chutes", "openrouter"]
+    provider: Literal["chutes", "openrouter", "ai_gateway"]
     model: str
     messages: list[dict[str, Any]]
     timeout: ToolInvocationTimeout | None = None
@@ -295,6 +300,19 @@ async def llm_chat(
 @overload
 async def llm_chat(
     *,
+    provider: Literal["ai_gateway"],
+    messages: Sequence[Mapping[str, Any]],
+    model: str,
+    thinking: Mapping[str, Any] | LlmThinkingConfig | None = None,
+    provider_extra: Mapping[str, Any] | AiGatewayExtra | None = None,
+    timeout: float | None = None,
+    **params: Any,
+) -> LlmChatResult: ...
+
+
+@overload
+async def llm_chat(
+    *,
     provider: Literal["chutes"],
     messages: Sequence[Mapping[str, Any]],
     model: str,
@@ -307,11 +325,11 @@ async def llm_chat(
 
 async def llm_chat(
     *,
-    provider: Literal["chutes", "openrouter"],
+    provider: Literal["chutes", "openrouter", "ai_gateway"],
     messages: Sequence[Mapping[str, Any]],
     model: str,
     thinking: Mapping[str, Any] | LlmThinkingConfig | None = None,
-    provider_extra: Mapping[str, Any] | OpenRouterExtra | None = None,
+    provider_extra: Mapping[str, Any] | ProviderExtra | None = None,
     timeout: float | None = None,
     **params: Any,
 ) -> LlmChatResult:
@@ -321,9 +339,10 @@ async def llm_chat(
     if thinking is not None:
         payload_raw["thinking"] = asdict(thinking) if isinstance(thinking, LlmThinkingConfig) else thinking
     if provider_extra is not None:
-        payload_raw["provider_extra"] = (
-            provider_extra.to_request_extra() if isinstance(provider_extra, OpenRouterExtra) else provider_extra
-        )
+        if isinstance(provider_extra, OpenRouterExtra | AiGatewayExtra):
+            payload_raw["provider_extra"] = provider_extra.to_request_extra()
+        else:
+            payload_raw["provider_extra"] = provider_extra
     if timeout is not None:
         payload_raw["timeout"] = timeout
     if params:

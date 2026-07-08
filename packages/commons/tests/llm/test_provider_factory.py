@@ -263,6 +263,41 @@ def test_miner_paid_openrouter_provider_uses_explicit_key(
     assert captured_adapters == [("openrouter", adapter.delegate)]
 
 
+def test_miner_paid_ai_gateway_provider_uses_explicit_key(
+    monkeypatch,
+) -> None:
+    captured_providers: list[dict[str, object]] = []
+    captured_adapters: list[tuple[str, object]] = []
+
+    class _FakeAiGatewayProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured_providers.append(kwargs)
+
+    class _FakeAdapter:
+        def __init__(self, *, provider_name: str, delegate: object) -> None:
+            self.provider_name = provider_name
+            self.delegate = delegate
+            captured_adapters.append((provider_name, delegate))
+
+    monkeypatch.setattr(provider_factory, "AiGatewayLlmProvider", _FakeAiGatewayProvider)
+    monkeypatch.setattr(provider_factory, "LlmProviderAdapter", _FakeAdapter)
+
+    settings = LlmSettings(AI_GATEWAY_API_KEY="operator-ai-gateway-key")
+    provider = provider_factory.build_miner_paid_llm_provider(
+        provider="ai_gateway",
+        api_key=SecretStr("miner-ai-gateway-key"),
+        llm_settings=settings,
+    )
+
+    assert len(captured_providers) == 1
+    ai_gateway_api_key = captured_providers[0]["ai_gateway_api_key"]
+    assert isinstance(ai_gateway_api_key, SecretStr)
+    assert ai_gateway_api_key.get_secret_value() == "miner-ai-gateway-key"
+    assert set(captured_providers[0]) == {"ai_gateway_api_key"}
+    adapter = cast(_FakeAdapter, provider)
+    assert captured_adapters == [("ai_gateway", adapter.delegate)]
+
+
 def test_miner_paid_llm_provider_rejects_blank_key() -> None:
     with pytest.raises(ValueError, match="miner-paid API key must be provided"):
         provider_factory.build_miner_paid_llm_provider(
@@ -450,6 +485,48 @@ def test_build_cached_llm_provider_registry_builds_hardcoded_openrouter_target(
     assert set(captured_providers[0]) == {"openrouter_api_key"}
     first_adapter = cast(_FakeAdapter, first)
     assert captured_adapters == [("openrouter", first_adapter.delegate)]
+
+
+def test_build_cached_llm_provider_registry_builds_hardcoded_ai_gateway_target(
+    monkeypatch,
+) -> None:
+    captured_providers: list[dict[str, object]] = []
+    captured_adapters: list[tuple[str, object]] = []
+
+    class _FakeAiGatewayProvider:
+        def __init__(self, **kwargs: object) -> None:
+            captured_providers.append(kwargs)
+
+    class _FakeAdapter:
+        def __init__(self, *, provider_name: str, delegate: object) -> None:
+            self.provider_name = provider_name
+            self.delegate = delegate
+            captured_adapters.append((provider_name, delegate))
+
+    monkeypatch.setattr(provider_factory, "AiGatewayLlmProvider", _FakeAiGatewayProvider)
+    monkeypatch.setattr(provider_factory, "LlmProviderAdapter", _FakeAdapter)
+
+    settings = LlmSettings(AI_GATEWAY_API_KEY="test-ai-gateway-key")
+    registry = provider_factory.build_cached_llm_provider_registry(
+        llm_settings=settings,
+        bedrock_settings=BedrockSettings.model_construct(region="us-east-1"),
+        vertex_settings=VertexSettings.model_construct(
+            gcp_project_id="project",
+            gcp_location="us-central1",
+            vertex_timeout_seconds=45.0,
+            gcp_service_account_credential_b64=SecretStr("vertex-creds"),
+        ),
+    )
+
+    first = registry.resolve("ai_gateway")
+    second = registry.resolve("ai_gateway")
+
+    assert first is second
+    assert len(captured_providers) == 1
+    assert captured_providers[0]["ai_gateway_api_key"] == settings.ai_gateway_api_key
+    assert set(captured_providers[0]) == {"ai_gateway_api_key"}
+    first_adapter = cast(_FakeAdapter, first)
+    assert captured_adapters == [("ai_gateway", first_adapter.delegate)]
 
 
 def test_build_cached_llm_provider_registry_does_not_treat_openrouter_as_configured_custom_endpoint(

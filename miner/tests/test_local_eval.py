@@ -1174,6 +1174,7 @@ def test_invocation_only_runtime_factory_skips_default_scoring_provider(
     assert captured_tooling_kwargs
     assert captured_tooling_kwargs[0]["search_provider_resolver"]("parallel", object()) is not None
     assert captured_tooling_kwargs[0]["llm_provider_resolver"]("openrouter", object()) is not None
+    assert captured_tooling_kwargs[0]["llm_provider_resolver"]("ai_gateway", object()) is not None
 
 
 def test_local_eval_target_only_skips_champion_fetch_and_keeps_recorded_context(

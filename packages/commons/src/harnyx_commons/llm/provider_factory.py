@@ -13,11 +13,13 @@ from harnyx_commons.config.vertex import VertexSettings
 from harnyx_commons.llm.adapter import LlmProviderAdapter
 from harnyx_commons.llm.provider import LlmProviderName, LlmProviderPort
 from harnyx_commons.llm.provider_types import (
+    AI_GATEWAY_PROVIDER,
     OPENROUTER_PROVIDER,
     parse_builtin_provider_name,
     parse_custom_openai_compatible_target,
     parse_provider_route_target,
 )
+from harnyx_commons.llm.providers.ai_gateway import AiGatewayLlmProvider
 from harnyx_commons.llm.providers.bedrock import BedrockLlmProvider
 from harnyx_commons.llm.providers.chutes import ChutesLlmProvider
 from harnyx_commons.llm.providers.openai_compatible import OpenAiCompatibleLlmProvider
@@ -140,6 +142,13 @@ def build_miner_paid_llm_provider(
                 openrouter_api_key=SecretStr(explicit_key),
             ),
         )
+    if provider_name == AI_GATEWAY_PROVIDER:
+        return LlmProviderAdapter(
+            provider_name=provider_name,
+            delegate=AiGatewayLlmProvider(
+                ai_gateway_api_key=SecretStr(explicit_key),
+            ),
+        )
     raise AssertionError(f"unsupported parsed miner-paid llm provider: {provider_name}")
 
 
@@ -155,6 +164,14 @@ def _build_provider(
             provider_name=route_target,
             delegate=OpenRouterLlmProvider(
                 openrouter_api_key=llm_settings.openrouter_api_key,
+            ),
+        )
+
+    if route_target == AI_GATEWAY_PROVIDER:
+        return LlmProviderAdapter(
+            provider_name=route_target,
+            delegate=AiGatewayLlmProvider(
+                ai_gateway_api_key=llm_settings.ai_gateway_api_key,
             ),
         )
 
@@ -211,8 +228,8 @@ def _build_provider(
 
 def _parse_registry_route_target(raw: str | None) -> str:
     value = (raw or "").strip()
-    if value == OPENROUTER_PROVIDER:
-        return OPENROUTER_PROVIDER
+    if value in {OPENROUTER_PROVIDER, AI_GATEWAY_PROVIDER}:
+        return value
     return parse_provider_route_target(raw, component="shared")
 
 

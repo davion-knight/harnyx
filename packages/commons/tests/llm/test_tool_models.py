@@ -94,9 +94,32 @@ def test_miner_selected_openrouter_uses_native_model_ids_without_translation(
     assert resolved.model == model
 
 
+@pytest.mark.parametrize(
+    "model",
+    (
+        "zai/glm-5.2-fast",
+        "openai/gpt-oss-20b",
+        "zai/glm-4.7",
+        "google/gemma-4-31b-it",
+        "openai/gpt-oss-120b",
+        "alibaba/qwen3.7-plus",
+        "minimax/minimax-m2.7",
+        "zai/glm-4.7-flash",
+    ),
+)
+def test_miner_selected_ai_gateway_uses_native_model_ids_without_translation(model: str) -> None:
+    resolved = parse_miner_selected_llm_provider_model(provider="ai_gateway", model=model)
+
+    assert resolved.provider == "ai_gateway"
+    assert resolved.model == model
+
+
 def test_miner_selected_provider_model_sets_are_provider_namespaces() -> None:
     assert set(MINER_SELECTED_LLM_PROVIDER_MODELS["chutes"]).isdisjoint(
         MINER_SELECTED_LLM_PROVIDER_MODELS["openrouter"]
+    )
+    assert set(MINER_SELECTED_LLM_PROVIDER_MODELS["chutes"]).isdisjoint(
+        MINER_SELECTED_LLM_PROVIDER_MODELS["ai_gateway"]
     )
 
 
@@ -104,6 +127,12 @@ def test_miner_selected_openrouter_rejects_chutes_model_ids() -> None:
     for model in MINER_SELECTED_LLM_PROVIDER_MODELS["chutes"]:
         with pytest.raises(ValueError, match="not supported for miner-selected provider 'openrouter'"):
             parse_miner_selected_llm_provider_model(provider="openrouter", model=model)
+
+
+def test_miner_selected_ai_gateway_rejects_chutes_model_ids() -> None:
+    for model in MINER_SELECTED_LLM_PROVIDER_MODELS["chutes"]:
+        with pytest.raises(ValueError, match="not supported for miner-selected provider 'ai_gateway'"):
+            parse_miner_selected_llm_provider_model(provider="ai_gateway", model=model)
 
 
 def test_miner_selected_openrouter_supports_openrouter_only_gpt_models() -> None:
@@ -114,6 +143,12 @@ def test_miner_selected_openrouter_supports_openrouter_only_gpt_models() -> None
         ).provider
         == "openrouter"
     )
+
+
+def test_miner_selected_ai_gateway_rejects_openrouter_only_non_gateway_models() -> None:
+    for model in ("deepseek/deepseek-v3.2", "z-ai/glm-5", "qwen/qwen3.6-27b"):
+        with pytest.raises(ValueError, match="not supported for miner-selected provider 'ai_gateway'"):
+            parse_miner_selected_llm_provider_model(provider="ai_gateway", model=model)
 
 
 def test_openrouter_native_model_ids_are_not_valid_for_chutes() -> None:

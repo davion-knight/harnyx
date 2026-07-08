@@ -40,7 +40,7 @@ class _CapturingLlmProvider:
             finish_reason="stop",
             metadata={
                 "actual_cost_usd": 0.0001,
-                "actual_cost_provider": "openrouter",
+                "actual_cost_provider": request.provider,
                 "actual_cost_evidence": {"settlement_source": "test"},
             },
         )
@@ -75,6 +75,32 @@ async def test_runtime_invoker_lowers_openrouter_provider_extra_to_request_extra
     assert request.internal_metadata is None
     assert request.output_mode == "text"
     assert output.actual_cost_provider == "openrouter"
+
+
+async def test_runtime_invoker_lowers_ai_gateway_provider_options_extra_to_request_extra() -> None:
+    llm_provider = _CapturingLlmProvider()
+    invoker = RuntimeToolInvoker(
+        InMemoryReceiptLog(),
+        llm_provider=llm_provider,
+        llm_provider_name="ai_gateway",
+    )
+
+    output = await invoker.invoke(
+        "llm_chat",
+        args=(),
+        kwargs={
+            "provider": "ai_gateway",
+            "model": "zai/glm-5.2-fast",
+            "messages": [{"role": "user", "content": "hi"}],
+            "provider_extra": {"providerOptions": {"gateway": {"only": ["cerebras"]}}},
+        },
+    )
+
+    assert isinstance(output, ToolInvocationOutput)
+    assert len(llm_provider.requests) == 1
+    request = llm_provider.requests[0]
+    assert request.extra == {"providerOptions": {"gateway": {"only": ["cerebras"]}}}
+    assert output.actual_cost_provider == "ai_gateway"
 
 
 async def test_runtime_invoker_rejects_chutes_provider_extra() -> None:
