@@ -439,6 +439,25 @@ async def test_openai_compatible_provider_preserves_streamed_reasoning_and_usage
     assert response.metadata["raw_response"]["usage"]["completion_tokens"] == 6
 
 
+async def test_openai_compatible_provider_keeps_reasoning_tokens_unavailable_when_usage_omits_them() -> None:
+    provider = OpenAiCompatibleLlmProvider(
+        endpoint=_endpoint(auth={"type": "none"}),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: _streaming_reasoning_without_usage_response())
+        ),
+    )
+
+    try:
+        response = await provider.invoke(_request())
+    finally:
+        await provider.aclose()
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "think trace"
+    assert response.usage.completion_tokens == 6
+    assert response.usage.reasoning_tokens is None
+
+
 async def test_openai_compatible_provider_normalizes_nested_reasoning_usage() -> None:
     provider = OpenAiCompatibleLlmProvider(
         endpoint=_endpoint(auth={"type": "none"}),
@@ -568,6 +587,21 @@ def _streaming_reasoning_response() -> httpx.Response:
             'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
             'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
             '"usage":{"prompt_tokens":3,"completion_tokens":6,"reasoning_tokens":4,"total_tokens":9}}',
+            "data: [DONE]",
+            "",
+        )
+    )
+    return httpx.Response(200, content=payload.encode("utf-8"))
+
+
+def _streaming_reasoning_without_usage_response() -> httpx.Response:
+    payload = "\n\n".join(
+        (
+            'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"reasoning":"think "}}]}',
+            'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"reasoning_content":"trace"}}]}',
+            'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+            'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":3,"completion_tokens":6,"total_tokens":9}}',
             "data: [DONE]",
             "",
         )

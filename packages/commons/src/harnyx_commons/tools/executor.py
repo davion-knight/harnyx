@@ -792,7 +792,7 @@ def _extract_llm_usage(
             prompt_tokens=0,
             completion_tokens=0,
             total_tokens=0,
-            reasoning_tokens=0,
+            reasoning_tokens=None,
         )
 
     resolved_total = _resolve_llm_total_tokens(

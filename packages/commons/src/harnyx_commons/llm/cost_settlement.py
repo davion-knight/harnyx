@@ -113,7 +113,7 @@ def settled_static_llm_cost(
                 "model": model,
                 "prompt_tokens": usage.prompt_tokens or 0,
                 "completion_tokens": usage.completion_tokens or 0,
-                "reasoning_tokens": usage.reasoning_tokens or 0,
+                "reasoning_tokens": usage.reasoning_tokens,
             },
         )
 
@@ -135,7 +135,7 @@ def settled_static_llm_cost(
             "canonical_model": canonical_model,
             "prompt_tokens": usage.prompt_tokens or 0,
             "completion_tokens": usage.completion_tokens or 0,
-            "reasoning_tokens": usage.reasoning_tokens or 0,
+            "reasoning_tokens": usage.reasoning_tokens,
         },
     )
 

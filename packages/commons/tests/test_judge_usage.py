@@ -14,7 +14,7 @@ def _response(
     prompt_tokens: int = 10,
     completion_tokens: int = 5,
     total_tokens: int = 15,
-    reasoning_tokens: int = 2,
+    reasoning_tokens: int | None = 2,
     metadata: dict[str, object] | None = None,
 ) -> LlmResponse:
     return LlmResponse(
@@ -56,6 +56,17 @@ def test_judge_usage_from_chutes_response_uses_actual_cost_metadata() -> None:
     assert summary.models[0].actual_cost_source == "provider_actual"
     assert summary.models[0].actual_cost_provider == "chutes"
     assert summary.models[0].actual_cost_evidence == "pricing-cache"
+
+
+def test_judge_usage_keeps_model_reasoning_tokens_unavailable_and_coalesces_summary() -> None:
+    summary = judge_usage_from_response(
+        _response(reasoning_tokens=None),
+        default_provider="chutes",
+        default_model="judge",
+    )
+
+    assert summary.reasoning_tokens == 0
+    assert summary.models[0].reasoning_tokens is None
 
 
 def test_judge_usage_from_retried_response_uses_billable_response_count() -> None:
@@ -292,6 +303,24 @@ def test_merge_judge_usage_sums_tokens_and_actual_costs_by_model() -> None:
     assert merged.actual_cost_usd == 0.03
     assert len(merged.models) == 1
     assert merged.models[0].call_count == 2
+
+
+def test_merge_judge_usage_coalesces_unavailable_model_reasoning_tokens() -> None:
+    first = judge_usage_from_response(
+        _response(reasoning_tokens=None),
+        default_provider="chutes",
+        default_model="judge",
+    )
+    second = judge_usage_from_response(
+        _response(prompt_tokens=7, completion_tokens=3, total_tokens=10, reasoning_tokens=1),
+        default_provider="chutes",
+        default_model="judge",
+    )
+
+    merged = merge_judge_usage((first, second))
+
+    assert merged.reasoning_tokens == 1
+    assert merged.models[0].reasoning_tokens == 1
 
 
 def test_merge_judge_usage_keeps_tokens_when_actual_cost_is_missing() -> None:

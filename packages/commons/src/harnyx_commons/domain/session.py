@@ -55,22 +55,23 @@ class LlmUsageTotals:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         total_tokens: int = 0,
-        reasoning_tokens: int = 0,
+        reasoning_tokens: int | None = 0,
     ) -> LlmUsageTotals:
         """Return a new totals record with the supplied deltas applied."""
+        reasoning_tokens_delta = reasoning_tokens
         if prompt_tokens < 0:
             raise ValueError("prompt_tokens must be non-negative")
         if completion_tokens < 0:
             raise ValueError("completion_tokens must be non-negative")
         if total_tokens < 0:
             raise ValueError("total_tokens must be non-negative")
-        if reasoning_tokens < 0:
+        if reasoning_tokens_delta is not None and reasoning_tokens_delta < 0:
             raise ValueError("reasoning_tokens must be non-negative")
         return LlmUsageTotals(
             prompt_tokens=self.prompt_tokens + prompt_tokens,
             completion_tokens=self.completion_tokens + completion_tokens,
             total_tokens=self.total_tokens + total_tokens,
-            reasoning_tokens=self.reasoning_tokens + reasoning_tokens,
+            reasoning_tokens=self.reasoning_tokens + (reasoning_tokens_delta or 0),
             call_count=self.call_count + 1,
         )
 

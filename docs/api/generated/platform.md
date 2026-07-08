@@ -1650,7 +1650,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `model` | req | `string` |
 |  |  | `prompt_tokens` | req | `integer` |
 |  |  | `provider` | req | `string` |
-|  |  | `reasoning_tokens` | req | `integer` |
+|  |  | `reasoning_tokens` | req | `integer` (nullable) |
 |  |  | `total_tokens` | req | `integer` |
 |  | `prompt_tokens` |  | req | `integer` |
 |  | `reasoning_tokens` |  | req | `integer` |
@@ -2730,7 +2730,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `model` |  |  | req | `string` |
 | `prompt_tokens` |  |  | req | `integer` |
 | `provider` |  |  | req | `string` |
-| `reasoning_tokens` |  |  | req | `integer` |
+| `reasoning_tokens` |  |  | req | `integer` (nullable) |
 | `total_tokens` |  |  | req | `integer` |
 
 <details>
@@ -2801,8 +2801,15 @@ Body: [WeightsResponse](#model-weightsresponse)
       "type": "string"
     },
     "reasoning_tokens": {
-      "title": "Reasoning Tokens",
-      "type": "integer"
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reasoning Tokens"
     },
     "total_tokens": {
       "title": "Total Tokens",
@@ -2845,7 +2852,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `model` |  | req | `string` |
 |  | `prompt_tokens` |  | req | `integer` |
 |  | `provider` |  | req | `string` |
-|  | `reasoning_tokens` |  | req | `integer` |
+|  | `reasoning_tokens` |  | req | `integer` (nullable) |
 |  | `total_tokens` |  | req | `integer` |
 | `prompt_tokens` |  |  | req | `integer` |
 | `reasoning_tokens` |  |  | req | `integer` |

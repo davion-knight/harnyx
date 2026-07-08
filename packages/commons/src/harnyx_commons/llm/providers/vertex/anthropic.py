@@ -10,6 +10,7 @@ from anthropic import APIResponseValidationError as AnthropicAPIResponseValidati
 from anthropic import APIStatusError as AnthropicAPIStatusError
 from anthropic.types.server_tool_use_block import ServerToolUseBlock
 from anthropic.types.text_block import TextBlock
+from anthropic.types.thinking_block import ThinkingBlock
 
 from harnyx_commons.llm.schema import (
     LlmChoice,
@@ -150,11 +151,16 @@ def build_claude_web_search_tool(extra: Mapping[str, Any] | None) -> dict[str, A
 def build_anthropic_response(response: Any) -> LlmResponse:
     """Convert Anthropic Message response to LlmResponse."""
     parts: list[LlmMessageContentPart] = []
+    reasoning_fragments: list[str] = []
     web_search_queries: list[str] = []
 
     for block in response.content:
         if isinstance(block, TextBlock):
             parts.append(LlmMessageContentPart(type="text", text=block.text))
+            continue
+        if isinstance(block, ThinkingBlock):
+            if block.thinking:
+                reasoning_fragments.append(block.thinking)
             continue
         if isinstance(block, ServerToolUseBlock) and block.name == "web_search":
             tool_input = block.input
@@ -169,6 +175,7 @@ def build_anthropic_response(response: Any) -> LlmResponse:
         message=LlmChoiceMessage(
             role="assistant",
             content=tuple(parts),
+            reasoning="".join(reasoning_fragments) or None,
             tool_calls=None,
         ),
         finish_reason=response.stop_reason or "stop",
@@ -182,6 +189,7 @@ def build_anthropic_response(response: Any) -> LlmResponse:
             (usage_data.input_tokens or 0)
             + (usage_data.output_tokens or 0)
         ) or None,
+        reasoning_tokens=None,
     )
 
     server_tool_use = usage_data.server_tool_use

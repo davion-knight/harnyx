@@ -313,10 +313,11 @@ class BaseLlmProvider(ABC, LlmProviderPort):
                         "llm.usage.total_tokens": int(usage.total_tokens or 0),
                         "llm.usage.prompt_tokens": int(usage.prompt_tokens or 0),
                         "llm.usage.completion_tokens": int(usage.completion_tokens or 0),
-                        "llm.usage.reasoning_tokens": int(usage.reasoning_tokens or 0),
                         "llm.usage.web_search_calls": web_search_calls,
                     }
                 )
+                if usage.reasoning_tokens is not None:
+                    span.set_attribute("llm.usage.reasoning_tokens", int(usage.reasoning_tokens))
 
                 data |= {
                     "request": _request_snapshot(request),
@@ -326,7 +327,7 @@ class BaseLlmProvider(ABC, LlmProviderPort):
                     "usage_prompt": usage.prompt_tokens or 0,
                     "usage_completion": usage.completion_tokens or 0,
                     "usage_total": usage.total_tokens or 0,
-                    "reasoning_tokens": usage.reasoning_tokens or 0,
+                    "reasoning_tokens": usage.reasoning_tokens,
                     "finish_reason": response.finish_reason,
                     "web_search_calls": web_search_calls,
                     "wait_ms": round(wait_ms, 2),
@@ -725,14 +726,16 @@ def _request_snapshot(request: AbstractLlmRequest) -> dict[str, object]:
 
 
 def _usage_snapshot(usage: LlmUsage) -> dict[str, object]:
-    return {
+    snapshot = {
         "prompt": usage.prompt_tokens or 0,
         "prompt_cached": usage.prompt_cached_tokens or 0,
         "completion": usage.completion_tokens or 0,
         "total": usage.total_tokens or 0,
-        "reasoning": usage.reasoning_tokens or 0,
         "web_search_calls": usage.web_search_calls or 0,
     }
+    if usage.reasoning_tokens is not None:
+        snapshot["reasoning"] = usage.reasoning_tokens
+    return snapshot
 
 
 def _exception_cause_chain(exc: BaseException) -> tuple[str, ...]:
@@ -820,9 +823,14 @@ def _build_reasoning_metadata(
         model=request.model,
         reasoning_effort=request.reasoning_effort,
     )
-    reasoning_tokens = int(usage.reasoning_tokens or 0)
+    reasoning_tokens = usage.reasoning_tokens
 
-    if not (include_thoughts_requested or thought_text_parts or has_thought_signature or reasoning_tokens > 0):
+    if not (
+        include_thoughts_requested
+        or thought_text_parts
+        or has_thought_signature
+        or (reasoning_tokens is not None and reasoning_tokens > 0)
+    ):
         return None
 
     return {

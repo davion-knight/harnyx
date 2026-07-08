@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from harnyx_commons.domain.session import LlmUsageTotals
 from harnyx_commons.domain.tool_usage import (
@@ -26,7 +26,7 @@ def tool_usage_from_llm_usage(
     grounded_cost = _breakdown_float(breakdown.get("usd_cost_grounded"))
     total_reference_cost = _breakdown_float(breakdown.get("usd_cost"))
     llm_cost = max(total_reference_cost - grounded_cost, 0.0)
-    reasoning_tokens = int(usage.reasoning_tokens or 0)
+    reasoning_tokens = _coalesce_reasoning_tokens((usage.reasoning_tokens,))
     model_usage = LlmModelUsageCost(
         usage=LlmUsageTotals(
             prompt_tokens=int(usage.prompt_tokens or 0),
@@ -105,6 +105,10 @@ def _breakdown_float(value: object) -> float:
     if isinstance(value, int | float):
         return float(value)
     return 0.0
+
+
+def _coalesce_reasoning_tokens(values: Iterable[int | None]) -> int:
+    return sum(value or 0 for value in values)
 
 
 def _merge_optional_cost(left: float | None, right: float | None) -> float | None:

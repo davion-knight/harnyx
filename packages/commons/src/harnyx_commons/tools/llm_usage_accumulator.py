@@ -25,9 +25,9 @@ def accumulate_llm_usage(
     prompt = usage.prompt_tokens or 0
     completion = usage.completion_tokens or 0
     total = usage.total_tokens if usage.total_tokens is not None else llm_tokens
-    reasoning = usage.reasoning_tokens or 0
+    reasoning = usage.reasoning_tokens
 
-    if prompt < 0 or completion < 0 or total < 0 or reasoning < 0:
+    if prompt < 0 or completion < 0 or total < 0 or (reasoning is not None and reasoning < 0):
         raise ValueError("token counts must be non-negative")
 
     providers: dict[str, dict[str, LlmUsageTotals]] = {

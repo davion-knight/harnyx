@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -29,7 +30,7 @@ class JudgeModelUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    reasoning_tokens: int
+    reasoning_tokens: int | None
     actual_cost_usd: float | None
     actual_cost_source: JudgeActualCostSource
     actual_cost_provider: str | None = None
@@ -48,7 +49,7 @@ class JudgeModelUsage:
             raise ValueError("completion_tokens must be non-negative")
         if self.total_tokens < 0:
             raise ValueError("total_tokens must be non-negative")
-        if self.reasoning_tokens < 0:
+        if self.reasoning_tokens is not None and self.reasoning_tokens < 0:
             raise ValueError("reasoning_tokens must be non-negative")
         _validate_actual_cost_usd(self.actual_cost_usd)
         if self.actual_cost_source == "provider_actual" and self.actual_cost_usd is None:
@@ -87,7 +88,7 @@ class JudgeUsageSummary:
             raise ValueError("judge usage completion_tokens must equal model completion tokens")
         if self.total_tokens != sum(model.total_tokens for model in self.models):
             raise ValueError("judge usage total_tokens must equal model total tokens")
-        if self.reasoning_tokens != sum(model.reasoning_tokens for model in self.models):
+        if self.reasoning_tokens != _sum_reasoning_tokens(model.reasoning_tokens for model in self.models):
             raise ValueError("judge usage reasoning_tokens must equal model reasoning tokens")
         model_costs = tuple(model.actual_cost_usd for model in self.models)
         if any(cost is None for cost in model_costs):
@@ -102,6 +103,10 @@ class JudgeUsageSummary:
                 abs_tol=1e-12,
             ):
                 raise ValueError("judge usage actual_cost_usd must equal model actual costs")
+
+
+def _sum_reasoning_tokens(values: Iterable[int | None]) -> int:
+    return sum(value or 0 for value in values)
 
 
 __all__ = [

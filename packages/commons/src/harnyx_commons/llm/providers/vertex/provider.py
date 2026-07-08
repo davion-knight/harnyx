@@ -54,6 +54,7 @@ from .codec import (
     serialize_provider_native_tools,
     serialize_tools,
     supports_thinking_config,
+    validate_supported_gemini_model,
 )
 from .credentials import cleanup_credentials_file, prepare_credentials
 from .gemini_stream_codec import GeminiAccumulatedResponse
@@ -186,6 +187,7 @@ class VertexLlmProvider(BaseLlmProvider):
         tools: list[types.Tool] | None,
         tool_config: types.ToolConfig | None,
     ) -> types.GenerateContentConfig | None:
+        validate_supported_gemini_model(model=request.model)
         if request.grounded and request.output_mode != "text":
             raise ValueError("grounded Vertex requests must use text output")
 
@@ -385,9 +387,12 @@ class VertexLlmProvider(BaseLlmProvider):
             reasoning_effort=request.reasoning_effort,
             max_tokens=max_tokens,
         )
+        temperature = request.temperature
+        if thinking_budget is not None:
+            temperature = 1.0
         optional_kwargs: dict[str, Any] = {
             "system": system_content,
-            "temperature": request.temperature,
+            "temperature": temperature,
             "tools": tools,
             "extra_headers": extra_headers,
             "thinking": {

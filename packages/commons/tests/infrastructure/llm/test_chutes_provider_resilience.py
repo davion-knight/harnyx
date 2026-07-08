@@ -63,6 +63,7 @@ def _basic_chutes_request(
     model: str = "deepseek-ai/DeepSeek-V3.2-TEE",
     thinking: LlmThinkingConfig | None = None,
     reasoning_effort: str | None = None,
+    extra: dict[str, object] | None = None,
 ) -> LlmRequest:
     return LlmRequest(
         provider="chutes",
@@ -77,6 +78,7 @@ def _basic_chutes_request(
         max_output_tokens=32,
         thinking=thinking,
         reasoning_effort=reasoning_effort,
+        extra=extra,
     )
 
 
@@ -216,8 +218,20 @@ def test_chutes_thinking_omitted_is_noop() -> None:
         exclude_none=True,
     )
 
+    assert payload["stream_options"] == {
+        "include_usage": True,
+        "continuous_usage_stats": True,
+    }
     assert "chat_template_kwargs" not in payload
     assert "reasoning_effort" not in payload
+
+
+def test_chutes_request_forces_stream_even_when_extra_overrides() -> None:
+    payload = _ChutesChatRequest.from_request(
+        _basic_chutes_request(extra={"stream": False})
+    ).model_dump(mode="python", exclude_none=True)
+
+    assert payload["stream"] is True
 
 
 def test_chutes_deepseek_thinking_enabled_and_disabled_use_template_kwargs() -> None:
@@ -331,6 +345,117 @@ def test_parse_payload_preserves_reasoning_usage_without_double_counting_complet
     assert response.usage.total_tokens == 7
 
 
+def test_chutes_stream_preserves_reasoning_tokens_when_usage_progresses_with_reasoning() -> None:
+    response = _merge_chutes_stream_events(
+        (
+            {
+                "id": "resp-progress",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "think "}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1, "reasoning_tokens": 1, "total_tokens": 4},
+            },
+            {
+                "id": "resp-progress",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "more"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 5, "reasoning_tokens": 4, "total_tokens": 8},
+            },
+            {
+                "id": "resp-progress",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 6, "reasoning_tokens": 4, "total_tokens": 9},
+            },
+        )
+    )
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "think more"
+    assert response.usage.completion_tokens == 2
+    assert response.usage.reasoning_tokens == 4
+
+
+def test_chutes_stream_preserves_single_reasoning_usage_sample() -> None:
+    response = _merge_chutes_stream_events(
+        (
+            {
+                "id": "resp-single-usage",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1, "reasoning_tokens": 1, "total_tokens": 4},
+            },
+            {
+                "id": "resp-single-usage",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "reasoning_tokens": 1, "total_tokens": 5},
+            },
+        )
+    )
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "think"
+    assert response.usage.completion_tokens == 1
+    assert response.usage.reasoning_tokens == 1
+
+
+def test_chutes_stream_keeps_reasoning_tokens_unavailable_when_usage_does_not_progress() -> None:
+    response = _merge_chutes_stream_events(
+        (
+            {
+                "id": "resp-stalled",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "think "}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1, "reasoning_tokens": 1, "total_tokens": 4},
+            },
+            {
+                "id": "resp-stalled",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "more"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 5, "reasoning_tokens": 1, "total_tokens": 8},
+            },
+            {
+                "id": "resp-stalled",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 6, "reasoning_tokens": 1, "total_tokens": 9},
+            },
+        )
+    )
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "think more"
+    assert response.usage.completion_tokens == 6
+    assert response.usage.reasoning_tokens is None
+
+
+def test_chutes_stream_keeps_reasoning_tokens_unavailable_with_final_only_usage() -> None:
+    response = _merge_chutes_stream_events(
+        (
+            {
+                "id": "resp-final-only",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "think "}}],
+            },
+            {
+                "id": "resp-final-only",
+                "choices": [{"index": 0, "delta": {"reasoning_content": "more"}}],
+            },
+            {
+                "id": "resp-final-only",
+                "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 6, "reasoning_tokens": 1, "total_tokens": 9},
+            },
+        )
+    )
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "think more"
+    assert response.usage.completion_tokens == 6
+    assert response.usage.reasoning_tokens is None
+
+
+def _merge_chutes_stream_events(events: tuple[dict[str, object], ...]) -> LlmResponse:
+    openai_state = OpenAiStreamState()
+    reasoning_state = _ChutesReasoningStreamState()
+    for event_payload in events:
+        event = _OpenAiStreamEvent.model_validate(event_payload)
+        openai_state.merge_event(event, reasoning_keys=("reasoning", "reasoning_content"))
+        reasoning_state.merge_event(event)
+    return _ChutesChatResponse.from_stream_state(openai_state, reasoning_state=reasoning_state).to_llm_response()
+
+
 @pytest.mark.anyio("asyncio")
 async def test_chutes_provider_persists_stream_ttft_metadata() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -356,6 +481,58 @@ async def test_chutes_provider_persists_stream_ttft_metadata() -> None:
     assert response.metadata is not None
     assert isinstance(response.metadata["ttft_ms"], float)
     assert response.metadata["ttft_ms"] >= 0.0
+
+
+@pytest.mark.anyio("asyncio")
+async def test_chutes_provider_preserves_structured_reasoning_raw_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/chat/completions"
+        reasoning_payload = {
+            "id": "resp-reasoning-raw",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning": {
+                            "thought_text_parts": ["step one", "step two"],
+                            "has_thought_signature": True,
+                        }
+                    },
+                }
+            ],
+        }
+        content_payload = {
+            "id": "resp-reasoning-raw",
+            "choices": [{"delta": {"content": "final answer"}, "finish_reason": "stop", "index": 0}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4},
+        }
+        return httpx.Response(
+            200,
+            text=(
+                f"data: {json.dumps(reasoning_payload)}\n\n"
+                f"data: {json.dumps(content_payload)}\n\n"
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    provider = ChutesLlmProvider(
+        base_url="https://example.com",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+    )
+
+    try:
+        response = await provider.invoke(_basic_chutes_request())
+    finally:
+        await provider.aclose()
+
+    assert response.raw_text == "final answer"
+    assert response.choices[0].message.reasoning == "step one\n\nstep two"
+    assert response.metadata is not None
+    assert response.metadata["raw_response"]["choices"][0]["message"]["reasoning"] == {
+        "thought_text_parts": ["step one", "step two"],
+        "has_thought_signature": True,
+    }
 
 
 @pytest.mark.anyio("asyncio")

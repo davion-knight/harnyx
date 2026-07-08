@@ -159,6 +159,7 @@ async def test_bedrock_provider_maps_stream_response_and_logs_ttft(
     assert response.finish_reason == "end_turn"
     assert response.usage.prompt_tokens == 11
     assert response.usage.completion_tokens == 7
+    assert response.usage.reasoning_tokens is None
     assert response.usage.total_tokens == 18
     assert isinstance(dict(response.metadata or {})["ttft_ms"], float)
     assert dict(response.metadata or {})["ttft_ms"] >= 0.0

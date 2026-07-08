@@ -89,6 +89,7 @@ MINER_TOOL_LLM_PRICING: Mapping[MinerSelectedLlmProviderName, Mapping[str, Model
 GENERATION_MODEL_PRICING: Mapping[str, ModelPricing] = {
     "openrouter:openai/gpt-oss-20b": ModelPricing(0.03, 0.14, 0.0),
     "openrouter:openai/gpt-oss-120b": ModelPricing(0.039, 0.18, 0.0),
+    # Historical/accounting prices only; Vertex runtime rejects Gemini models earlier than 3.
     "vertex:gemini-2.5-pro": ModelPricing(1.25, 10.0, 0.0),
     "vertex:gemini-2.5-flash": ModelPricing(0.30, 2.50, 0.0),
     "vertex:gemini-2.5-flash-lite": ModelPricing(0.10, 0.40, 0.0),

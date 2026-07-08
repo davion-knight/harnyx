@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, cast
 
 import pytest
+from anthropic.types.text_block import TextBlock
+from anthropic.types.thinking_block import ThinkingBlock
 from google.genai import errors
 from pydantic import BaseModel
 
@@ -22,12 +24,14 @@ from harnyx_commons.llm.providers.openai_stream import (
     _OpenAiToolCallDelta,
     normalize_openai_text_fragments,
 )
+from harnyx_commons.llm.providers.vertex.anthropic import build_anthropic_response
 from harnyx_commons.llm.providers.vertex.codec import (
     _VertexMaasChatRequest,
     _VertexMaasChatResponse,
     build_choices,
     normalize_messages,
     resolve_thinking_config,
+    supports_thinking_config,
     vertex_maas_openai_chat_model_name,
 )
 from harnyx_commons.llm.providers.vertex.provider import (
@@ -376,7 +380,7 @@ async def test_vertex_provider_invokes_generative_model(
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="system",
@@ -413,7 +417,7 @@ async def test_vertex_provider_invokes_generative_model(
     assert client_kwargs["credentials"] is None
 
     model_call = captured["model_stream_call"]
-    assert model_call["model"] == "gemini-2.5-pro"
+    assert model_call["model"] == "gemini-3-pro-preview"
     assert model_call["contents"][0].role == "user"
     config = model_call["config"]
     assert config.system_instruction == "stay concise"
@@ -458,7 +462,7 @@ async def test_vertex_provider_retries_empty_gemini_stream(
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -601,7 +605,7 @@ async def test_vertex_provider_gemini_stream_aggregates_text_and_metadata(
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -643,7 +647,7 @@ async def test_vertex_provider_merges_request_http_headers_with_timeout(
     }
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -772,7 +776,7 @@ async def test_vertex_provider_gemini_stream_preserves_reasoning_chunk_boundarie
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -875,7 +879,7 @@ async def test_vertex_provider_gemini_stream_dedupes_repeated_search_queries(
     response = await provider.invoke(
         LlmRequest(
             provider="vertex",
-            model="gemini-2.5-pro",
+            model="gemini-3-pro-preview",
             messages=(
                 LlmMessage(
                     role="user",
@@ -973,7 +977,7 @@ async def test_vertex_provider_gemini_stream_merges_snapshot_tool_calls(
     response = await provider.invoke(
         LlmRequest(
             provider="vertex",
-            model="gemini-2.5-pro",
+            model="gemini-3-pro-preview",
             messages=(
                 LlmMessage(
                     role="user",
@@ -1074,7 +1078,7 @@ async def test_vertex_provider_gemini_stream_overwrites_partial_tool_call_same_i
     response = await provider.invoke(
         LlmRequest(
             provider="vertex",
-            model="gemini-2.5-pro",
+            model="gemini-3-pro-preview",
             messages=(
                 LlmMessage(
                     role="user",
@@ -1175,6 +1179,10 @@ async def test_vertex_maas_gpt_oss_routes_to_chat_completions(
     payload = http_call["json"]
     assert payload["model"] == "openai/gpt-oss-120b-maas"
     assert payload["stream"] is True
+    assert payload["stream_options"] == {
+        "include_usage": True,
+        "continuous_usage_stats": True,
+    }
     assert payload["reasoning_effort"] == "high"
     assert payload["max_tokens"] == 64
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
@@ -1194,6 +1202,64 @@ async def test_vertex_maas_gpt_oss_routes_to_chat_completions(
     assert data["branch"] == "vertex_maas_openai"
     assert isinstance(data["ttft_ms"], float)
     assert data["ttft_ms"] >= 0.0
+
+
+async def test_vertex_maas_keeps_reasoning_tokens_unavailable_when_usage_omits_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    captured: dict[str, Any] = {}
+    _patch_google_client(monkeypatch, captured)
+    _patch_vertex_maas_http_client(
+        monkeypatch,
+        captured,
+        response_payload={
+            "id": "chatcmpl-vertex",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "56",
+                        "reasoning_content": "I need to multiply 7 by 8.",
+                        "tool_calls": None,
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 8,
+                "total_tokens": 15,
+            },
+        },
+    )
+
+    provider = VertexLlmProvider(
+        project="demo-project",
+        location="us-central1",
+        timeout=30.0,
+    )
+    monkeypatch.setattr(provider, "_vertex_maas_access_token", _async_return("access-token"))
+
+    response = await provider.invoke(
+        LlmRequest(
+            provider="vertex",
+            model="publishers/openai/models/gpt-oss-120b-maas",
+            messages=(LlmMessage(role="user", content=(LlmMessageContentPart.input_text("What is 7 times 8?"),)),),
+            temperature=0.0,
+            max_output_tokens=64,
+            reasoning_effort="high",
+        )
+    )
+
+    assert captured["http_call"]["json"]["stream_options"] == {
+        "include_usage": True,
+        "continuous_usage_stats": True,
+    }
+    assert response.choices[0].message.reasoning == "I need to multiply 7 by 8."
+    assert response.usage.completion_tokens == 8
+    assert response.usage.reasoning_tokens is None
 
 
 async def test_vertex_provider_routes_maas_models_to_chat_completions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1322,7 +1388,7 @@ async def test_vertex_provider_raw_response_metadata_is_json_safe(monkeypatch: p
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -1362,7 +1428,7 @@ async def test_vertex_provider_normalizes_assistant_and_tool_roles(monkeypatch: 
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -1401,12 +1467,13 @@ def test_vertex_codec_fails_fast_on_unknown_request_role() -> None:
 
 
 def test_vertex_resolve_thinking_config_returns_none_when_effort_is_null() -> None:
-    config = resolve_thinking_config(model="gemini-2.5-pro", reasoning_effort=None)
+    assert supports_thinking_config(model="gemini-3-pro-preview")
+    config = resolve_thinking_config(model="gemini-3-pro-preview", reasoning_effort=None)
     assert config is None
 
 
 def test_vertex_resolve_thinking_config_returns_none_when_effort_is_zero() -> None:
-    config = resolve_thinking_config(model="gemini-2.5-pro", reasoning_effort="0")
+    config = resolve_thinking_config(model="gemini-3-pro-preview", reasoning_effort="0")
     assert config is None
 
 
@@ -1420,10 +1487,46 @@ def test_normalize_reasoning_effort_rejects_non_positive_budgets() -> None:
 
 
 def test_vertex_resolve_thinking_config_sets_level_with_include_thoughts() -> None:
-    config = resolve_thinking_config(model="gemini-2.5-pro", reasoning_effort="high")
+    config = resolve_thinking_config(model="gemini-3-pro-preview", reasoning_effort="high")
     assert config is not None
     assert config.include_thoughts is True
     assert config.thinking_level is not None
+    assert config.thinking_budget is None
+
+
+def test_vertex_resolve_thinking_config_rejects_numeric_budget() -> None:
+    with pytest.raises(ValueError, match="numeric thinking budgets are not supported"):
+        resolve_thinking_config(model="gemini-3-pro-preview", reasoning_effort="512")
+
+
+def test_vertex_resolve_thinking_config_rejects_gemini_models_before_3() -> None:
+    assert not supports_thinking_config(model="gemini-2.5-pro")
+    with pytest.raises(ValueError, match="Vertex Gemini models earlier than 3 are not supported"):
+        resolve_thinking_config(model="gemini-2.5-pro", reasoning_effort=None)
+
+
+async def test_vertex_provider_rejects_gemini_models_before_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    _patch_google_client(monkeypatch, {})
+    provider = VertexLlmProvider(project="demo-project", location="us-central1", timeout=30.0)
+    request = LlmRequest(
+        provider="vertex",
+        model="gemini-2.5-pro",
+        messages=(LlmMessage(role="user", content=(LlmMessageContentPart.input_text("hello"),)),),
+        temperature=None,
+        max_output_tokens=64,
+    )
+
+    try:
+        with pytest.raises(ValueError, match="Vertex Gemini models earlier than 3 are not supported"):
+            provider._build_generation_config(
+                request,
+                system_instruction=None,
+                tools=None,
+                tool_config=None,
+            )
+    finally:
+        await provider.aclose()
 
 
 def test_vertex_codec_build_choices_separates_thought_text_from_assistant_output() -> None:
@@ -2180,6 +2283,105 @@ async def test_vertex_claude_stream_default_reconstructs_final_response(
     assert data["ttft_ms"] >= 0.0
 
 
+async def test_vertex_claude_thinking_forces_temperature_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    captured: dict[str, Any] = {}
+    _patch_google_client(monkeypatch, captured)
+
+    provider = VertexLlmProvider(
+        project="demo-project",
+        location="us-central1",
+        timeout=CHUTES.timeout_seconds,
+    )
+
+    class _FakeFinalAnthropicMessage:
+        id = "claude-thinking-response"
+
+        def model_dump(self, *, mode: str = "python") -> dict[str, Any]:
+            return {"id": self.id, "mode": mode}
+
+    class _FakeStreamManager:
+        async def __aenter__(self) -> _FakeStreamManager:
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        @property
+        def text_stream(self) -> Any:
+            async def _iter() -> Any:
+                yield "ok"
+
+            return _iter()
+
+        async def get_final_message(self) -> _FakeFinalAnthropicMessage:
+            return _FakeFinalAnthropicMessage()
+
+    captured_stream_kwargs: dict[str, Any] = {}
+
+    def fake_stream(**kwargs: Any) -> _FakeStreamManager:
+        captured_stream_kwargs.update(kwargs)
+        return _FakeStreamManager()
+
+    monkeypatch.setattr(provider._anthropic_client.messages, "stream", fake_stream)
+    monkeypatch.setattr(
+        "harnyx_commons.llm.providers.vertex.provider.build_anthropic_response",
+        lambda response: LlmResponse(
+            id=response.id,
+            choices=(
+                LlmChoice(
+                    index=0,
+                    message=LlmChoiceMessage(
+                        role="assistant",
+                        content=(LlmMessageContentPart(type="text", text="ok"),),
+                        tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=LlmUsage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+            metadata=None,
+            finish_reason="stop",
+        ),
+    )
+
+    await provider.invoke(
+        LlmRequest(
+            provider="vertex",
+            model="/anthropic/models/claude-sonnet-4-5@20250929",
+            messages=(LlmMessage(role="user", content=(LlmMessageContentPart.input_text("hello"),)),),
+            temperature=0.2,
+            max_output_tokens=2048,
+            reasoning_effort="1024",
+        )
+    )
+
+    assert captured_stream_kwargs["temperature"] == pytest.approx(1.0)
+    assert captured_stream_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_vertex_claude_response_maps_thinking_text_without_reasoning_tokens() -> None:
+    class _Usage:
+        input_tokens = 5
+        output_tokens = 3
+        server_tool_use = None
+
+    class _Message:
+        id = "claude-message"
+        content = (
+            ThinkingBlock(signature="sig-1", thinking="deliberation", type="thinking"),
+            TextBlock(text="ok", type="text"),
+        )
+        stop_reason = "end_turn"
+        usage = _Usage()
+
+    response = build_anthropic_response(_Message())
+
+    assert response.raw_text == "ok"
+    assert response.choices[0].message.reasoning == "deliberation"
+    assert response.usage.reasoning_tokens is None
+
+
 async def test_vertex_maas_payload_forces_stream_even_when_extra_overrides() -> None:
     request = LlmRequest(
         provider="vertex",
@@ -2198,6 +2400,10 @@ async def test_vertex_maas_payload_forces_stream_even_when_extra_overrides() -> 
     payload = _VertexMaasChatRequest.from_request(request).model_dump(mode="python", exclude_none=True)
 
     assert payload["stream"] is True
+    assert payload["stream_options"] == {
+        "include_usage": True,
+        "continuous_usage_stats": True,
+    }
 
 
 async def test_vertex_provider_aclose_closes_owned_clients(
@@ -2304,7 +2510,7 @@ async def test_vertex_provider_injects_google_search_tool(monkeypatch: pytest.Mo
 
     request = GroundedLlmRequest(
         provider="vertex",
-        model="gemini-2.0",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -2339,7 +2545,7 @@ async def test_vertex_provider_includes_provider_native_grounded_tools(monkeypat
 
     request = GroundedLlmRequest(
         provider="vertex",
-        model="gemini-2.0",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -2397,7 +2603,7 @@ async def test_vertex_serializes_input_tool_result_as_function_response(monkeypa
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-pro",
+        model="gemini-3-pro-preview",
         messages=(
             LlmMessage(
                 role="user",

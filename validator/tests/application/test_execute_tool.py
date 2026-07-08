@@ -1347,6 +1347,7 @@ async def test_execute_tool_records_llm_tokens_for_llm_chat(model: str) -> None:
     assert usage_totals.prompt_tokens == 10
     assert usage_totals.completion_tokens == 5
     assert usage_totals.total_tokens == 15
+    assert usage_totals.reasoning_tokens == 7
     assert usage_totals.call_count == 1
     assert result.response_payload["usage"]["total_tokens"] == 15
     assert result.response_payload["usage"]["reasoning_tokens"] == 7

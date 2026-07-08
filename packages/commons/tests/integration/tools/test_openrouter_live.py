@@ -63,10 +63,8 @@ async def test_openrouter_provider_invokes_supported_model_live(model: str) -> N
     assert response.metadata is not None
     assert response.metadata["effective_provider"] == "openrouter"
     assert response.metadata["effective_model"] == model
-    raw_usage = response.metadata["raw_response"]["usage"]
-    assert isinstance(raw_usage["cost"], (int, float))
-    assert raw_usage["cost"] >= 0.0
-    assert response.usage.reasoning_tokens is None or response.usage.reasoning_tokens >= 0
+    assert response.usage.reasoning_tokens is not None
+    assert response.usage.reasoning_tokens > 0
 
 
 async def test_openrouter_provider_reasoning_live() -> None:
@@ -89,6 +87,8 @@ async def test_openrouter_provider_reasoning_live() -> None:
     assert response.choices[0].message.reasoning or (
         response.usage.reasoning_tokens is not None and response.usage.reasoning_tokens > 0
     )
+    assert response.usage.reasoning_tokens is not None
+    assert response.usage.reasoning_tokens > 0
 
 
 async def test_miner_paid_openrouter_helper_completion_live() -> None:

@@ -128,9 +128,28 @@ async def test_gemma_cloud_run_reasoning_effort_live() -> None:
     assert response.metadata is not None
     assert response.metadata["effective_provider"] == _GEMMA_ROUTE_TARGET
     assert response.metadata["effective_model"] == _GEMMA_MODEL
-    assert response.choices[0].message.reasoning or (
-        response.usage.reasoning_tokens is not None and response.usage.reasoning_tokens > 0
+    assert response.choices[0].message.reasoning
+    assert response.usage.reasoning_tokens is None
+
+
+@pytest.mark.expensive
+@pytest.mark.anyio("asyncio")
+async def test_qwen36_cloud_run_reasoning_usage_remains_unavailable_live() -> None:
+    response = await _invoke_live_tool_model(
+        model=_QWEN36_MODEL,
+        endpoint_id=_QWEN36_ENDPOINT_ID,
+        route_target=_QWEN36_ROUTE_TARGET,
+        prompt='Think briefly, then reply with only "ok".',
+        max_output_tokens=512,
+        thinking=LlmThinkingConfig(enabled=True),
     )
+
+    assert response.raw_text
+    assert response.metadata is not None
+    assert response.metadata["effective_provider"] == _QWEN36_ROUTE_TARGET
+    assert response.metadata["effective_model"] == _QWEN36_MODEL
+    assert response.choices[0].message.reasoning
+    assert response.usage.reasoning_tokens is None
 
 
 @pytest.mark.expensive
@@ -368,6 +387,7 @@ async def _invoke_live_tool_model(
     route_target: str,
     prompt: str,
     max_output_tokens: int,
+    thinking: LlmThinkingConfig | None = None,
     surface: Literal["tool", "scoring", "duplication_detection"] = "tool",
 ) -> LlmResponse:
     request = LlmRequest(
@@ -381,7 +401,7 @@ async def _invoke_live_tool_model(
         ),
         temperature=0.0,
         max_output_tokens=max_output_tokens,
-        thinking=LlmThinkingConfig(enabled=False),
+        thinking=thinking or LlmThinkingConfig(enabled=False),
         timeout_seconds=180.0,
     )
     settings = _build_live_settings(

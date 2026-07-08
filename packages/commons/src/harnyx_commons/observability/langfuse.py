@@ -551,9 +551,10 @@ def _usage_details(usage: LlmUsage) -> dict[str, int]:
         "output": int(usage.completion_tokens or 0),
         "total": int(usage.total_tokens or 0),
         "input_cached": int(usage.prompt_cached_tokens or 0),
-        "reasoning": int(usage.reasoning_tokens or 0),
         "web_search_calls": int(usage.web_search_calls or 0),
     }
+    if usage.reasoning_tokens is not None:
+        details["reasoning"] = int(usage.reasoning_tokens)
     return details
 
 

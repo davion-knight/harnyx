@@ -48,6 +48,32 @@ def test_openrouter_missing_usage_cost_uses_static_pricing() -> None:
     assert cost.provider == "openrouter"
     assert cost.evidence["settlement_source"] == "static_pricing"
     assert cost.evidence["pricing_origin"] == "miner_tool_llm_pricing"
+    assert cost.evidence["reasoning_tokens"] is None
+
+
+def test_static_pricing_evidence_preserves_reported_reasoning_tokens() -> None:
+    cost = settled_response_cost(
+        _response(usage=LlmUsage(prompt_tokens=1_000, completion_tokens=2_000, reasoning_tokens=7, total_tokens=3_007)),
+        provider="custom-openai-compatible:gemma4-cloud-run-turbo",
+        model="nvidia/Gemma-4-31B-IT-NVFP4",
+    )
+
+    assert cost is not None
+    assert cost.evidence["reasoning_tokens"] == 7
+
+
+def test_static_pricing_evidence_keeps_unavailable_reasoning_tokens() -> None:
+    cost = settled_response_cost(
+        _response(
+            usage=LlmUsage(prompt_tokens=1_000, completion_tokens=2_000, reasoning_tokens=None, total_tokens=3_000)
+        ),
+        provider="custom-openai-compatible:gemma4-cloud-run-turbo",
+        model="nvidia/Gemma-4-31B-IT-NVFP4",
+    )
+
+    assert cost is not None
+    assert cost.cost_usd == pytest.approx(0.00089)
+    assert cost.evidence["reasoning_tokens"] is None
 
 
 def test_openrouter_malformed_usage_cost_falls_back_to_static_pricing() -> None:

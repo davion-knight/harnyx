@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from google.genai import types
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from harnyx_commons.llm.adapter import canonical_model_for_provider_model
 from harnyx_commons.llm.provider_types import normalize_reasoning_effort
@@ -39,6 +40,7 @@ from harnyx_commons.llm.tool_models import tool_model_thinking_capability
 
 _IMAGE_FETCH_TIMEOUT_SECONDS = 20.0
 _STRING_KEY_MAPPING_ADAPTER = TypeAdapter(dict[str, object])
+_GEMINI_MODEL_VERSION_PATTERN = re.compile(r"(?:^|[/@:])gemini-(?P<major>\d+)(?:[.-]|$)")
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,9 @@ class _VertexMaasChatRequest(BaseModel):
 
     model: str
     stream: bool = True
+    stream_options: dict[str, bool] = Field(
+        default_factory=lambda: {"include_usage": True, "continuous_usage_stats": True}
+    )
     messages: list[dict[str, Any]]
     temperature: float | None = None
     max_tokens: int | None = None
@@ -480,30 +485,45 @@ def resolve_tool_config(
 
 
 def supports_thinking_config(*, model: str) -> bool:
+    major_version = _gemini_major_version(model)
+    return major_version is not None and major_version >= 3
+
+
+def validate_supported_gemini_model(*, model: str) -> None:
     normalized_model = model.strip().lower()
-    return "gemini" in normalized_model
+    if "gemini" not in normalized_model:
+        return
+    major_version = _gemini_major_version(model)
+    if major_version is None or major_version < 3:
+        raise ValueError("Vertex Gemini models earlier than 3 are not supported")
+
+
+def _gemini_major_version(model: str) -> int | None:
+    match = _GEMINI_MODEL_VERSION_PATTERN.search(model.strip().lower())
+    if match is None:
+        return None
+    return int(match.group("major"))
 
 
 def resolve_thinking_config(
     *, model: str, reasoning_effort: str | None,
 ) -> types.ThinkingConfig | None:
+    validate_supported_gemini_model(model=model)
     include_thoughts = True
     normalized_effort = normalize_reasoning_effort(reasoning_effort)
     if normalized_effort is None:
         return None
 
     try:
-        effort_value = int(normalized_effort)
-        return types.ThinkingConfig(
-            thinking_budget=effort_value,
-            include_thoughts=include_thoughts,
-        )
+        int(normalized_effort)
     except ValueError:
-        # Named reasoning levels intentionally fall through to the enum lookup below.
         return types.ThinkingConfig(
             thinking_level=types.ThinkingLevel[normalized_effort.upper()],
             include_thoughts=include_thoughts,
         )
+    raise ValueError(
+        "Vertex Gemini 3 thinking config uses named thinking levels; numeric thinking budgets are not supported"
+    )
 
 
 def build_choices(response: types.GenerateContentResponse) -> tuple[LlmChoice, ...]:
@@ -722,6 +742,7 @@ __all__ = [
     "serialize_provider_native_tools",
     "resolve_tool_config",
     "supports_thinking_config",
+    "validate_supported_gemini_model",
     "resolve_thinking_config",
     "build_choices",
     "extract_usage",

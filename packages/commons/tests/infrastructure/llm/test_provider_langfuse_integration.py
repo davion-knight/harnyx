@@ -806,6 +806,40 @@ async def test_invoke_vertex_gemini_reasoning_marks_include_thoughts_requested(
     assert reasoning["reasoning_effort"] == "high"
 
 
+def test_usage_observability_keeps_unavailable_reasoning_tokens_out_of_usage_details() -> None:
+    usage = LlmUsage(prompt_tokens=3, completion_tokens=6, reasoning_tokens=None, total_tokens=9)
+
+    provider_usage = provider_module._usage_snapshot(usage)
+    langfuse_usage = langfuse._usage_details(usage)
+
+    assert "reasoning" not in provider_usage
+    assert "reasoning" not in langfuse_usage
+
+
+def test_reasoning_metadata_can_record_text_with_unavailable_reasoning_tokens() -> None:
+    request = _request(
+        provider="vertex",
+        model="publishers/openai/models/gpt-oss-20b-maas",
+        reasoning_effort="high",
+    )
+    response = _response(
+        usage=LlmUsage(prompt_tokens=3, completion_tokens=6, reasoning_tokens=None, total_tokens=9),
+        reasoning="deliberation",
+    )
+
+    reasoning = provider_module._build_reasoning_metadata(
+        provider_label="vertex",
+        request=request,
+        response=response,
+        usage=response.usage,
+    )
+
+    assert reasoning is not None
+    assert reasoning["reasoning_text_available"] is True
+    assert reasoning["thought_text_parts"] == ("deliberation",)
+    assert reasoning["reasoning_tokens"] is None
+
+
 async def test_invoke_vertex_reasoning_metadata_uses_string_reasoning_and_raw_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

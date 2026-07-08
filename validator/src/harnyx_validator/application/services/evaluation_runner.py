@@ -3008,7 +3008,7 @@ def _usage_from_receipts(receipts: tuple[ToolCall, ...]) -> SessionUsage:
                 prompt_tokens=0,
                 completion_tokens=0,
                 total_tokens=0,
-                reasoning_tokens=0,
+                reasoning_tokens=None,
             )
         if usage is None:
             continue
@@ -3040,7 +3040,7 @@ class _ReceiptLlmUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    reasoning_tokens: int
+    reasoning_tokens: int | None
 
 
 def _receipt_llm_usage(receipt: ToolCall) -> _ReceiptLlmUsage | None:
@@ -3063,7 +3063,7 @@ def _receipt_llm_usage(receipt: ToolCall) -> _ReceiptLlmUsage | None:
         prompt_tokens=prompt_tokens or 0,
         completion_tokens=completion_tokens or 0,
         total_tokens=resolved_total,
-        reasoning_tokens=reasoning_tokens or 0,
+        reasoning_tokens=reasoning_tokens,
     )
 
 

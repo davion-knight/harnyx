@@ -52,6 +52,22 @@ def test_unknown_pricing_keeps_grounding_cost_and_zero_token_cost() -> None:
     assert summary.reference_total_cost_usd == pytest.approx(0.035)
 
 
+def test_tool_usage_from_llm_usage_coalesces_unavailable_reasoning_tokens() -> None:
+    summary = tool_usage_from_llm_usage(
+        LlmUsage(
+            prompt_tokens=1_000,
+            completion_tokens=500,
+            total_tokens=1_500,
+            reasoning_tokens=None,
+        ),
+        provider="vertex",
+        model="gemini-3-pro-preview",
+    )
+
+    assert summary.llm.reasoning_tokens == 0
+    assert summary.llm.providers["vertex"]["gemini-3-pro-preview"].usage.reasoning_tokens == 0
+
+
 def test_merge_tool_usage_summaries_combines_provider_model_usage() -> None:
     left = _usage_summary(
         provider="vertex",

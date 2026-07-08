@@ -80,6 +80,7 @@ async def test_vertex_openai_maas_completion_live() -> None:
     assert response is not None
     assert response.raw_text, "Vertex MaaS OpenAI response should include text output"
     assert "56" in response.raw_text
+    assert response.usage.reasoning_tokens is None
 
 
 @pytest.mark.parametrize(
@@ -174,12 +175,52 @@ async def test_vertex_deepseek_thinking_enabled_live() -> None:
         await provider.aclose()
 
     assert response.raw_text
-    assert response.metadata is not None
-    assert isinstance(response.metadata.get("raw_response"), dict)
-    if response.choices and response.choices[0].message.reasoning is not None:
-        assert response.choices[0].message.reasoning.strip()
-    if response.usage.reasoning_tokens is not None:
-        assert response.usage.reasoning_tokens >= 0
+    assert response.choices[0].message.reasoning
+    assert response.usage.reasoning_tokens is None
+
+
+async def test_vertex_maas_reasoning_tokens_remain_unavailable_live() -> None:
+    vertex = VertexSettings()
+    project = vertex.gcp_project_id
+    location = vertex.gcp_location
+    credentials_b64 = vertex.gcp_sa_credential_b64_value
+
+    assert project, "GCP_PROJECT_ID must be configured"
+    assert location, "GCP_LOCATION must be configured"
+    assert credentials_b64, "Vertex credentials must be configured"
+
+    provider = LlmProviderAdapter(
+        provider_name="vertex",
+        delegate=VertexLlmProvider(
+            project=project,
+            location=location,
+            timeout=float(vertex.vertex_timeout_seconds or PLATFORM.timeout_seconds),
+            credentials_path=None,
+            service_account_b64=credentials_b64 or "",
+        ),
+    )
+    try:
+        response = await provider.invoke(
+            LlmRequest(
+                provider="vertex",
+                model="openai/gpt-oss-120b",
+                messages=(
+                    LlmMessage(
+                        role="user",
+                        content=(LlmMessageContentPart.input_text('Think briefly, then reply with only "ok".'),),
+                    ),
+                ),
+                temperature=0.0,
+                max_output_tokens=256,
+                reasoning_effort="high",
+            )
+        )
+    finally:
+        await provider.aclose()
+
+    assert response.raw_text
+    assert response.choices[0].message.reasoning
+    assert response.usage.reasoning_tokens is None
 
 
 async def test_vertex_multimodal_image_live() -> None:
@@ -202,7 +243,7 @@ async def test_vertex_multimodal_image_live() -> None:
     try:
         request = LlmRequest(
             provider="vertex",
-            model="gemini-2.5-flash-lite",
+            model="gemini-3-flash-preview",
             messages=(
                 LlmMessage(
                     role="user",
@@ -217,6 +258,7 @@ async def test_vertex_multimodal_image_live() -> None:
             ),
             temperature=0.2,
             max_output_tokens=256,
+            reasoning_effort="minimal",
         )
 
         response = await provider.invoke(request)
@@ -260,24 +302,11 @@ async def test_vertex_reasoning_effort_live() -> None:
             max_output_tokens=256,
             reasoning_effort="low",
         )
-        generation_config = provider._build_generation_config(
-            request,
-            system_instruction=None,
-            tools=None,
-            tool_config=None,
-        )
-        assert generation_config is not None
-        assert generation_config.thinking_config is not None
-        assert generation_config.thinking_config.include_thoughts is True
-
         response = await provider.invoke(request)
         assert response.raw_text, "Vertex reasoning response should include text output"
-        assert response.metadata is not None
-        assert isinstance(response.metadata.get("raw_response"), dict)
-        if response.choices and response.choices[0].message.reasoning is not None:
-            assert response.choices[0].message.reasoning.strip()
-        if response.usage.reasoning_tokens is not None:
-            assert response.usage.reasoning_tokens >= 0
+        assert response.choices[0].message.reasoning
+        assert response.usage.reasoning_tokens is not None
+        assert response.usage.reasoning_tokens > 0
     finally:
         await provider.aclose()
 
@@ -376,6 +405,7 @@ async def test_vertex_claude_web_search_live() -> None:
 
     assert response.raw_text, "Claude web_search response should include text output"
     assert response.usage.web_search_calls is not None
+    assert response.usage.reasoning_tokens is None
 
 
 async def test_vertex_json_mode_live() -> None:
@@ -397,7 +427,7 @@ async def test_vertex_json_mode_live() -> None:
     )
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-flash-lite",
+        model="gemini-3-flash-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -405,8 +435,9 @@ async def test_vertex_json_mode_live() -> None:
             ),
         ),
         temperature=0.0,
-        max_output_tokens=128,
+        max_output_tokens=512,
         output_mode="json_object",
+        reasoning_effort="minimal",
     )
 
     try:
@@ -439,7 +470,7 @@ async def test_vertex_structured_output_live() -> None:
 
     request = LlmRequest(
         provider="vertex",
-        model="gemini-2.5-flash-lite",
+        model="gemini-3-flash-preview",
         messages=(
             LlmMessage(
                 role="user",
@@ -450,6 +481,7 @@ async def test_vertex_structured_output_live() -> None:
         max_output_tokens=128,
         output_mode="structured",
         output_schema=StructuredAnswer,
+        reasoning_effort="minimal",
     )
 
     try:

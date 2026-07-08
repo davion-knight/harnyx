@@ -30,7 +30,7 @@ def judge_usage_from_response(
         prompt_tokens=response.usage.prompt_tokens or 0,
         completion_tokens=response.usage.completion_tokens or 0,
         total_tokens=response.usage.total_tokens or 0,
-        reasoning_tokens=response.usage.reasoning_tokens or 0,
+        reasoning_tokens=response.usage.reasoning_tokens,
         actual_cost_usd=actual_cost,
         actual_cost_source="provider_actual" if actual_cost is not None else "unavailable",
         actual_cost_provider=actual_cost_provider,
@@ -41,7 +41,7 @@ def judge_usage_from_response(
         prompt_tokens=model_usage.prompt_tokens,
         completion_tokens=model_usage.completion_tokens,
         total_tokens=model_usage.total_tokens,
-        reasoning_tokens=model_usage.reasoning_tokens,
+        reasoning_tokens=_coalesce_reasoning_tokens((model_usage.reasoning_tokens,)),
         actual_cost_usd=model_usage.actual_cost_usd,
         models=(model_usage,),
     )
@@ -63,7 +63,7 @@ def merge_judge_usage(usages: Iterable[JudgeUsageSummary | None]) -> JudgeUsageS
         prompt_tokens=sum(model.prompt_tokens for model in merged_models),
         completion_tokens=sum(model.completion_tokens for model in merged_models),
         total_tokens=sum(model.total_tokens for model in merged_models),
-        reasoning_tokens=sum(model.reasoning_tokens for model in merged_models),
+        reasoning_tokens=_coalesce_reasoning_tokens(model.reasoning_tokens for model in merged_models),
         actual_cost_usd=_sum_actual_costs(tuple(model.actual_cost_usd for model in merged_models)),
         models=merged_models,
     )
@@ -94,12 +94,16 @@ def _merge_model_usage(
         prompt_tokens=sum(usage.prompt_tokens for usage in usages),
         completion_tokens=sum(usage.completion_tokens for usage in usages),
         total_tokens=sum(usage.total_tokens for usage in usages),
-        reasoning_tokens=sum(usage.reasoning_tokens for usage in usages),
+        reasoning_tokens=_coalesce_reasoning_tokens(usage.reasoning_tokens for usage in usages),
         actual_cost_usd=actual_cost,
         actual_cost_source="provider_actual" if actual_cost is not None else "unavailable",
         actual_cost_provider=actual_metadata.provider,
         actual_cost_evidence=actual_metadata.evidence,
     )
+
+
+def _coalesce_reasoning_tokens(values: Iterable[int | None]) -> int:
+    return sum(value or 0 for value in values)
 
 
 def _sum_actual_costs(costs: tuple[float | None, ...]) -> float | None:

@@ -2488,6 +2488,41 @@ def test_receipt_replay_records_zero_token_llm_usage_for_priced_receipt() -> Non
     assert usage.total_cost_usd == pytest.approx(0.003)
 
 
+def test_receipt_replay_coalesces_unavailable_reasoning_tokens() -> None:
+    model = "deepseek/deepseek-v3.2"
+    receipt = ToolCall(
+        receipt_id="priced-null-reasoning-llm",
+        session_id=uuid4(),
+        uid=7,
+        tool="llm_chat",
+        issued_at=datetime(2026, 5, 30, 12, tzinfo=UTC),
+        outcome=ToolCallOutcome.OK,
+        details=ToolCallDetails(
+            request_hash="priced-null-reasoning-llm-req",
+            request_payload={"kwargs": {"provider": "openrouter", "model": model}},
+            response_hash="priced-null-reasoning-llm-res",
+            response_payload={
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 6,
+                    "reasoning_tokens": None,
+                    "total_tokens": 9,
+                }
+            },
+            cost_usd=0.003,
+            reference_cost_usd=0.003,
+        ),
+    )
+
+    usage = evaluation_runner_module._usage_from_receipts((receipt,))
+
+    totals = usage.llm_usage_totals["openrouter"][model]
+    assert totals.prompt_tokens == 3
+    assert totals.completion_tokens == 6
+    assert totals.total_tokens == 9
+    assert totals.reasoning_tokens == 0
+
+
 def _sandbox_invocation_error(
     message: str,
     *,

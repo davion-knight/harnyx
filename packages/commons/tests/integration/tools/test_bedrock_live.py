@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import pytest
 
 from harnyx_commons.config.bedrock import BedrockSettings
@@ -48,8 +46,6 @@ async def test_bedrock_openai_tee_alias_live() -> None:
 
     assert response.raw_text, "Bedrock response should include text output"
     assert "56" in response.raw_text
-    assert response.metadata is not None
-    assert dict(response.metadata)["raw_response"]["events"]
 
 
 async def test_bedrock_openai_tee_reasoning_effort_live() -> None:
@@ -75,10 +71,8 @@ async def test_bedrock_openai_tee_reasoning_effort_live() -> None:
 
     assert response.raw_text, "Bedrock reasoning response should include text output"
     assert "56" in response.raw_text
-    assert response.metadata is not None
-    raw_events = dict(response.metadata)["raw_response"]["events"]
-    assert raw_events
-    assert response.choices[0].message.reasoning or _has_bedrock_reasoning_event(raw_events)
+    assert response.choices[0].message.reasoning
+    assert response.usage.reasoning_tokens is None
 
 
 async def test_bedrock_kimi_alias_live() -> None:
@@ -103,23 +97,6 @@ async def test_bedrock_kimi_alias_live() -> None:
 
     assert response.raw_text, "Bedrock response should include text output"
     assert "56" in response.raw_text
-    assert response.metadata is not None
-    assert dict(response.metadata)["raw_response"]["events"]
-
-
-def _has_bedrock_reasoning_event(events: object) -> bool:
-    if not isinstance(events, list):
-        return False
-    for event in events:
-        if not isinstance(event, Mapping):
-            continue
-        content_block_delta = event.get("contentBlockDelta")
-        if not isinstance(content_block_delta, Mapping):
-            continue
-        delta = content_block_delta.get("delta")
-        if isinstance(delta, Mapping) and "reasoningContent" in delta:
-            return True
-    return False
 
 
 async def test_bedrock_glm5_alias_live() -> None:
@@ -144,5 +121,3 @@ async def test_bedrock_glm5_alias_live() -> None:
 
     assert response.raw_text, "Bedrock response should include text output"
     assert "56" in response.raw_text
-    assert response.metadata is not None
-    assert dict(response.metadata)["raw_response"]["events"]

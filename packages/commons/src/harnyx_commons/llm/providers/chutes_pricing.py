@@ -162,7 +162,7 @@ def _token_price(
         "reasoning_per_million": pricing.billable_reasoning_per_million,
         "prompt_tokens": usage.prompt_tokens or 0,
         "completion_tokens": usage.completion_tokens or 0,
-        "reasoning_tokens": usage.reasoning_tokens or 0,
+        "reasoning_tokens": usage.reasoning_tokens,
     }
     return ChutesActualCost(cost_usd=cost_usd, provider="chutes", evidence=evidence)
 

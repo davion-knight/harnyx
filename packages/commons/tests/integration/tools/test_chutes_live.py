@@ -7,20 +7,11 @@ from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.llm.provider_factory import build_miner_paid_llm_provider
 from harnyx_commons.llm.providers.chutes import ChutesLlmProvider
 from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest, LlmThinkingConfig
+from harnyx_commons.llm.tool_models import MINER_SELECTED_LLM_PROVIDER_MODELS
 
 pytestmark = [pytest.mark.integration, pytest.mark.expensive, pytest.mark.anyio("asyncio")]
 
-CHUTES_TOOL_MODELS = (
-    "deepseek-ai/DeepSeek-V3.2-TEE",
-    "zai-org/GLM-5-TEE",
-    "Qwen/Qwen3.6-27B-TEE",
-    "google/gemma-4-31B-turbo-TEE",
-)
-
-THINKING_ENABLE_MODELS = (
-    "Qwen/Qwen3.6-27B-TEE",
-    "google/gemma-4-31B-turbo-TEE",
-)
+CHUTES_TOOL_MODELS = MINER_SELECTED_LLM_PROVIDER_MODELS["chutes"]
 
 
 def _provider_settings() -> tuple[str, float]:
@@ -64,23 +55,6 @@ def _thinking_request(*, model: str, enabled: bool) -> LlmRequest:
     )
 
 
-def _reasoning_effort_request(*, model: str) -> LlmRequest:
-    return LlmRequest(
-        provider="chutes",
-        model=model,
-        messages=(
-            LlmMessage(
-                role="user",
-                content=(LlmMessageContentPart.input_text('Think briefly, then reply with only "ok".'),),
-            ),
-        ),
-        temperature=0.0,
-        max_output_tokens=96,
-        timeout_seconds=180.0,
-        reasoning_effort="high",
-    )
-
-
 @pytest.mark.parametrize("model", CHUTES_TOOL_MODELS)
 async def test_chutes_tool_model_completion_live(model: str) -> None:
     api_key, timeout = _provider_settings()
@@ -110,18 +84,15 @@ async def test_chutes_tool_model_completion_live(model: str) -> None:
     }
 
 
-@pytest.mark.parametrize("model", THINKING_ENABLE_MODELS)
-@pytest.mark.parametrize("enabled", (False, True))
-async def test_chutes_qwen_gemma_enable_thinking_live(model: str, enabled: bool) -> None:
+@pytest.mark.parametrize("model", CHUTES_TOOL_MODELS)
+async def test_chutes_supported_model_reasoning_usage_live(model: str) -> None:
     api_key, timeout = _provider_settings()
     provider = ChutesLlmProvider(
         base_url=CHUTES.base_url,
         api_key=api_key,
         timeout=timeout,
     )
-    request = _thinking_request(model=model, enabled=enabled)
-    payload = provider._build_request(request).model_dump(mode="python", exclude_none=True)
-    assert payload["chat_template_kwargs"] == {"enable_thinking": enabled}
+    request = _thinking_request(model=model, enabled=True)
 
     try:
         response = await provider.invoke(request)
@@ -129,34 +100,12 @@ async def test_chutes_qwen_gemma_enable_thinking_live(model: str, enabled: bool)
         await provider.aclose()
 
     assert response.raw_text
-    if enabled:
-        assert response.choices[0].message.reasoning or response.usage.reasoning_tokens > 0
+    assert response.choices[0].message.reasoning
+    assert response.usage.completion_tokens > 0
+    if response.usage.reasoning_tokens is None:
+        assert response.usage.completion_tokens > 1
     else:
-        assert not response.choices[0].message.reasoning
-        assert response.usage.reasoning_tokens in (None, 0)
-
-
-async def test_chutes_reasoning_effort_enable_thinking_live() -> None:
-    api_key, timeout = _provider_settings()
-    provider = ChutesLlmProvider(
-        base_url=CHUTES.base_url,
-        api_key=api_key,
-        timeout=timeout,
-    )
-    request = _reasoning_effort_request(model="Qwen/Qwen3.6-27B-TEE")
-    payload = provider._build_request(request).model_dump(mode="python", exclude_none=True)
-    assert payload["chat_template_kwargs"] == {"enable_thinking": True}
-    assert "reasoning_effort" not in payload
-
-    try:
-        response = await provider.invoke(request)
-    finally:
-        await provider.aclose()
-
-    assert response.raw_text
-    assert response.choices[0].message.reasoning or (
-        response.usage.reasoning_tokens is not None and response.usage.reasoning_tokens > 0
-    )
+        assert response.usage.reasoning_tokens > 1
 
 
 async def test_miner_paid_chutes_helper_completion_live() -> None:

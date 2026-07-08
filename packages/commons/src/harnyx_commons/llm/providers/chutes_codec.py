@@ -38,6 +38,9 @@ class _ChutesChatRequest(BaseModel):
     model: str
     messages: list[dict[str, Any]]
     stream: bool = True
+    stream_options: dict[str, bool] = Field(
+        default_factory=lambda: {"include_usage": True, "continuous_usage_stats": True}
+    )
     temperature: float | None = None
     max_output_tokens: int | None = None
     tools: list[dict[str, Any]] | None = None
@@ -413,7 +416,7 @@ class _ChutesChatResponse(BaseModel):
             )
             for index, choice_state in sorted(state.choices.items())
         ]
-        usage = _ChutesUsagePayload.model_validate(state.usage) if state.usage is not None else None
+        usage = reasoning_state.normalized_usage_payload(state.usage)
         return cls(id=state.response_id or None, choices=choices, usage=usage)
 
     def to_llm_response(self) -> LlmResponse:
@@ -458,6 +461,7 @@ class _ChutesReasoningStreamState(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     choices: dict[int, _ChutesReasoningChoiceState] = Field(default_factory=dict)
+    usage_progress: _ChutesReasoningUsageProgress = Field(default_factory=lambda: _ChutesReasoningUsageProgress())
 
     def choice(self, index: int) -> _ChutesReasoningChoiceState:
         state = self.choices.get(index)
@@ -467,6 +471,7 @@ class _ChutesReasoningStreamState(BaseModel):
         return state
 
     def merge_event(self, event: _OpenAiStreamEvent) -> None:
+        reasoning_delta_observed = False
         for fallback_index, choice_payload in enumerate(event.choices):
             index = choice_payload.index if choice_payload.index is not None else fallback_index
             message_payload = choice_payload.message_delta(reasoning_keys=("reasoning", "reasoning_content"))
@@ -476,11 +481,60 @@ class _ChutesReasoningStreamState(BaseModel):
             reasoning_value = extra.get("reasoning")
             self.choice(index).merge(reasoning_value)
             appended_reasoning = set(_chutes_stream_reasoning_fragments(reasoning_value))
+            if appended_reasoning:
+                reasoning_delta_observed = True
             for reasoning_fragment in normalize_openai_text_fragments(extra.get("reasoning_content")):
                 if reasoning_fragment in appended_reasoning:
                     continue
                 appended_reasoning.add(reasoning_fragment)
                 self.choice(index).merge(reasoning_fragment)
+                reasoning_delta_observed = True
+        self.usage_progress.observe(event.usage, reasoning_delta_observed=reasoning_delta_observed)
+
+    def normalized_usage_payload(self, raw_usage: dict[str, Any] | None) -> _ChutesUsagePayload | None:
+        if raw_usage is None:
+            return None
+        usage = _ChutesUsagePayload.model_validate(raw_usage)
+        if self.usage_progress.reasoning_tokens_unavailable:
+            return usage.model_copy(update={"reasoning_tokens": None})
+        return usage
+
+
+class _ChutesReasoningUsageProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    prior_completion_tokens: int | None = None
+    prior_reasoning_tokens: int | None = None
+    reasoning_delta_observed: bool = False
+    reasoning_token_usage_conflict_observed: bool = False
+
+    def observe(self, usage: dict[str, Any] | None, *, reasoning_delta_observed: bool) -> None:
+        self.reasoning_delta_observed = self.reasoning_delta_observed or reasoning_delta_observed
+        if usage is None or not reasoning_delta_observed:
+            return
+        completion_tokens = _usage_int(usage.get("completion_tokens"))
+        reasoning_tokens = _usage_int(usage.get("reasoning_tokens"))
+        if completion_tokens is None or reasoning_tokens is None:
+            return
+        if (
+            self.prior_completion_tokens is not None
+            and self.prior_reasoning_tokens is not None
+            and completion_tokens > self.prior_completion_tokens
+            and reasoning_tokens <= self.prior_reasoning_tokens
+        ):
+            self.reasoning_token_usage_conflict_observed = True
+        self.prior_completion_tokens = completion_tokens
+        self.prior_reasoning_tokens = reasoning_tokens
+
+    @property
+    def reasoning_tokens_unavailable(self) -> bool:
+        return self.reasoning_delta_observed and (
+            self.prior_reasoning_tokens is None or self.reasoning_token_usage_conflict_observed
+        )
+
+
+def _usage_int(value: object) -> int | None:
+    return value if isinstance(value, int) and value >= 0 else None
 
 
 def _chutes_stream_tool_calls(choice_state: OpenAiChoiceState) -> list[_ChutesToolCallPayload] | None:
