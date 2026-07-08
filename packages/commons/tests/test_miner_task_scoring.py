@@ -906,21 +906,40 @@ async def test_scoring_service_preserves_selected_provider_model_routes_across_f
             },
         ),
     )
+    glm_error = LlmRetryExhaustedError(
+        "glm exhausted",
+        response=_pairwise_response(
+            preferred_position="first",
+            reasoning_text=None,
+            reasoning_tokens=3,
+            prompt_tokens=11,
+            completion_tokens=5,
+            total_tokens=16,
+            metadata={
+                "selected_provider": "vertex",
+                "selected_model": "zai-org/GLM-5-TEE",
+                "attempts": 2,
+                "retry_reasons": ("rate_limited: provider capacity exceeded",),
+                "latency_ms_total": 300.0,
+            },
+        ),
+    )
     llm = SequenceLlmProvider(
         [
             primary_error,
+            glm_error,
             _pairwise_response(
                 preferred_position="first",
                 reasoning_text=None,
-                reasoning_tokens=3,
-                prompt_tokens=11,
-                completion_tokens=5,
-                total_tokens=16,
+                reasoning_tokens=4,
+                prompt_tokens=13,
+                completion_tokens=7,
+                total_tokens=20,
                 metadata={
-                    "selected_provider": "vertex",
-                    "selected_model": "fallback-judge",
+                    "selected_provider": "bedrock",
+                    "selected_model": "moonshotai/Kimi-K2.5-TEE",
                     "attempts": 1,
-                    "latency_ms_total": 300.0,
+                    "latency_ms_total": 100.0,
                 },
             ),
             _pairwise_response(
@@ -944,7 +963,7 @@ async def test_scoring_service_preserves_selected_provider_model_routes_across_f
         config=EvaluationScoringConfig(
             provider="chutes",
             model="primary-judge",
-            fallback_models=("fallback-judge",),
+            fallback_models=("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE"),
         ),
     )
 
@@ -953,12 +972,13 @@ async def test_scoring_service_preserves_selected_provider_model_routes_across_f
     assert result.evaluation_trace is not None
     assert result.evaluation_trace.scoring_judge_selected_routes == (
         "chutes/primary-judge",
-        "vertex/fallback-judge",
+        "vertex/zai-org/GLM-5-TEE",
+        "bedrock/moonshotai/Kimi-K2.5-TEE",
     )
-    assert result.evaluation_trace.scoring_judge_attempt_count == 4
-    assert result.evaluation_trace.scoring_judge_retry_count == 1
-    assert result.evaluation_trace.scoring_judge_retry_reasons == ("transport_error",)
-    assert result.evaluation_trace.scoring_judge_duration_ms == pytest.approx(623.45)
+    assert result.evaluation_trace.scoring_judge_attempt_count == 6
+    assert result.evaluation_trace.scoring_judge_retry_count == 2
+    assert result.evaluation_trace.scoring_judge_retry_reasons == ("transport_error", "rate_limited")
+    assert result.evaluation_trace.scoring_judge_duration_ms == pytest.approx(723.45)
     assert result.evaluation_trace.scoring_judge_status == "ok"
 
 

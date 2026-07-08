@@ -772,16 +772,92 @@ def test_create_scoring_service_uses_effective_route_model_and_default_provider(
     assert service._config.retry_policy == settings.llm.scoring_llm_retry_policy
 
 
+def test_create_scoring_service_uses_explicit_fallback_models() -> None:
+    settings = Settings.model_construct(
+        llm=LlmSettings.model_construct(
+            scoring_llm_provider="chutes",
+            scoring_llm_temperature=0.0,
+            scoring_llm_max_output_tokens=20480,
+            scoring_llm_timeout_seconds=30.0,
+        ),
+    )
+
+    service = _create_scoring_service(
+        settings,
+        provider=SimpleNamespace(),
+        scoring_route=ResolvedLlmRoute(
+            surface="scoring",
+            provider="chutes",
+            model=bootstrap._DIRECT_SCORING_LLM_MODEL,
+        ),
+        fallback_models=("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE"),
+    )
+
+    assert service._config.fallback_models == ("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE")
+
+
 def test_scoring_slot_config_entries_are_hard_coded() -> None:
     assert tuple(bootstrap._SCORING_SLOT_CONFIG.entries) == (
         bootstrap.ScoringSlotConfigEntry(
             model="google/gemma-4-31B-turbo-TEE",
             slot_limit=10,
+            fallback_models=("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE"),
         ),
         bootstrap.ScoringSlotConfigEntry(
             model="Qwen/Qwen3.6-27B-TEE",
             slot_limit=10,
+            fallback_models=("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE"),
         ),
+    )
+
+
+def test_build_services_passes_slot_fallback_models_to_scoring_services() -> None:
+    settings = Settings.model_construct(
+        llm=LlmSettings.model_construct(
+            scoring_llm_provider="chutes",
+            scoring_llm_temperature=0.0,
+            scoring_llm_max_output_tokens=20480,
+            scoring_llm_timeout_seconds=30.0,
+            similarity_llm_provider="chutes",
+            similarity_llm_temperature=0.0,
+            similarity_llm_max_output_tokens=4096,
+            similarity_llm_timeout_seconds=30.0,
+        ),
+        subtensor=SubtensorSettings.model_construct(netuid=1),
+    )
+
+    scoring_services, _, _ = bootstrap._build_services(
+        resolved=settings,
+        scoring_llm_provider=SimpleNamespace(),
+        similarity_llm_provider=SimpleNamespace(),
+        scoring_routes={
+            "google/gemma-4-31B-turbo-TEE": ResolvedLlmRoute(
+                surface="scoring",
+                provider="chutes",
+                model="google/gemma-4-31B-turbo-TEE",
+            ),
+            "Qwen/Qwen3.6-27B-TEE": ResolvedLlmRoute(
+                surface="scoring",
+                provider="chutes",
+                model="Qwen/Qwen3.6-27B-TEE",
+            ),
+        },
+        similarity_route=ResolvedLlmRoute(
+            surface="duplication_detection",
+            provider="chutes",
+            model="google/gemma-4-31B-turbo-TEE",
+        ),
+        subtensor_client=SimpleNamespace(),
+        platform_client=SimpleNamespace(),
+    )
+
+    assert scoring_services["google/gemma-4-31B-turbo-TEE"]._config.fallback_models == (
+        "zai-org/GLM-5-TEE",
+        "moonshotai/Kimi-K2.5-TEE",
+    )
+    assert scoring_services["Qwen/Qwen3.6-27B-TEE"]._config.fallback_models == (
+        "zai-org/GLM-5-TEE",
+        "moonshotai/Kimi-K2.5-TEE",
     )
 
 
@@ -797,6 +873,36 @@ def test_direct_scoring_service_uses_explicit_direct_model() -> None:
     )
 
     assert selected is direct_service
+
+
+def test_direct_scoring_service_inherits_configured_fallback_models() -> None:
+    settings = Settings.model_construct(
+        llm=LlmSettings.model_construct(
+            scoring_llm_provider="chutes",
+            scoring_llm_temperature=0.0,
+            scoring_llm_max_output_tokens=20480,
+            scoring_llm_timeout_seconds=30.0,
+        ),
+    )
+    direct_service = _create_scoring_service(
+        settings,
+        provider=SimpleNamespace(),
+        scoring_route=ResolvedLlmRoute(
+            surface="scoring",
+            provider="chutes",
+            model=bootstrap._DIRECT_SCORING_LLM_MODEL,
+        ),
+        fallback_models=("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE"),
+    )
+
+    selected = bootstrap._direct_scoring_service(
+        {
+            "Qwen/Qwen3.6-27B-TEE": object(),
+            bootstrap._DIRECT_SCORING_LLM_MODEL: direct_service,
+        }
+    )
+
+    assert selected._config.fallback_models == ("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE")
 
 
 @pytest.mark.anyio("asyncio")

@@ -28,6 +28,10 @@ _QWEN36_MODEL = "Qwen/Qwen3.6-27B-TEE"
 _QWEN36_ENDPOINT_ID = "qwen36-cloud-run"
 _QWEN36_ROUTE_TARGET = "custom-openai-compatible:qwen36-cloud-run"
 _QWEN36_SERVICE_URL = "https://qwen3-6-27b-obbrpx3ppa-uc.a.run.app"
+_GLM_MODEL = "zai-org/GLM-5-TEE"
+_GLM_ROUTE_TARGET = "vertex"
+_KIMI_MODEL = "moonshotai/Kimi-K2.5-TEE"
+_KIMI_ROUTE_TARGET = "bedrock"
 
 
 class RecordingProvider(LlmProviderPort):
@@ -137,6 +141,83 @@ async def test_evaluation_scoring_live_uses_real_structured_runtime_flow(
         assert score.reasoning.text.strip()
         if score.reasoning.reasoning_tokens is not None:
             assert score.reasoning.reasoning_tokens >= 0
+
+
+@pytest.mark.parametrize(
+    ("model", "route_target"),
+    (
+        (_GLM_MODEL, _GLM_ROUTE_TARGET),
+        (_KIMI_MODEL, _KIMI_ROUTE_TARGET),
+    ),
+)
+async def test_evaluation_scoring_live_accepts_fallback_candidate_route(
+    model: str,
+    route_target: str,
+) -> None:
+    base_settings = Settings.load()
+    settings = base_settings.model_copy(
+        update={
+            "llm": base_settings.llm.model_copy(
+                update={
+                    "llm_model_provider_overrides_json": json.dumps({"scoring": {model: route_target}}),
+                }
+            ),
+        }
+    )
+    scoring_route = bootstrap._resolve_scoring_judge_route(settings, model=model)
+    assert scoring_route.provider == route_target
+    assert scoring_route.model == model
+
+    registry = build_cached_llm_provider_registry(
+        llm_settings=settings.llm,
+        bedrock_settings=settings.bedrock,
+        vertex_settings=settings.vertex,
+    )
+    routed_provider = build_routed_llm_provider(
+        surface="scoring",
+        default_provider=settings.llm.scoring_llm_provider,
+        llm_settings=settings.llm,
+        allowed_providers={"bedrock", "chutes", "vertex"},
+        allow_custom_openai_compatible=True,
+        provider_registry=registry,
+    )
+    llm_provider = RecordingProvider(routed_provider)
+    service = EvaluationScoringService(
+        llm_provider=llm_provider,
+        config=EvaluationScoringConfig(
+            provider=settings.llm.scoring_llm_provider,
+            model=scoring_route.model,
+            fallback_models=(),
+            reasoning_effort=bootstrap._SCORING_LLM_REASONING_EFFORT,
+            temperature=0.0,
+            max_output_tokens=settings.llm.scoring_llm_max_output_tokens,
+            timeout_seconds=float(settings.llm.scoring_llm_timeout_seconds),
+        ),
+    )
+    task = MinerTask(
+        task_id=uuid4(),
+        query=Query(text="What is the capital of France?"),
+        reference_answer=ReferenceAnswer(text="Paris is the capital of France."),
+    )
+
+    try:
+        score = await service.score(
+            task=task,
+            response=Response(text="Paris is the capital of France."),
+        )
+    finally:
+        await registry.aclose()
+
+    assert len(llm_provider.requests) == 2
+    assert all(request.output_mode == "structured" for request in llm_provider.requests)
+    assert all(request.provider == settings.llm.scoring_llm_provider for request in llm_provider.requests)
+    assert all(request.model == scoring_route.model for request in llm_provider.requests)
+    assert all(response.metadata is not None for response in llm_provider.responses)
+    assert all(response.metadata["selected_provider"] == route_target for response in llm_provider.responses)
+    assert all(response.metadata["selected_model"] == scoring_route.model for response in llm_provider.responses)
+    assert score.scoring_version == "v1"
+    assert 0.0 <= score.comparison_score <= 1.0
+    assert score.total_score == pytest.approx(score.comparison_score)
 
 
 def _build_live_scoring_settings(

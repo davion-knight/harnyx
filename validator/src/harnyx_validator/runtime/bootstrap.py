@@ -107,10 +107,19 @@ logger = logging.getLogger("harnyx_validator.runtime")
 _DIRECT_SCORING_LLM_MODEL = "google/gemma-4-31B-turbo-TEE"
 _SCORING_LLM_REASONING_EFFORT = "high"
 _DUPLICATION_DETECTION_LLM_MODEL = "google/gemma-4-31B-turbo-TEE"
+_SCORING_FALLBACK_MODELS = ("zai-org/GLM-5-TEE", "moonshotai/Kimi-K2.5-TEE")
 _SCORING_SLOT_CONFIG = ScoringSlotConfig(
     entries=(
-        ScoringSlotConfigEntry(model="google/gemma-4-31B-turbo-TEE", slot_limit=10),
-        ScoringSlotConfigEntry(model="Qwen/Qwen3.6-27B-TEE", slot_limit=10),
+        ScoringSlotConfigEntry(
+            model="google/gemma-4-31B-turbo-TEE",
+            slot_limit=10,
+            fallback_models=_SCORING_FALLBACK_MODELS,
+        ),
+        ScoringSlotConfigEntry(
+            model="Qwen/Qwen3.6-27B-TEE",
+            slot_limit=10,
+            fallback_models=_SCORING_FALLBACK_MODELS,
+        ),
     )
 )
 _DUPLICATION_DETECTION_FALLBACK_MODELS = (
@@ -702,12 +711,13 @@ def _build_services(
     platform_client: PlatformPort,
 ) -> tuple[dict[str, EvaluationScoringService], SimilarityJudge, WeightSubmissionService]:
     scoring_services = {
-        model: _create_scoring_service(
+        entry.model: _create_scoring_service(
             resolved,
             scoring_llm_provider,
-            scoring_route=scoring_route,
+            scoring_route=scoring_routes[entry.model],
+            fallback_models=entry.fallback_models,
         )
-        for model, scoring_route in scoring_routes.items()
+        for entry in _SCORING_SLOT_CONFIG.entries
     }
     similarity_judge = _create_similarity_judge(
         resolved,
@@ -1087,13 +1097,14 @@ def _create_scoring_service(
     provider: LlmProviderPort | None,
     *,
     scoring_route: ResolvedLlmRoute,
+    fallback_models: tuple[str, ...] = (),
 ) -> EvaluationScoringService:
     if provider is None:
         raise ValueError("scoring_llm_provider must be configured")
     config = EvaluationScoringConfig(
         provider=settings.llm.scoring_llm_provider,
         model=scoring_route.model,
-        fallback_models=(),
+        fallback_models=fallback_models,
         temperature=settings.llm.scoring_llm_temperature,
         max_output_tokens=settings.llm.scoring_llm_max_output_tokens,
         reasoning_effort=_SCORING_LLM_REASONING_EFFORT,

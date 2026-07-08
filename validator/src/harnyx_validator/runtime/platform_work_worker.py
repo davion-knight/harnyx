@@ -49,6 +49,7 @@ _ArtifactGroupKey = tuple[UUID, UUID]
 class ScoringSlotConfigEntry:
     model: str
     slot_limit: int
+    fallback_models: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         model = self.model.strip()
@@ -56,6 +57,15 @@ class ScoringSlotConfigEntry:
             raise ValueError("scoring slot model must be non-empty")
         if model != self.model:
             object.__setattr__(self, "model", model)
+        fallback_models = tuple(candidate.strip() for candidate in self.fallback_models)
+        if any(not candidate for candidate in fallback_models):
+            raise ValueError("scoring slot fallback_models must contain non-empty model ids")
+        if len(frozenset(fallback_models)) != len(fallback_models):
+            raise ValueError("scoring slot fallback_models must be unique")
+        if model in fallback_models:
+            raise ValueError("scoring slot fallback_models must not include the primary model")
+        if fallback_models != self.fallback_models:
+            object.__setattr__(self, "fallback_models", fallback_models)
         if self.slot_limit < 1:
             raise ValueError("scoring slot_limit must be positive")
 

@@ -90,6 +90,28 @@ def _single_model_scoring_config(*, model: str = _MODEL_A, slot_limit: int = 20)
     return ScoringSlotConfig(entries=(ScoringSlotConfigEntry(model=model, slot_limit=slot_limit),))
 
 
+def test_scoring_slot_config_entry_normalizes_fallback_models() -> None:
+    entry = ScoringSlotConfigEntry(model=" primary ", slot_limit=1, fallback_models=(" fallback ",))
+
+    assert entry.model == "primary"
+    assert entry.fallback_models == ("fallback",)
+
+
+def test_scoring_slot_config_entry_rejects_empty_fallback_model() -> None:
+    with pytest.raises(ValueError, match="fallback_models"):
+        ScoringSlotConfigEntry(model="primary", slot_limit=1, fallback_models=("",))
+
+
+def test_scoring_slot_config_entry_rejects_duplicate_fallback_model() -> None:
+    with pytest.raises(ValueError, match="fallback_models must be unique"):
+        ScoringSlotConfigEntry(model="primary", slot_limit=1, fallback_models=("fallback", "fallback"))
+
+
+def test_scoring_slot_config_entry_rejects_primary_as_fallback_model() -> None:
+    with pytest.raises(ValueError, match="must not include the primary model"):
+        ScoringSlotConfigEntry(model="primary", slot_limit=1, fallback_models=("primary",))
+
+
 def _two_model_scoring_config(
     *,
     first_slot_limit: int = 1,
