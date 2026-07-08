@@ -4,10 +4,23 @@ import pytest
 
 from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.llm.provider_factory import build_miner_paid_llm_provider
-from harnyx_commons.llm.providers.openrouter import OPENROUTER_SUPPORTED_MODELS, OpenRouterLlmProvider
+from harnyx_commons.llm.providers.openrouter import (
+    OPENROUTER_INTERNAL_TO_NATIVE_MODEL,
+    OPENROUTER_SUPPORTED_MODELS,
+    OpenRouterLlmProvider,
+)
 from harnyx_commons.llm.schema import LlmMessage, LlmMessageContentPart, LlmRequest, LlmThinkingConfig
 
 pytestmark = [pytest.mark.integration, pytest.mark.expensive, pytest.mark.anyio("asyncio")]
+
+OPENROUTER_REASONING_PROVIDER_BY_NATIVE_MODEL = {
+    "openai/gpt-oss-20b": "wandb",
+    "openai/gpt-oss-120b": "wandb",
+    "deepseek/deepseek-v3.2": "deepinfra",
+    "z-ai/glm-5": "streamlake",
+    "qwen/qwen3.6-27b": "wandb",
+    "google/gemma-4-31b-it": "wandb",
+}
 
 
 def _openrouter_request(*, model: str) -> LlmRequest:
@@ -22,6 +35,7 @@ def _openrouter_request(*, model: str) -> LlmRequest:
         ),
         temperature=0.0,
         max_output_tokens=256,
+        extra=_openrouter_reasoning_provider_extra(model=model),
         thinking=LlmThinkingConfig(enabled=True, effort="low"),
         timeout_seconds=180.0,
     )
@@ -39,9 +53,24 @@ def _openrouter_reasoning_request(*, model: str) -> LlmRequest:
         ),
         temperature=0.0,
         max_output_tokens=256,
+        extra=_openrouter_reasoning_provider_extra(model=model),
         thinking=LlmThinkingConfig(enabled=True, effort="low"),
         timeout_seconds=180.0,
     )
+
+
+def _openrouter_reasoning_provider_extra(*, model: str) -> dict[str, object]:
+    native_model = OPENROUTER_INTERNAL_TO_NATIVE_MODEL.get(model, model)
+    provider = OPENROUTER_REASONING_PROVIDER_BY_NATIVE_MODEL.get(native_model)
+    if provider is None:
+        raise AssertionError(f"No OpenRouter reasoning provider pin configured for {model!r}")
+    return {
+        "provider": {
+            "only": [provider],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+    }
 
 
 @pytest.mark.parametrize("model", OPENROUTER_SUPPORTED_MODELS)

@@ -17,6 +17,7 @@ from harnyx_commons.llm.schema import (
     LlmMessageContentPart,
     LlmRequest,
     LlmThinkingConfig,
+    extract_vertex_gemini_model_id,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio("asyncio")]
@@ -367,7 +368,9 @@ async def test_vertex_claude_web_search_live() -> None:
     assert location, "GCP_LOCATION must be configured"
     assert credentials_b64, "Vertex credentials must be configured"
 
-    claude_model = LlmSettings().reference_llm_model or "claude-haiku-4-5@20251001"
+    reference_model = LlmSettings().reference_llm_model or "claude-haiku-4-5@20251001"
+    is_gemini_reference_model = extract_vertex_gemini_model_id(reference_model) is not None
+    reasoning_effort = "high" if is_gemini_reference_model else "2048"
 
     provider = VertexLlmProvider(
         project=project,
@@ -379,7 +382,7 @@ async def test_vertex_claude_web_search_live() -> None:
     try:
         request = GroundedLlmRequest(
             provider="vertex",
-            model=claude_model,
+            model=reference_model,
             messages=(
                 LlmMessage(
                     role="system",
@@ -396,16 +399,20 @@ async def test_vertex_claude_web_search_live() -> None:
             ),
             temperature=1.0,
             max_output_tokens=3072,
-            reasoning_effort="2048",
+            reasoning_effort=reasoning_effort,
         )
 
         response = await provider.invoke(request)
     finally:
         await provider.aclose()
 
-    assert response.raw_text, "Claude web_search response should include text output"
+    assert response.raw_text, "Vertex web_search response should include text output"
     assert response.usage.web_search_calls is not None
-    assert response.usage.reasoning_tokens is None
+    if is_gemini_reference_model:
+        assert response.usage.reasoning_tokens is not None
+        assert response.usage.reasoning_tokens > 0
+    else:
+        assert response.usage.reasoning_tokens is None
 
 
 async def test_vertex_json_mode_live() -> None:
