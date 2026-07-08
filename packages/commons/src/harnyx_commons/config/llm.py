@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from harnyx_commons.llm.provider_types import LlmProviderName
 from harnyx_commons.llm.retry_utils import RetryPolicy
 from harnyx_commons.llm.routing import LlmModelProviderOverrides, parse_llm_model_provider_overrides
+from harnyx_commons.tools.embedding_models import EmbeddingProviderName
 
 DEFAULT_MAX_OUTPUT_TOKENS = 1024
 DEFAULT_SCORING_MAX_OUTPUT_TOKENS = 20480
@@ -153,6 +154,7 @@ class LlmSettings(BaseSettings):
 
     # --- Tooling / search ---
     tool_llm_provider: LlmProviderName = Field(default="chutes", alias="TOOL_LLM_PROVIDER")
+    tool_embedding_provider: EmbeddingProviderName = Field(default="chutes", alias="TOOL_EMBEDDING_PROVIDER")
     search_provider: SearchProviderName | None = Field(default=None, alias="SEARCH_PROVIDER")
 
     # --- Generation / reference / benchmark ---

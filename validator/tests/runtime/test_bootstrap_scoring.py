@@ -607,6 +607,7 @@ def test_build_runtime_cleans_stale_sandbox_containers_on_startup(
             search_client=None,
             llm_provider_registry=object(),
             tool_llm_provider=None,
+            tool_embedding_provider=None,
             scoring_llm_provider=None,
             similarity_llm_provider=None,
             scoring_routes=object(),

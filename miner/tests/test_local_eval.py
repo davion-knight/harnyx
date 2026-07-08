@@ -620,6 +620,8 @@ def test_local_eval_runtime_create_binds_sandbox_publish_to_loopback(
             search_provider_registry=_FakeRegistry(),
             llm_provider_registry=_FakeRegistry(),
             tool_llm_provider=_FakeAsyncResource(),
+            embedding_provider=_FakeAsyncResource(),
+            embedding_provider_registry=_FakeRegistry(),
         ),
     )
     monkeypatch.setattr(
@@ -671,6 +673,8 @@ async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() 
     search_provider_registry = _FakeAsyncResource()
     llm_provider_registry = _FakeAsyncResource()
     tool_llm_provider = _FakeAsyncResource()
+    tool_embedding_provider = _FakeAsyncResource()
+    embedding_provider_registry = _FakeAsyncResource()
     scoring_llm_provider = _FakeAsyncResource()
     runtime = local_eval.LocalEvaluationRuntime(
         settings=cast(Any, SimpleNamespace()),
@@ -687,6 +691,8 @@ async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() 
         _search_provider_registry=search_provider_registry,
         _llm_provider_registry=llm_provider_registry,
         _tool_llm_provider=tool_llm_provider,
+        _tool_embedding_provider=tool_embedding_provider,
+        _embedding_provider_registry=embedding_provider_registry,
         _scoring_llm_provider=scoring_llm_provider,
         _sandbox_manager=cast(Any, object()),
         _tool_host=None,
@@ -701,6 +707,8 @@ async def test_local_runtime_closes_llm_provider_registry_not_routed_wrappers() 
     assert search_provider_registry.closed is True
     assert llm_provider_registry.closed is True
     assert tool_llm_provider.closed is False
+    assert tool_embedding_provider.closed is True
+    assert embedding_provider_registry.closed is True
     assert scoring_llm_provider.closed is False
 
 
@@ -723,6 +731,8 @@ async def test_local_runtime_closes_llm_provider_registry_when_search_close_fail
         _search_provider_registry=search_provider_registry,
         _llm_provider_registry=llm_provider_registry,
         _tool_llm_provider=_FakeAsyncResource(),
+        _tool_embedding_provider=_FakeAsyncResource(),
+        _embedding_provider_registry=_FakeAsyncResource(),
         _scoring_llm_provider=_FakeAsyncResource(),
         _sandbox_manager=cast(Any, object()),
         _tool_host=None,
@@ -909,6 +919,8 @@ def _local_runtime(
         _search_provider_registry=_FakeAsyncResource(),
         _llm_provider_registry=_FakeAsyncResource(),
         _tool_llm_provider=_FakeAsyncResource(),
+        _tool_embedding_provider=_FakeAsyncResource(),
+        _embedding_provider_registry=_FakeAsyncResource(),
         _scoring_llm_provider=_FakeAsyncResource(),
         _sandbox_manager=cast(Any, sandbox_manager),
         _tool_host=cast(Any, tool_host),
@@ -1152,6 +1164,10 @@ def test_invocation_only_runtime_factory_skips_default_scoring_provider(
             search_provider_registry=SimpleNamespace(resolve=lambda _name: object()),
             llm_provider_registry=SimpleNamespace(resolve=lambda _name: object()),
             tool_llm_provider=None,
+            embedding_provider=object(),
+            embedding_provider_registry=SimpleNamespace(
+                resolve=lambda name: f"embedding-provider:{name}"
+            ),
         ),
     )
     def build_local_provider_tooling(**kwargs: Any) -> tuple[object, object]:
@@ -1175,6 +1191,11 @@ def test_invocation_only_runtime_factory_skips_default_scoring_provider(
     assert captured_tooling_kwargs[0]["search_provider_resolver"]("parallel", object()) is not None
     assert captured_tooling_kwargs[0]["llm_provider_resolver"]("openrouter", object()) is not None
     assert captured_tooling_kwargs[0]["llm_provider_resolver"]("ai_gateway", object()) is not None
+    assert captured_tooling_kwargs[0]["tool_embedding_provider"] is not None
+    assert (
+        captured_tooling_kwargs[0]["embedding_provider_resolver"]("openrouter", object())
+        == "embedding-provider:openrouter"
+    )
 
 
 def test_local_eval_target_only_skips_champion_fetch_and_keeps_recorded_context(
@@ -1758,6 +1779,8 @@ async def test_local_runtime_executes_target_and_champion_via_sandbox_and_reuses
         _search_provider_registry=_FakeAsyncResource(),
         _llm_provider_registry=_FakeAsyncResource(),
         _tool_llm_provider=_FakeAsyncResource(),
+        _tool_embedding_provider=_FakeAsyncResource(),
+        _embedding_provider_registry=_FakeAsyncResource(),
         _scoring_llm_provider=_FakeAsyncResource(),
         _sandbox_manager=cast(Any, sandbox_manager),
         _tool_host=None,
@@ -2083,6 +2106,8 @@ async def test_local_runtime_stops_started_sandbox_when_cancelled_during_startup
         _search_provider_registry=None,
         _llm_provider_registry=None,
         _tool_llm_provider=None,
+        _tool_embedding_provider=None,
+        _embedding_provider_registry=None,
         _scoring_llm_provider=None,
         _sandbox_manager=cast(Any, sandbox_manager),
         _tool_host=cast(Any, _FakeToolHost()),

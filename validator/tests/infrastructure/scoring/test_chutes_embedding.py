@@ -30,7 +30,7 @@ async def test_chutes_text_embedding_client_posts_openai_compatible_embeddings_r
         )
 
     client = ChutesTextEmbeddingClient(
-        model="Qwen/Qwen3-Embedding-0.6B",
+        model="Qwen/Qwen3-Embedding-8B-TEE",
         base_url="https://llm.chutes.ai",
         client=httpx.AsyncClient(base_url="https://llm.chutes.ai", transport=httpx.MockTransport(handler)),
         api_key="test-key",
@@ -42,5 +42,5 @@ async def test_chutes_text_embedding_client_posts_openai_compatible_embeddings_r
     assert vector == (0.25, 0.5, 0.75)
     assert captured["method"] == "POST"
     assert captured["path"] == "/v1/embeddings"
-    assert '"model":"Qwen/Qwen3-Embedding-0.6B"' in str(captured["json"])
+    assert '"model":"Qwen/Qwen3-Embedding-8B-TEE"' in str(captured["json"])
     assert '"input":"hello world"' in str(captured["json"])

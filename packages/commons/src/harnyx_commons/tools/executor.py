@@ -35,6 +35,7 @@ from harnyx_commons.tools.dto import (
 )
 from harnyx_commons.tools.token_semaphore import ToolConcurrencyLimiter
 from harnyx_commons.tools.types import (
+    EMBEDDING_TOOLS,
     LLM_TOOLS,
     SEARCH_TOOLS,
     SearchToolName,
@@ -71,7 +72,7 @@ _TOOLS_WITHOUT_USAGE: set[ToolName] = {
     "tooling_info",
 }
 
-_PROVIDER_BACKED_TOOL_NAMES: frozenset[ToolName] = frozenset({*LLM_TOOLS, *SEARCH_TOOLS})
+_PROVIDER_BACKED_TOOL_NAMES: frozenset[ToolName] = frozenset({*LLM_TOOLS, *SEARCH_TOOLS, *EMBEDDING_TOOLS})
 
 _SEARCH_RESULT_FIELDS: dict[SearchToolName, tuple[str, str, str]] = {
     "search_web": ("link", "snippet", "title"),
@@ -227,6 +228,10 @@ class ToolExecutor:
         if is_search_tool(name):
             if not isinstance(response_payload, Mapping):
                 raise ValueError("search tool response must be a mapping")
+            return 0, None
+        if name in EMBEDDING_TOOLS:
+            if not isinstance(response_payload, Mapping):
+                raise ValueError("embedding tool response must be a mapping")
             return 0, None
         if name in _TOOLS_WITHOUT_USAGE:
             return 0, None

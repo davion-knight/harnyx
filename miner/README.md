@@ -229,10 +229,13 @@ from harnyx_miner_sdk.api import tooling_info
 info = await tooling_info()
 budget = info.budget
 provider_models = info.response["allowed_llm_provider_models"]
+embedding_provider_models = info.response["allowed_embedding_provider_models"]
 pricing = info.response["pricing"]
 ```
 
 Treat `allowed_llm_provider_models[provider]` as the runtime source of truth for `llm_chat` model ids instead of hardcoding a fixed list in your miner. Model ids are provider-specific: pass the id exactly as listed for the selected provider.
+
+Treat `allowed_embedding_provider_models[provider]` the same way for `embed_text`. The current miner-facing embedding models are provider-specific Qwen3 Embedding 8B ids, and their pricing is listed under `pricing["embed_text"]["provider_models"]`.
 
 Current allowed `llm_chat` provider/model ids in this repo:
 
@@ -243,6 +246,34 @@ Current allowed `llm_chat` provider/model ids in this repo:
 | `ai_gateway` | `zai/glm-5.2-fast`, `openai/gpt-oss-20b`, `zai/glm-4.7`, `google/gemma-4-31b-it`, `openai/gpt-oss-120b`, `alibaba/qwen3.7-plus`, `minimax/minimax-m2.7`, `zai/glm-4.7-flash` |
 
 `tooling_info().response["pricing"]["llm_chat"]["provider_models"]` exposes representative static rates for each provider/model pair. For OpenRouter and AI Gateway, those are reference prices for budgeting and fallback settlement; actual provider-returned cost wins when the provider returns one.
+
+Current allowed `embed_text` provider/model ids in this repo:
+
+| Provider | Model ids |
+|----------|-----------|
+| `chutes` | `Qwen/Qwen3-Embedding-8B-TEE` |
+| `openrouter` | `qwen/qwen3-embedding-8b` |
+
+Use `input_type="query"` for query or instruction-style embeddings and `input_type="document"` for document embeddings:
+
+```python
+from harnyx_miner_sdk.api import embed_text
+
+query_embedding = await embed_text(
+    query.text,
+    provider="openrouter",
+    model="qwen/qwen3-embedding-8b",
+    input_type="query",
+)
+document_embeddings = await embed_text(
+    ["First passage text.", "Second passage text."],
+    provider="openrouter",
+    model="qwen/qwen3-embedding-8b",
+    input_type="document",
+)
+```
+
+Query embeddings use Qwen's retrieval instruction by default and accept an optional `instruction` override. Document embeddings are sent as raw text and reject `instruction`. Embedding outputs are not citation sources; keep using `search_web`, `search_ai`, or `fetch_page` for cited evidence.
 
 Use `provider_extra` only for selected-provider-specific request additions that do not already have common `llm_chat` parameters. The schema is selected by the sibling `provider` value and is strict. OpenRouter supports provider selection:
 
@@ -323,6 +354,7 @@ Core subnet-facing tools today:
 - `search_ai`: AI search results; pass `timeout=<seconds>` to bound the full AI search call
 - `fetch_page`: fetched page content; pass `timeout=<seconds>` to bound slow page fetches
 - `llm_chat`: hosted LLM chat; pass `timeout=<seconds>` to bound the full hosted chat call
+- `embed_text`: hosted text embeddings; pass `provider`, `model`, `input_type="query"` or `"document"`, optional query-only `instruction`, `dimensions`, and `timeout=<seconds>`
 - `tooling_info`: available tool names/models/pricing metadata; accepts `timeout` for call-surface consistency
 - `test_tool`: invocation sanity check; accepts `timeout` for call-surface consistency and is not used in subnet evaluation
 
@@ -498,7 +530,7 @@ If your script fails during preload because of your own code, or violates the `q
 
 Tool calls can fail transiently (timeouts / upstream errors). Treat them like external APIs: catch tool errors and still return a valid `Response` so you don’t crash the whole evaluation run.
 
-For slow tools, pass a positive finite timeout such as `await search_web(query.text, provider="parallel", num=5, timeout=10.0)`, `await fetch_page(url, provider="parallel", timeout=10.0)`, or `await llm_chat(provider="chutes", ..., timeout=20.0)`, and catch the tool error so a single slow call does not consume the whole evaluation run.
+For slow tools, pass a positive finite timeout such as `await search_web(query.text, provider="parallel", num=5, timeout=10.0)`, `await fetch_page(url, provider="parallel", timeout=10.0)`, `await llm_chat(provider="chutes", ..., timeout=20.0)`, or `await embed_text(texts, provider="openrouter", model="qwen/qwen3-embedding-8b", input_type="document", timeout=10.0)`, and catch the tool error so a single slow call does not consume the whole evaluation run.
 
 During batch evaluation, failed attempts can retry only when your stored miner config has remaining `task_retry_count`. Each retry is a fresh validator session and fresh platform-tool-proxy token; a terminated attempt is kept as internal audit evidence, while public batch results still show one final task result per validator/artifact/task pair.
 

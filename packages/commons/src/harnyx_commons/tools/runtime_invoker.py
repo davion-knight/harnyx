@@ -21,8 +21,10 @@ from harnyx_commons.errors import ToolInvocationTimeoutError, ToolProviderError
 from harnyx_commons.json_types import JsonObject, JsonValue
 from harnyx_commons.llm.cost_settlement import settled_cost_from_metadata
 from harnyx_commons.llm.pricing import (
+    MINER_TOOL_EMBEDDING_PRICING,
     MINER_TOOL_LLM_PRICING,
     SEARCH_PRICING_PER_REFERENCEABLE_RESULT,
+    EmbeddingPricing,
     price_search,
 )
 from harnyx_commons.llm.provider import LlmProviderError, LlmProviderPort, LlmRetryExhaustedError
@@ -44,13 +46,15 @@ from harnyx_commons.llm.tool_models import (
     parse_miner_selected_llm_provider_model,
 )
 from harnyx_commons.platform_tool_proxy import (
+    PLATFORM_TOOL_PROXY_EMBEDDING_TOOL_DEFAULT_TIMEOUT_SECONDS,
     PLATFORM_TOOL_PROXY_LLM_CHAT_DEFAULT_TIMEOUT_SECONDS,
     PLATFORM_TOOL_PROXY_SEARCH_TOOL_DEFAULT_TIMEOUT_SECONDS,
     platform_tool_proxy_provider_timeout_seconds,
 )
 from harnyx_commons.tools.dto import tool_payload_from_args_kwargs
+from harnyx_commons.tools.embedding_models import MINER_SELECTED_EMBEDDING_PROVIDER_MODELS, EmbedTextRequest
 from harnyx_commons.tools.executor import ToolInvocationContext, ToolInvocationOutput, ToolInvoker
-from harnyx_commons.tools.ports import WebSearchProviderPort
+from harnyx_commons.tools.ports import EmbeddingProviderPort, WebSearchProviderPort
 from harnyx_commons.tools.provider_billing import (
     ProviderBillingMetadata,
     SearchProviderResult,
@@ -65,13 +69,21 @@ from harnyx_commons.tools.search_models import (
     SearchWebSearchRequest,
     SearchWebSearchResponse,
 )
-from harnyx_commons.tools.types import TOOL_NAMES, SearchToolName, ToolInvocationTimeout, ToolName, is_search_tool
+from harnyx_commons.tools.types import (
+    TOOL_NAMES,
+    SearchToolName,
+    ToolInvocationTimeout,
+    ToolName,
+    is_embedding_tool,
+    is_search_tool,
+)
 from harnyx_commons.tools.usage_tracker import ToolCallUsage  # noqa: F401 - compatibility
 from harnyx_miner_sdk.tools.llm_provider_extra import ProviderExtra, validate_provider_extra
 
 MINER_SANDBOX_TOOL_NAMES: tuple[ToolName, ...] = tuple(sorted(TOOL_NAMES))
 DEFAULT_TOOL_LLM_TIMEOUT_SECONDS = PLATFORM_TOOL_PROXY_LLM_CHAT_DEFAULT_TIMEOUT_SECONDS
 DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS = PLATFORM_TOOL_PROXY_SEARCH_TOOL_DEFAULT_TIMEOUT_SECONDS
+DEFAULT_EMBEDDING_TOOL_TIMEOUT_SECONDS = PLATFORM_TOOL_PROXY_EMBEDDING_TOOL_DEFAULT_TIMEOUT_SECONDS
 TInvocationResult = TypeVar("TInvocationResult")
 SearchProviderResolver = Callable[
     [SearchProviderName, ToolInvocationContext | None],
@@ -80,6 +92,10 @@ SearchProviderResolver = Callable[
 LlmProviderResolver = Callable[
     [str, ToolInvocationContext | None],
     LlmProviderPort | Awaitable[LlmProviderPort],
+]
+EmbeddingProviderResolver = Callable[
+    [str, ToolInvocationContext | None],
+    EmbeddingProviderPort | Awaitable[EmbeddingProviderPort],
 ]
 
 
@@ -190,6 +206,9 @@ def build_miner_sandbox_tool_invoker(
     llm_provider: LlmProviderPort | None = None,
     llm_provider_name: str | None = None,
     llm_provider_resolver: LlmProviderResolver | None = None,
+    embedding_provider: EmbeddingProviderPort | None = None,
+    embedding_provider_name: str | None = None,
+    embedding_provider_resolver: EmbeddingProviderResolver | None = None,
     allowed_models: tuple[ToolModelName, ...] = ALLOWED_TOOL_MODELS,
 ) -> RuntimeToolInvoker:
     return RuntimeToolInvoker(
@@ -200,6 +219,9 @@ def build_miner_sandbox_tool_invoker(
         llm_provider=llm_provider,
         llm_provider_name=llm_provider_name,
         llm_provider_resolver=llm_provider_resolver,
+        embedding_provider=embedding_provider,
+        embedding_provider_name=embedding_provider_name,
+        embedding_provider_resolver=embedding_provider_resolver,
         advertised_tool_names=MINER_SANDBOX_TOOL_NAMES,
         allowed_models=allowed_models,
     )
@@ -216,6 +238,8 @@ def effective_tool_timeout_seconds(
         return _effective_timeout_from_payload(payload, default=DEFAULT_TOOL_LLM_TIMEOUT_SECONDS)
     if tool_name in {"search_web", "search_ai", "fetch_page"}:
         return _effective_timeout_from_payload(payload, default=DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS)
+    if tool_name == "embed_text":
+        return _effective_timeout_from_payload(payload, default=DEFAULT_EMBEDDING_TOOL_TIMEOUT_SECONDS)
     raise LookupError(f"tool {tool_name!r} does not have a provider timeout")
 
 
@@ -254,6 +278,9 @@ class RuntimeToolInvoker(ToolInvoker):
         llm_provider: LlmProviderPort | None = None,
         llm_provider_name: str | None = None,
         llm_provider_resolver: LlmProviderResolver | None = None,
+        embedding_provider: EmbeddingProviderPort | None = None,
+        embedding_provider_name: str | None = None,
+        embedding_provider_resolver: EmbeddingProviderResolver | None = None,
         advertised_tool_names: tuple[ToolName, ...] | None = None,
         allowed_models: tuple[ToolModelName, ...] = ALLOWED_TOOL_MODELS,
     ) -> None:
@@ -265,6 +292,9 @@ class RuntimeToolInvoker(ToolInvoker):
         self._llm_provider = llm_provider
         self._llm_provider_name = llm_provider_name
         self._llm_provider_resolver = llm_provider_resolver
+        self._embedding_provider = embedding_provider
+        self._embedding_provider_name = embedding_provider_name
+        self._embedding_provider_resolver = embedding_provider_resolver
         self._advertised_tool_names = tuple(sorted(advertised_tool_names or TOOL_NAMES))
         _ = allowed_models
 
@@ -282,6 +312,8 @@ class RuntimeToolInvoker(ToolInvoker):
             return self._invoke_tooling_info(args, kwargs)
         if is_search_tool(tool_name):
             return await self._dispatch_search(tool_name, args, kwargs, context=context)
+        if is_embedding_tool(tool_name):
+            return await self._dispatch_embedding(args, kwargs, context=context)
         if tool_name == "llm_chat":
             return await self._dispatch_llm(args, kwargs, context=context)
         self._log_unhandled(tool_name, args, kwargs)
@@ -355,6 +387,18 @@ class RuntimeToolInvoker(ToolInvoker):
                     for provider, model_pricing in MINER_TOOL_LLM_PRICING.items()
                 },
             }
+        if "embed_text" in visible_tool_names:
+            pricing["embed_text"] = {
+                "kind": "provider_specific_static",
+                "settlement_order": ["static_pricing"],
+                "provider_models": {
+                    provider: {
+                        model: _public_embedding_pricing_payload(rates)
+                        for model, rates in model_pricing.items()
+                    }
+                    for provider, model_pricing in MINER_TOOL_EMBEDDING_PRICING.items()
+                },
+            }
 
         tool_names: list[JsonValue] = [str(name) for name in self._advertised_tool_names]
         allowed_provider_models: dict[str, JsonValue] = {
@@ -364,6 +408,10 @@ class RuntimeToolInvoker(ToolInvoker):
         return {
             "tool_names": tool_names,
             "allowed_llm_provider_models": allowed_provider_models,
+            "allowed_embedding_provider_models": {
+                provider: [str(model) for model in models]
+                for provider, models in MINER_SELECTED_EMBEDDING_PROVIDER_MODELS.items()
+            },
             "pricing": pricing,
         }
 
@@ -500,6 +548,46 @@ class RuntimeToolInvoker(ToolInvoker):
             actual_cost_evidence=actual_cost.evidence,
         )
 
+    async def _dispatch_embedding(
+        self,
+        args: Sequence[JsonValue],
+        kwargs: Mapping[str, JsonValue],
+        *,
+        context: ToolInvocationContext | None,
+    ) -> ToolInvocationOutput:
+        if self._embedding_provider is None and self._embedding_provider_resolver is None:
+            raise LookupError("embedding provider is not configured")
+        request = EmbedTextRequest.model_validate(tool_payload_from_args_kwargs(args, kwargs))
+        embedding_provider = await self._resolve_embedding_provider(request.provider, context)
+        try:
+            started_at = time.perf_counter()
+            response = await _invoke_with_optional_timeout(
+                "embed_text",
+                request.timeout,
+                lambda: embedding_provider.embed_text(request),
+            )
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        except (ToolProviderError, ToolInvocationTimeoutError):
+            raise
+        except Exception as exc:
+            raise ToolProviderError("tool provider failed") from exc
+        actual_cost = _ActualCost(
+            response.actual_cost_usd,
+            response.actual_cost_provider,
+            response.actual_cost_evidence,
+        )
+        try:
+            _require_actual_cost(actual_cost, tool_name="embed_text")
+        except ValueError as exc:
+            raise ToolProviderError("tool provider failed") from exc
+        return ToolInvocationOutput(
+            public_payload=cast(JsonObject, response.response.model_dump(mode="json", exclude_none=True)),
+            execution=ToolExecutionFacts(elapsed_ms=elapsed_ms),
+            actual_cost_usd=actual_cost.cost_usd,
+            actual_cost_provider=actual_cost.provider,
+            actual_cost_evidence=actual_cost.evidence,
+        )
+
     def _parse_invocation(
         self,
         args: Sequence[JsonValue],
@@ -566,6 +654,31 @@ class RuntimeToolInvoker(ToolInvoker):
             raise LookupError("llm provider is not configured")
         self._require_llm_provider(requested_provider)
         return llm_provider
+
+    def _require_embedding_provider(self, requested_provider: str) -> str:
+        configured_provider = self._embedding_provider_name
+        if configured_provider is None:
+            raise LookupError("embedding provider name is not configured")
+        if requested_provider != configured_provider:
+            raise ValueError(
+                f"requested embedding provider {requested_provider!r} does not match configured provider "
+                f"{configured_provider!r}"
+            )
+        return requested_provider
+
+    async def _resolve_embedding_provider(
+        self,
+        requested_provider: str,
+        context: ToolInvocationContext | None,
+    ) -> EmbeddingProviderPort:
+        resolver = self._embedding_provider_resolver
+        if resolver is not None:
+            return await _resolve_maybe_awaitable(resolver(requested_provider, context))
+        embedding_provider = self._embedding_provider
+        if embedding_provider is None:
+            raise LookupError("embedding provider is not configured")
+        self._require_embedding_provider(requested_provider)
+        return embedding_provider
 
     @staticmethod
     def _normalize_messages(invocation: LlmToolInvocation) -> tuple[LlmMessage, ...]:
@@ -691,6 +804,15 @@ def _optional_mapping(value: object | None, *, label: str) -> Mapping[str, objec
         if not isinstance(key, str):
             raise TypeError(f"tool spec {label} must have string keys")
     return cast(Mapping[str, object], value)
+
+
+def _public_embedding_pricing_payload(rates: EmbeddingPricing) -> JsonObject:
+    payload: JsonObject = {}
+    if rates.input_per_million is not None:
+        payload["input_per_million"] = rates.input_per_million
+    if rates.usd_per_second is not None:
+        payload["usd_per_second"] = rates.usd_per_second
+    return payload
 
 
 def _public_llm_response_payload(response: LlmResponse) -> JsonObject:
@@ -854,7 +976,9 @@ def _require_settled_llm_cost(response: LlmResponse) -> _ActualCost:
 __all__ = [
     "ALLOWED_TOOL_MODELS",
     "DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS",
+    "DEFAULT_EMBEDDING_TOOL_TIMEOUT_SECONDS",
     "DEFAULT_TOOL_LLM_TIMEOUT_SECONDS",
+    "EmbeddingProviderResolver",
     "LlmToolInvocation",
     "LlmToolMessage",
     "LlmThinkingConfigPayload",

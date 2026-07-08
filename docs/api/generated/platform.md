@@ -458,7 +458,7 @@ Body: [MinerTaskWorkExecutionsRequest](#model-minertaskworkexecutionsrequest)
 |  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  |  | `receipt_id` | req | `string` |
 |  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
 |  | `miner_hotkey_ss58` |  | req | `string` |
 |  | `response` |  | req | [Response](#model-response) |
@@ -658,7 +658,7 @@ Body: [MinerTaskWorkScoreableExecutionsResponse](#model-minertaskworkscoreableex
 |  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  |  | `receipt_id` | req | `string` |
 |  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
 |  | `max_attempts` |  | req | `integer` |
 |  | `miner_hotkey_ss58` |  | req | `string` |
@@ -3407,7 +3407,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `outcome` |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  | `receipt_id` |  | req | `string` |
 |  | `session_id` |  | req | `string` (format: uuid) |
-|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  | `uid` |  | req | `integer` |
 | `finished_at` |  |  | req | `string` (format: date-time) |
 | `max_attempts` |  |  | req | `integer` |
@@ -4119,7 +4119,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `outcome` |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  | `receipt_id` |  | req | `string` |
 |  | `session_id` |  | req | `string` (format: uuid) |
-|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  | `uid` |  | req | `integer` |
 | `run` |  |  | req | [MinerTaskRunSection](#model-minertaskrunsection) |
 |  | `artifact_id` |  | req | `string` (format: uuid) |
@@ -4467,7 +4467,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `outcome` |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  | `receipt_id` |  | req | `string` |
 |  | `session_id` |  | req | `string` (format: uuid) |
-|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  | `uid` |  | req | `integer` |
 | `miner_hotkey_ss58` |  |  | req | `string` |
 | `response` |  |  | req | [Response](#model-response) |
@@ -4731,7 +4731,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  |  | `receipt_id` | req | `string` |
 |  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
 |  | `miner_hotkey_ss58` |  | req | `string` |
 |  | `response` |  | req | [Response](#model-response) |
@@ -4859,7 +4859,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  |  | `receipt_id` | req | `string` |
 |  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
 |  | `run` |  | req | [MinerTaskRunSection](#model-minertaskrunsection) |
 |  |  | `artifact_id` | req | `string` (format: uuid) |
@@ -4915,7 +4915,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  |  | `receipt_id` | req | `string` |
 |  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
 |  | `finished_at` |  | req | `string` (format: date-time) |
 |  | `max_attempts` |  | req | `integer` |
@@ -5208,7 +5208,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  | `outcome` |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  | `receipt_id` |  | req | `string` |
 |  | `session_id` |  | req | `string` (format: uuid) |
-|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  | `tool` |  | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  | `uid` |  | req | `integer` |
 | `max_attempts` |  |  | req | `integer` |
 | `miner_hotkey_ss58` |  |  | req | `string` |
@@ -5454,7 +5454,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 |  |  | `outcome` | req | [ToolCallOutcome](#model-toolcalloutcome) |
 |  |  | `receipt_id` | req | `string` |
 |  |  | `session_id` | req | `string` (format: uuid) |
-|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+|  |  | `tool` | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 |  |  | `uid` | req | `integer` |
 |  | `max_attempts` |  | req | `integer` |
 |  | `miner_hotkey_ss58` |  | req | `string` |
@@ -6808,7 +6808,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `outcome` |  |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
 | `receipt_id` |  |  | req | `string` |
 | `session_id` |  |  | req | `string` (format: uuid) |
-| `tool` |  |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+| `tool` |  |  | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 | `uid` |  |  | req | `integer` |
 
 <details>
@@ -6843,6 +6843,7 @@ Body: [WeightsResponse](#model-weightsresponse)
         "search_web",
         "search_ai",
         "fetch_page",
+        "embed_text",
         "llm_chat",
         "test_tool",
         "tooling_info"
@@ -6900,7 +6901,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `outcome` |  |  | req | [ToolCallOutcome](#model-toolcalloutcome) |
 | `receipt_id` |  |  | req | `string` |
 | `session_id` |  |  | req | `string` (format: uuid) |
-| `tool` |  |  | req | `string` (enum: [search_web, search_ai, fetch_page, llm_chat, test_tool, tooling_info]) |
+| `tool` |  |  | req | `string` (enum: [search_web, search_ai, fetch_page, embed_text, llm_chat, test_tool, tooling_info]) |
 | `uid` |  |  | req | `integer` |
 
 <details>
@@ -6935,6 +6936,7 @@ Body: [WeightsResponse](#model-weightsresponse)
         "search_web",
         "search_ai",
         "fetch_page",
+        "embed_text",
         "llm_chat",
         "test_tool",
         "tooling_info"

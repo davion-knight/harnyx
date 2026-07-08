@@ -4,6 +4,7 @@ import pytest
 
 from harnyx_commons.infrastructure.state.receipt_log import InMemoryReceiptLog
 from harnyx_commons.llm.pricing import (
+    MINER_TOOL_EMBEDDING_PRICING,
     MINER_TOOL_LLM_PRICING,
     MODEL_PRICING,
     SEARCH_PRICING_PER_REFERENCEABLE_RESULT,
@@ -13,6 +14,11 @@ from harnyx_commons.llm.pricing import (
 )
 from harnyx_commons.llm.schema import LlmUsage
 from harnyx_commons.llm.tool_models import ALLOWED_TOOL_MODELS, MINER_SELECTED_LLM_PROVIDER_MODELS, parse_tool_model
+from harnyx_commons.tools.embedding_models import (
+    MINER_SELECTED_EMBEDDING_PROVIDER_MODELS,
+    QWEN3_CHUTES_EMBEDDING_MODEL,
+    QWEN3_OPENROUTER_EMBEDDING_MODEL,
+)
 from harnyx_commons.tools.runtime_invoker import RuntimeToolInvoker, build_miner_sandbox_tool_invoker
 
 pytestmark = pytest.mark.anyio("asyncio")
@@ -23,6 +29,9 @@ def test_tool_model_pricing_covers_every_allowed_tool_model() -> None:
     assert set(MINER_TOOL_LLM_PRICING) == set(MINER_SELECTED_LLM_PROVIDER_MODELS)
     for provider, models in MINER_SELECTED_LLM_PROVIDER_MODELS.items():
         assert set(MINER_TOOL_LLM_PRICING[provider]) == set(models)
+    assert set(MINER_TOOL_EMBEDDING_PRICING) == set(MINER_SELECTED_EMBEDDING_PROVIDER_MODELS)
+    for provider, models in MINER_SELECTED_EMBEDDING_PROVIDER_MODELS.items():
+        assert set(MINER_TOOL_EMBEDDING_PRICING[provider]) == set(models)
 
 
 async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
@@ -142,6 +151,36 @@ async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
     assert model_prices["ai_gateway"]["minimax/minimax-m2.7"]["output_per_million"] == pytest.approx(1.20)
     assert model_prices["ai_gateway"]["zai/glm-4.7-flash"]["input_per_million"] == pytest.approx(0.07)
     assert model_prices["ai_gateway"]["zai/glm-4.7-flash"]["output_per_million"] == pytest.approx(0.40)
+
+    assert payload["pricing"]["embed_text"]["kind"] == "provider_specific_static"
+    embedding_provider_models = payload["allowed_embedding_provider_models"]
+    embedding_prices = payload["pricing"]["embed_text"]["provider_models"]
+    assert embedding_provider_models == {
+        provider: list(models)
+        for provider, models in MINER_SELECTED_EMBEDDING_PROVIDER_MODELS.items()
+    }
+    assert set(embedding_prices) == set(embedding_provider_models)
+    for provider, pricing_by_model in MINER_TOOL_EMBEDDING_PRICING.items():
+        assert set(embedding_prices[provider]) == set(embedding_provider_models[provider])
+        for embedding_model, rates in pricing_by_model.items():
+            if rates.input_per_million is not None:
+                assert embedding_prices[provider][embedding_model]["input_per_million"] == pytest.approx(
+                    rates.input_per_million
+                )
+            if rates.usd_per_second is not None:
+                assert embedding_prices[provider][embedding_model]["usd_per_second"] == pytest.approx(
+                    rates.usd_per_second
+                )
+    assert embedding_provider_models == {
+        "chutes": [QWEN3_CHUTES_EMBEDDING_MODEL],
+        "openrouter": [QWEN3_OPENROUTER_EMBEDDING_MODEL],
+    }
+    assert embedding_prices["chutes"][QWEN3_CHUTES_EMBEDDING_MODEL]["usd_per_second"] == pytest.approx(0.0005)
+    assert "input_per_million" not in embedding_prices["chutes"][QWEN3_CHUTES_EMBEDDING_MODEL]
+    assert embedding_prices["openrouter"][QWEN3_OPENROUTER_EMBEDDING_MODEL]["input_per_million"] == pytest.approx(
+        0.01
+    )
+    assert "usd_per_second" not in embedding_prices["openrouter"][QWEN3_OPENROUTER_EMBEDDING_MODEL]
 
 
 async def test_tooling_info_default_surface_matches_miner_contract() -> None:

@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from harnyx_commons.tools.api import (
     LlmChatResult,
+    embed_text,
     fetch_page,
     llm_chat,
     search_ai,
@@ -229,6 +230,61 @@ async def test_search_web_helper_invokes_tool_proxy_with_timeout() -> None:
         "provider": "parallel",
         "search_queries": ["harnyx subnet"],
         "num": 3,
+        "timeout": 5.0,
+    }
+
+
+async def test_embed_text_helper_invokes_tool_proxy() -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json=_tool_response_payload(
+                receipt_id="emb-1",
+                response={
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3-embedding-8b",
+                    "input_type": "query",
+                    "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                    "dimensions": 3,
+                    "usage": {"prompt_tokens": 8, "total_tokens": 8},
+                },
+            ),
+        )
+
+    proxy = ToolProxy(
+        base_url="http://validator",
+        token=TEST_TOKEN,
+        session_id=SESSION_ID,
+        client=httpx.AsyncClient(base_url="http://validator", transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with bind_tool_invoker(proxy):
+            result = await embed_text(
+                "What is Harnyx?",
+                input_type="query",
+                provider="openrouter",
+                model="qwen/qwen3-embedding-8b",
+                instruction="Given a web search query, retrieve relevant passages that answer the query",
+                timeout=5,
+            )
+    finally:
+        await proxy.aclose()
+
+    assert result.receipt_id == "emb-1"
+    assert result.response.data[0].embedding == [0.1, 0.2, 0.3]
+    assert result.response.usage is not None
+    assert result.response.usage.total_tokens == 8
+    payload = captured["payload"]
+    assert payload["tool"] == "embed_text"
+    assert payload["kwargs"] == {
+        "provider": "openrouter",
+        "model": "qwen/qwen3-embedding-8b",
+        "texts": ["What is Harnyx?"],
+        "input_type": "query",
+        "instruction": "Given a web search query, retrieve relevant passages that answer the query",
         "timeout": 5.0,
     }
 

@@ -18,6 +18,7 @@ from harnyx_commons.llm.providers.openrouter import (
     OPENROUTER_INTERNAL_TO_NATIVE_MODEL,
     OPENROUTER_NATIVE_SUPPORTED_MODELS,
     OPENROUTER_SUPPORTED_MODELS,
+    OpenRouterEmbeddingClient,
     OpenRouterLlmProvider,
     build_openrouter_chat_provider,
 )
@@ -409,6 +410,43 @@ async def test_openrouter_provider_merges_request_reasoning_extra_with_typed_thi
     assert fake_provider.requests[0].extra == {
         "reasoning": {"exclude": True, "effort": "high", "enabled": True}
     }
+
+
+async def test_openrouter_embedding_client_posts_embeddings_request() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["json"] = json.loads(request.read().decode())
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"embedding": [0.1, 0.2, 0.3], "index": 0}],
+                "usage": {"prompt_tokens": 5, "total_tokens": 5},
+            },
+        )
+
+    client = OpenRouterEmbeddingClient(
+        model="qwen/qwen3-embedding-8b",
+        api_key="test-key",
+        client=httpx.AsyncClient(base_url=OPENROUTER_BASE_URL, transport=httpx.MockTransport(handler)),
+        dimensions=3,
+    )
+
+    response = await client.embed_many(("hello",))
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/v1/embeddings"
+    assert captured["json"] == {"model": "qwen/qwen3-embedding-8b", "input": "hello", "dimensions": 3}
+    assert response.vectors == ((0.1, 0.2, 0.3),)
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 5
+
+
+async def test_openrouter_embedding_client_rejects_unsupported_model() -> None:
+    with pytest.raises(ValueError, match="does not support model"):
+        OpenRouterEmbeddingClient(model="unsupported", api_key="test-key")
 
 
 def _fake_factory(

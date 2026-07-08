@@ -340,6 +340,8 @@ class LocalEvaluationRuntime:
     _search_provider_registry: Any
     _llm_provider_registry: Any
     _tool_llm_provider: Any
+    _tool_embedding_provider: Any
+    _embedding_provider_registry: Any
     _scoring_llm_provider: Any | None
     _sandbox_manager: SandboxManager
     _tool_host: LocalToolHostHandle | None
@@ -384,6 +386,8 @@ class LocalEvaluationRuntime:
             search_provider_registry=invocation_clients.search_provider_registry,
             llm_provider_registry=invocation_clients.llm_provider_registry,
             tool_llm_provider=invocation_clients.tool_llm_provider,
+            tool_embedding_provider=invocation_clients.embedding_provider,
+            embedding_provider_registry=invocation_clients.embedding_provider_registry,
             scoring_llm_provider=scoring_llm_provider,
             scoring_service=scoring_service,
             scoring_config=scoring_config,
@@ -414,6 +418,8 @@ class LocalEvaluationRuntime:
             search_provider_registry=invocation_clients.search_provider_registry,
             llm_provider_registry=invocation_clients.llm_provider_registry,
             tool_llm_provider=invocation_clients.tool_llm_provider,
+            tool_embedding_provider=invocation_clients.embedding_provider,
+            embedding_provider_registry=invocation_clients.embedding_provider_registry,
             scoring_llm_provider=None,
             scoring_service=scoring_service,
             scoring_config=scoring_config,
@@ -430,6 +436,8 @@ class LocalEvaluationRuntime:
         search_provider_registry: Any,
         llm_provider_registry: Any,
         tool_llm_provider: Any,
+        tool_embedding_provider: Any,
+        embedding_provider_registry: Any,
         scoring_llm_provider: Any | None,
         scoring_service: EvaluationScoringService,
         scoring_config: EvaluationScoringConfig,
@@ -444,6 +452,10 @@ class LocalEvaluationRuntime:
                 requested_provider
             ),
             llm_provider_resolver=lambda requested_provider, _context: llm_provider_registry.resolve(
+                requested_provider
+            ),
+            tool_embedding_provider=tool_embedding_provider,
+            embedding_provider_resolver=lambda requested_provider, _context: embedding_provider_registry.resolve(
                 requested_provider
             ),
         )
@@ -475,6 +487,8 @@ class LocalEvaluationRuntime:
             _search_provider_registry=search_provider_registry,
             _llm_provider_registry=llm_provider_registry,
             _tool_llm_provider=tool_llm_provider,
+            _tool_embedding_provider=tool_embedding_provider,
+            _embedding_provider_registry=embedding_provider_registry,
             _scoring_llm_provider=scoring_llm_provider,
             _sandbox_manager=create_sandbox_manager(
                 logger_name="harnyx_miner.local_eval.sandbox",
@@ -695,6 +709,8 @@ class LocalEvaluationRuntime:
             self._search_client,
             self._search_provider_registry,
             self._llm_provider_registry,
+            self._tool_embedding_provider,
+            self._embedding_provider_registry,
             errors=errors,
             owner="local eval",
         )

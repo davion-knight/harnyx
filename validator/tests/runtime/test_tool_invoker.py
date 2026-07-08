@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from harnyx_commons.errors import ToolInvocationTimeoutError, ToolProviderError
-from harnyx_commons.llm.pricing import price_miner_llm, price_search
+from harnyx_commons.llm.pricing import price_embedding, price_miner_llm, price_search
 from harnyx_commons.llm.provider import LlmProviderConfigurationError
 from harnyx_commons.llm.schema import (
     LlmChoice,
@@ -21,9 +21,19 @@ from harnyx_commons.llm.schema import (
     LlmUsage,
 )
 from harnyx_commons.platform_tool_proxy import platform_tool_proxy_provider_timeout_seconds
+from harnyx_commons.tools.embedding_models import (
+    QWEN3_CHUTES_EMBEDDING_MODEL,
+    QWEN3_OPENROUTER_EMBEDDING_MODEL,
+    EmbeddingUsage,
+    EmbedTextRequest,
+    EmbedTextResponse,
+    TextEmbeddingResult,
+)
 from harnyx_commons.tools.executor import ToolInvocationContext, ToolInvocationOutput
+from harnyx_commons.tools.ports import EmbeddingProviderResult
 from harnyx_commons.tools.provider_billing import ProviderBillingMetadata, SearchProviderResult
 from harnyx_commons.tools.runtime_invoker import (
+    DEFAULT_EMBEDDING_TOOL_TIMEOUT_SECONDS,
     DEFAULT_SEARCH_TOOL_TIMEOUT_SECONDS,
     DEFAULT_TOOL_LLM_TIMEOUT_SECONDS,
     effective_tool_timeout_seconds,
@@ -76,6 +86,16 @@ def test_effective_tool_timeout_uses_request_timeout_then_runtime_default() -> N
         args=(),
         kwargs={**llm_kwargs, "timeout": 7},
     ) == pytest.approx(7.0)
+    assert effective_tool_timeout_seconds(
+        "embed_text",
+        args=(),
+        kwargs={"provider": "chutes", "texts": ["harnyx"], "input_type": "query"},
+    ) == pytest.approx(DEFAULT_EMBEDDING_TOOL_TIMEOUT_SECONDS)
+    assert effective_tool_timeout_seconds(
+        "embed_text",
+        args=(),
+        kwargs={"provider": "chutes", "texts": ["harnyx"], "input_type": "query", "timeout": 9},
+    ) == pytest.approx(9.0)
 
 
 def test_effective_tool_timeout_does_not_validate_provider_selection() -> None:
@@ -439,6 +459,31 @@ class ProviderCapabilityValueErrorLlmProvider(StubChutesProvider):
     async def invoke(self, request: LlmRequest) -> LlmResponse:
         self.calls.append(request)
         raise ValueError("Bedrock first cut does not support tool definitions")
+
+
+class StubEmbeddingProvider:
+    def __init__(self) -> None:
+        self.calls: list[EmbedTextRequest] = []
+
+    async def embed_text(self, request: EmbedTextRequest) -> EmbeddingProviderResult:
+        self.calls.append(request)
+        response = EmbedTextResponse(
+            provider=request.provider,
+            model=request.model,
+            input_type=request.input_type,
+            data=[TextEmbeddingResult(index=0, embedding=[0.1, 0.2, 0.3])],
+            dimensions=3,
+            usage=EmbeddingUsage(prompt_tokens=8, total_tokens=8),
+        )
+        return EmbeddingProviderResult(
+            response=response,
+            actual_cost_usd=price_embedding(request.provider, request.model, input_tokens=8),
+            actual_cost_provider=request.provider,
+            actual_cost_evidence={"settlement_source": "static_pricing"},
+        )
+
+    async def aclose(self) -> None:
+        return None
 
 
 async def _invoke(
@@ -964,6 +1009,36 @@ async def test_runtime_invoker_rejects_repo_tools_as_unregistered() -> None:
         )
 
 
+async def test_runtime_invoker_routes_embed_text() -> None:
+    embedding_provider = StubEmbeddingProvider()
+    invoker = RuntimeToolInvoker(
+        FakeReceiptLog(),
+        embedding_provider=embedding_provider,
+        embedding_provider_name="openrouter",
+        allowed_models=ALLOWED_TOOL_MODELS,
+    )
+
+    invocation_output = await _invoke(
+        invoker,
+        "embed_text",
+        kwargs={
+            "provider": "openrouter",
+            "model": QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            "texts": ["What is Harnyx?"],
+            "input_type": "query",
+        },
+    )
+
+    assert isinstance(invocation_output, ToolInvocationOutput)
+    assert invocation_output.public_payload["model"] == QWEN3_OPENROUTER_EMBEDDING_MODEL
+    assert invocation_output.public_payload["input_type"] == "query"
+    assert invocation_output.public_payload["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+    assert invocation_output.actual_cost_provider == "openrouter"
+    recorded = embedding_provider.calls[0]
+    assert recorded.texts == ("What is Harnyx?",)
+    assert recorded.input_type == "query"
+
+
 @pytest.mark.parametrize("model", OPENROUTER_TOOL_MODELS)
 async def test_runtime_invoker_routes_llm_chat(model: str) -> None:
     stub_chutes = StubChutesProvider()
@@ -1311,6 +1386,13 @@ async def test_runtime_invoker_accepts_local_tool_timeouts() -> None:
 
     assert test_result == {"status": "ok", "echo": "ping"}
     assert "tool_names" in tooling_result
+    assert "embed_text" in tooling_result["tool_names"]
+    assert tooling_result["pricing"]["embed_text"]["provider_models"]["chutes"][QWEN3_CHUTES_EMBEDDING_MODEL][
+        "usd_per_second"
+    ] == pytest.approx(0.0005)
+    assert tooling_result["pricing"]["embed_text"]["provider_models"]["openrouter"][QWEN3_OPENROUTER_EMBEDDING_MODEL][
+        "input_per_million"
+    ] == pytest.approx(0.01)
 
 
 async def test_runtime_invoker_prefers_kwargs_over_first_positional_payload() -> None:

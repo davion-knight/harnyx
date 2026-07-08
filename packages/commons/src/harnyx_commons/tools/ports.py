@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
+from harnyx_commons.json_types import JsonObject
+from harnyx_commons.tools.embedding_models import EmbedTextRequest, EmbedTextResponse
 from harnyx_commons.tools.provider_billing import SearchProviderResult
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
@@ -39,6 +42,25 @@ class WebSearchProviderPort(Protocol):
     async def aclose(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class EmbeddingProviderResult:
+    response: EmbedTextResponse
+    actual_cost_usd: float
+    actual_cost_provider: str
+    actual_cost_evidence: JsonObject
+
+
+class EmbeddingProviderPort(Protocol):
+    """Shared provider seam for miner-facing embedding tools."""
+
+    async def embed_text(
+        self,
+        request: EmbedTextRequest,
+    ) -> EmbeddingProviderResult: ...
+
+    async def aclose(self) -> None: ...
+
+
 class DeSearchPort(Protocol):
     """Internal DeSearch seam for X-specific helpers."""
 
@@ -49,4 +71,4 @@ class DeSearchPort(Protocol):
 
     async def fetch_twitter_post(self, *, post_id: str) -> SearchXResult | None: ...
 
-__all__ = ["DeSearchPort", "WebSearchProviderPort"]
+__all__ = ["DeSearchPort", "EmbeddingProviderPort", "EmbeddingProviderResult", "WebSearchProviderPort"]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,7 +35,7 @@ from harnyx_commons.llm.schema import (
 logger = logging.getLogger(__name__)
 
 _CHUTES_EMBEDDING_BASE_URL_BY_MODEL = {
-    "Qwen/Qwen3-Embedding-0.6B": "https://chutes-qwen-qwen3-embedding-0-6b.chutes.ai",
+    "Qwen/Qwen3-Embedding-8B-TEE": "https://chutes-qwen-qwen3-embedding-8b-tee.chutes.ai",
 }
 
 
@@ -218,12 +218,33 @@ class _EmbeddingDatum(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     embedding: list[float] = Field(min_length=1)
+    index: int | None = None
+
+
+class _EmbeddingUsage(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    prompt_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class _EmbeddingResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     data: list[_EmbeddingDatum] = Field(min_length=1)
+    usage: _EmbeddingUsage | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChutesEmbeddingUsage:
+    prompt_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChutesTextEmbeddingResponse:
+    vectors: tuple[tuple[float, ...], ...]
+    usage: ChutesEmbeddingUsage | None = None
 
 
 @dataclass(slots=True)
@@ -258,20 +279,50 @@ class ChutesTextEmbeddingClient:
         normalized = text.strip()
         if not normalized:
             raise ValueError("embedding input text must not be empty")
+        response = await self.embed_many((normalized,))
+        return response.vectors[0]
+
+    async def embed_many(self, texts: Sequence[str]) -> ChutesTextEmbeddingResponse:
+        normalized = tuple(text.strip() for text in texts)
+        if not normalized or any(not text for text in normalized):
+            raise ValueError("embedding input texts must contain non-empty strings")
         client = self._require_client()
-        response = await client.post(
-            "v1/embeddings",
-            json=self._request_body(normalized),
-            headers={"Authorization": f"Bearer {self.api_key}"},
-        )
-        response.raise_for_status()
-        payload = _EmbeddingResponse.model_validate(response.json())
-        vector = tuple(float(value) for value in payload.data[0].embedding)
-        if self.dimensions is not None and len(vector) != self.dimensions:
-            raise RuntimeError(
-                f"embedding dimensions mismatch: expected={self.dimensions} actual={len(vector)}"
+        vectors: list[tuple[float, ...]] = []
+        prompt_tokens: int | None = 0
+        total_tokens: int | None = 0
+        saw_usage = False
+        for text in normalized:
+            response = await client.post(
+                "v1/embeddings",
+                json=self._request_body(text),
+                headers={"Authorization": f"Bearer {self.api_key}"},
             )
-        return vector
+            response.raise_for_status()
+            payload = _EmbeddingResponse.model_validate(response.json())
+            ordered = sorted(
+                enumerate(payload.data),
+                key=lambda item: item[1].index if item[1].index is not None else item[0],
+            )
+            response_vectors = tuple(tuple(float(value) for value in item.embedding) for _, item in ordered)
+            if len(response_vectors) != 1:
+                raise RuntimeError("chutes embedding response count does not match single-text request")
+            vector = response_vectors[0]
+            if self.dimensions is not None and len(vector) != self.dimensions:
+                raise RuntimeError(
+                    f"embedding dimensions mismatch: expected={self.dimensions} actual={len(vector)}"
+                )
+            vectors.append(vector)
+            if payload.usage is not None:
+                saw_usage = True
+                prompt_tokens = _add_optional_int(prompt_tokens, payload.usage.prompt_tokens)
+                total_tokens = _add_optional_int(total_tokens, payload.usage.total_tokens)
+        usage = None
+        if saw_usage:
+            usage = ChutesEmbeddingUsage(
+                prompt_tokens=prompt_tokens,
+                total_tokens=total_tokens,
+            )
+        return ChutesTextEmbeddingResponse(vectors=tuple(vectors), usage=usage)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -300,6 +351,12 @@ def resolve_chutes_embedding_base_url(model: str) -> str:
         return _CHUTES_EMBEDDING_BASE_URL_BY_MODEL[normalized_model]
     except KeyError as exc:
         raise RuntimeError(f"no chutes embedding base_url configured for model: {normalized_model}") from exc
+
+
+def _add_optional_int(left: int | None, right: int | None) -> int | None:
+    if left is None or right is None:
+        return None
+    return left + right
 
 
 def _normalize_embedding_base_url(base_url: str | None, model: str) -> str:
@@ -356,6 +413,8 @@ def _is_valid_json(text: str) -> bool:
 
 __all__ = [
     "ChutesLlmProvider",
+    "ChutesEmbeddingUsage",
+    "ChutesTextEmbeddingResponse",
     "ChutesTextEmbeddingClient",
     "resolve_chutes_embedding_base_url",
     "_parse_chutes_response_payload",

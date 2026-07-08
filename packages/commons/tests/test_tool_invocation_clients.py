@@ -19,7 +19,12 @@ from harnyx_commons.llm.schema import (
 )
 from harnyx_commons.platform_tool_proxy import platform_tool_proxy_provider_timeout_seconds
 from harnyx_commons.tools import invocation_clients
-from harnyx_commons.tools.invocation_clients import build_tool_invocation_clients
+from harnyx_commons.tools.invocation_clients import (
+    ChutesEmbeddingProvider,
+    OpenRouterEmbeddingProvider,
+    build_optional_tool_embedding_provider,
+    build_tool_invocation_clients,
+)
 
 GEMMA_MODEL = "google/gemma-4-31B-turbo-TEE"
 GEMMA_ROUTE_TARGET = "custom-openai-compatible:gemma4-cloud-run-turbo"
@@ -87,7 +92,10 @@ def _llm_settings_with_tool_overrides(tool_overrides: dict[str, str]) -> LlmSett
     return LlmSettings.model_construct(
         search_provider=None,
         tool_llm_provider="chutes",
+        tool_embedding_provider="chutes",
         chutes_api_key=SecretStr("test-key"),
+        openrouter_api_key=SecretStr(""),
+        llm_timeout_seconds=300.0,
         llm_model_provider_overrides_json=json.dumps({"tool": tool_overrides}),
         openai_compatible_endpoints_json=json.dumps(
             [
@@ -104,6 +112,49 @@ def _llm_settings_with_tool_overrides(tool_overrides: dict[str, str]) -> LlmSett
             ]
         ),
     )
+
+
+def test_optional_tool_embedding_provider_builds_chutes_from_tool_embedding_provider_setting() -> None:
+    settings = LlmSettings.model_construct(
+        tool_embedding_provider="chutes",
+        chutes_api_key=SecretStr("chutes-key"),
+        openrouter_api_key=SecretStr(""),
+        llm_timeout_seconds=300.0,
+    )
+
+    provider = build_optional_tool_embedding_provider(settings)
+
+    assert isinstance(provider, ChutesEmbeddingProvider)
+
+
+def test_optional_tool_embedding_provider_builds_openrouter_from_tool_embedding_provider_setting() -> None:
+    settings = LlmSettings.model_construct(
+        tool_embedding_provider="openrouter",
+        chutes_api_key=SecretStr(""),
+        openrouter_api_key=SecretStr("openrouter-key"),
+        llm_timeout_seconds=300.0,
+    )
+
+    provider = build_optional_tool_embedding_provider(settings)
+
+    assert isinstance(provider, OpenRouterEmbeddingProvider)
+
+
+def test_cached_embedding_provider_registry_resolves_provider_specific_clients() -> None:
+    settings = LlmSettings.model_construct(
+        chutes_api_key=SecretStr("chutes-key"),
+        openrouter_api_key=SecretStr("openrouter-key"),
+        llm_timeout_seconds=300.0,
+    )
+    registry = invocation_clients.CachedEmbeddingProviderRegistry(llm_settings=settings)
+
+    chutes = registry.resolve("chutes")
+    same_chutes = registry.resolve("chutes")
+    openrouter = registry.resolve("openrouter")
+
+    assert chutes is same_chutes
+    assert isinstance(chutes, ChutesEmbeddingProvider)
+    assert isinstance(openrouter, OpenRouterEmbeddingProvider)
 
 
 def _gemma_tool_request() -> LlmRequest:

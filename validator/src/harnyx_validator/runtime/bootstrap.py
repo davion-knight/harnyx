@@ -37,9 +37,12 @@ from harnyx_commons.sandbox.docker import DockerSandboxManager
 from harnyx_commons.sandbox.options import SandboxOptions
 from harnyx_commons.sandbox.runtime import build_sandbox_options, create_sandbox_manager
 from harnyx_commons.tools.dto import ToolInvocationRequest, tool_payload_for_invocation
+from harnyx_commons.tools.embedding_models import parse_miner_selected_embedding_provider_model
 from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext, ToolInvocationOutput, ToolInvoker
-from harnyx_commons.tools.ports import WebSearchProviderPort
+from harnyx_commons.tools.invocation_clients import build_optional_tool_embedding_provider
+from harnyx_commons.tools.ports import EmbeddingProviderPort, WebSearchProviderPort
 from harnyx_commons.tools.runtime_invoker import (
+    EmbeddingProviderResolver,
     LlmProviderResolver,
     RuntimeToolInvoker,
     SearchProviderResolver,
@@ -224,6 +227,7 @@ class RuntimeContext:
     search_client: WebSearchProviderPort | None
     llm_provider_registry: CachedLlmProviderRegistry
     tool_llm_provider: LlmProviderPort | None
+    tool_embedding_provider: EmbeddingProviderPort | None
     scoring_llm_provider: LlmProviderPort | None
     similarity_llm_provider: LlmProviderPort | None
     tool_invoker: ToolInvoker
@@ -273,6 +277,7 @@ class RuntimeLlmClients:
     search_client: WebSearchProviderPort | None
     llm_provider_registry: CachedLlmProviderRegistry
     tool_llm_provider: LlmProviderPort | None
+    tool_embedding_provider: EmbeddingProviderPort | None
     scoring_llm_provider: LlmProviderPort | None
     similarity_llm_provider: LlmProviderPort | None
     scoring_routes: Mapping[str, ResolvedLlmRoute]
@@ -377,6 +382,7 @@ def build_runtime(settings: Settings | None = None) -> RuntimeContext:
         search_client=llm_clients.search_client,
         llm_provider_registry=llm_clients.llm_provider_registry,
         tool_llm_provider=llm_clients.tool_llm_provider,
+        tool_embedding_provider=llm_clients.tool_embedding_provider,
         scoring_llm_provider=llm_clients.scoring_llm_provider,
         similarity_llm_provider=llm_clients.similarity_llm_provider,
         tool_invoker=tool_invoker,
@@ -581,6 +587,7 @@ def _build_llm_clients(settings: Settings) -> RuntimeLlmClients:
         search_client=None,
         llm_provider_registry=llm_provider_registry,
         tool_llm_provider=None,
+        tool_embedding_provider=build_optional_tool_embedding_provider(settings.llm),
         scoring_llm_provider=scoring_provider,
         similarity_llm_provider=similarity_provider,
         scoring_routes=scoring_routes,
@@ -674,8 +681,10 @@ def _build_local_provider_tooling(
     resolved: Settings,
     search_client: WebSearchProviderPort | None,
     tool_llm_provider: LlmProviderPort | None,
+    tool_embedding_provider: EmbeddingProviderPort | None = None,
     search_provider_resolver: SearchProviderResolver | None = None,
     llm_provider_resolver: LlmProviderResolver | None = None,
+    embedding_provider_resolver: EmbeddingProviderResolver | None = None,
 ) -> tuple[ToolInvoker, ToolExecutor]:
     local_invoker = build_miner_sandbox_tool_invoker(
         state.receipt_log,
@@ -685,6 +694,9 @@ def _build_local_provider_tooling(
         llm_provider=tool_llm_provider,
         llm_provider_name=resolved.llm.tool_llm_provider,
         llm_provider_resolver=llm_provider_resolver,
+        embedding_provider=tool_embedding_provider,
+        embedding_provider_name=resolved.llm.tool_embedding_provider if tool_embedding_provider is not None else None,
+        embedding_provider_resolver=embedding_provider_resolver,
         allowed_models=ALLOWED_TOOL_MODELS,
     )
     return local_invoker, _ProviderTrackingToolExecutor(
@@ -876,6 +888,8 @@ def _provider_key_from_request(
         if search_provider_name is None:
             return None
         return search_provider_name, request.tool
+    if request.tool == "embed_text":
+        return _explicit_embedding_provider_model(payload)
     if request.tool != "llm_chat":
         return None
     selected_llm = _explicit_llm_provider_model(payload)
@@ -928,6 +942,19 @@ def _explicit_llm_provider_model(payload: Mapping[str, object]) -> tuple[str, st
     model = raw_model if isinstance(raw_model, str) else None
     try:
         selected = parse_miner_selected_llm_provider_model(provider=raw_provider, model=model)
+    except ValueError:
+        return None
+    return selected.provider, selected.model
+
+
+def _explicit_embedding_provider_model(payload: Mapping[str, object]) -> tuple[str, str] | None:
+    raw_provider = payload.get("provider")
+    if not isinstance(raw_provider, str):
+        return None
+    raw_model = payload.get("model")
+    model = raw_model if isinstance(raw_model, str) else None
+    try:
+        selected = parse_miner_selected_embedding_provider_model(provider=raw_provider, model=model)
     except ValueError:
         return None
     return selected.provider, selected.model

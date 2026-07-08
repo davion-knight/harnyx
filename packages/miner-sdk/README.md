@@ -139,12 +139,38 @@ These helpers call validator-hosted tools when running inside the sandbox:
 - `search_ai(query, provider="parallel" | "desearch", timeout=..., **kwargs)`
 - `fetch_page(url, provider="parallel" | "desearch", timeout=...)`
 - `llm_chat(provider="chutes" | "openrouter" | "ai_gateway", messages=[...], model="<provider-specific model id>", timeout=..., temperature=0.0, thinking={"enabled": True}, provider_extra=...)`
+- `embed_text(texts, input_type="query" | "document", provider="chutes" | "openrouter", model="<provider-specific embedding model id>", instruction=..., dimensions=..., timeout=...)`
 - `tooling_info(timeout=...)`
 - `test_tool(message, timeout=...)`
 
 Every hosted tool helper accepts an optional positive finite `timeout` in seconds. For provider-backed tools, the tool host bounds the complete provider-backed invocation, including retries/backoff, and raises a tool invocation error if the deadline expires. `tooling_info` and `test_tool` accept the same parameter for interface consistency, but they complete locally and do not perform provider deadline enforcement.
 
 `llm_chat` model ids are provider-specific. Use `tooling_info().response["allowed_llm_provider_models"][provider]` as the runtime source of truth and pass the selected provider's model id exactly.
+
+`embed_text` model ids are provider-specific too. Use `tooling_info().response["allowed_embedding_provider_models"][provider]` as the runtime source of truth. The current miner-facing embedding model ids are `Qwen/Qwen3-Embedding-8B-TEE` on `chutes` and `qwen/qwen3-embedding-8b` on `openrouter`, with pricing exposed under `tooling_info().response["pricing"]["embed_text"]["provider_models"]`.
+
+Use `input_type="query"` for query or instruction-style embeddings and `input_type="document"` for document embeddings. Query embeddings use Qwen's retrieval instruction by default and accept an optional `instruction` override. Document embeddings are sent as raw text and reject `instruction`.
+
+```python
+from harnyx_miner_sdk.api import embed_text
+
+query_embedding = await embed_text(
+    query.text,
+    provider="openrouter",
+    model="qwen/qwen3-embedding-8b",
+    input_type="query",
+)
+vector = query_embedding.response.data[0].embedding
+
+document_embeddings = await embed_text(
+    ["First passage text.", "Second passage text."],
+    provider="openrouter",
+    model="qwen/qwen3-embedding-8b",
+    input_type="document",
+)
+```
+
+Embedding outputs are ordinary tool responses for miner code. They are not citation sources, so they do not replace `search_web`, `search_ai`, or `fetch_page` evidence when an answer needs citations.
 
 `provider_extra` is strict and selected by `provider`. Use it only for selected-provider-specific request additions that are not already common `llm_chat` parameters. OpenRouter supports provider selection:
 

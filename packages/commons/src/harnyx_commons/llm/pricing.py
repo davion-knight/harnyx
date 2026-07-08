@@ -28,6 +28,11 @@ from harnyx_commons.llm.tool_models import (
     MinerSelectedLlmProviderName,
     ToolModelName,
 )
+from harnyx_commons.tools.embedding_models import (
+    QWEN3_CHUTES_EMBEDDING_MODEL,
+    QWEN3_OPENROUTER_EMBEDDING_MODEL,
+    EmbeddingProviderName,
+)
 from harnyx_commons.tools.types import SearchToolName
 
 # Per-referenceable-result rates for search tools, keyed by tool name.
@@ -44,6 +49,12 @@ PARALLEL_EXTRACT_URL_COST_USD = 0.001
 VERTEX_GROUNDED_PER_1K = 35.0
 VERTEX_GEMINI3_GROUNDED_PER_1K = 14.0
 VERTEX_CLAUDE_WEB_SEARCH_PER_1K = 10.0
+
+
+@dataclass(frozen=True)
+class EmbeddingPricing:
+    input_per_million: float | None = None
+    usd_per_second: float | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +109,15 @@ MINER_TOOL_LLM_PRICING: Mapping[MinerSelectedLlmProviderName, Mapping[str, Model
         "alibaba/qwen3.7-plus": ModelPricing(0.32, 1.28, 0.0),
         "minimax/minimax-m2.7": ModelPricing(0.30, 1.20, 0.0),
         "zai/glm-4.7-flash": ModelPricing(0.07, 0.40, 0.0),
+    },
+}
+
+MINER_TOOL_EMBEDDING_PRICING: Mapping[EmbeddingProviderName, Mapping[str, EmbeddingPricing]] = {
+    "chutes": {
+        QWEN3_CHUTES_EMBEDDING_MODEL: EmbeddingPricing(usd_per_second=0.0005),
+    },
+    "openrouter": {
+        QWEN3_OPENROUTER_EMBEDDING_MODEL: EmbeddingPricing(input_per_million=0.01),
     },
 }
 
@@ -267,6 +287,30 @@ def price_search(tool_name: SearchToolName, *, referenceable_results: int) -> fl
     return float(referenceable_results) * SEARCH_PRICING_PER_REFERENCEABLE_RESULT[tool_name]
 
 
+def price_embedding(
+    provider: EmbeddingProviderName,
+    model: str,
+    *,
+    input_tokens: int | None = None,
+    elapsed_seconds: float | None = None,
+) -> float:
+    """Return USD cost for a miner embedding call under provider-specific static pricing."""
+    pricing = MINER_TOOL_EMBEDDING_PRICING[provider][model]
+    if pricing.input_per_million is not None:
+        if input_tokens is None:
+            raise ValueError("input_tokens must be provided for input-token embedding pricing")
+        if input_tokens < 0:
+            raise ValueError("input_tokens must be non-negative")
+        return (float(input_tokens) / 1_000_000) * pricing.input_per_million
+    if pricing.usd_per_second is not None:
+        if elapsed_seconds is None:
+            raise ValueError("elapsed_seconds must be provided for elapsed-time embedding pricing")
+        if elapsed_seconds < 0:
+            raise ValueError("elapsed_seconds must be non-negative")
+        return elapsed_seconds * pricing.usd_per_second
+    raise ValueError(f"embedding pricing is not configured for provider={provider!r} model={model!r}")
+
+
 def price_parallel_search(*, billable_results: int) -> float:
     """Return provider-billed USD cost for one Parallel Search request."""
     if billable_results < 0:
@@ -303,9 +347,12 @@ __all__ = [
     "price_search",
     "pricing_key",
     "MODEL_PRICING",
+    "EmbeddingPricing",
+    "MINER_TOOL_EMBEDDING_PRICING",
     "MINER_TOOL_LLM_PRICING",
     "SEARCH_PRICING_PER_REFERENCEABLE_RESULT",
     "STATIC_LLM_PRICING",
     "ModelPricing",
+    "price_embedding",
     "price_static_llm_model",
 ]

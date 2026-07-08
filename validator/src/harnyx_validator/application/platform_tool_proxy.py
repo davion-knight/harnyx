@@ -12,7 +12,7 @@ from uuid import UUID
 from harnyx_commons.json_types import JsonValue
 from harnyx_commons.platform_tool_proxy import PLATFORM_TOOL_PROXY_EXECUTE_TRANSPORT_TIMEOUT_SECONDS
 from harnyx_commons.tools.executor import ToolInvocationContext, ToolInvocationOutput, ToolInvoker
-from harnyx_commons.tools.types import ToolName, is_search_tool
+from harnyx_commons.tools.types import ToolName, is_embedding_tool, is_search_tool
 from harnyx_validator.application.assigned_work import PhaseRecorder
 from harnyx_validator.application.ports.platform import (
     PlatformToolProxyControlError,
@@ -216,7 +216,7 @@ class PlatformToolProxyProxyToolInvoker(ToolInvoker):
 
 
 def _is_platform_tool_proxy_tool(tool_name: ToolName) -> bool:
-    return is_search_tool(tool_name) or tool_name == "llm_chat"
+    return is_search_tool(tool_name) or is_embedding_tool(tool_name) or tool_name == "llm_chat"
 
 
 def _grant_expired(expires_at: datetime) -> bool:

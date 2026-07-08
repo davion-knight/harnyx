@@ -752,9 +752,9 @@ async def test_chutes_provider_records_ttft_on_reasoning_only_first_stream_event
 
 
 def test_resolve_chutes_embedding_base_url_returns_expected_live_base_url() -> None:
-    base_url = resolve_chutes_embedding_base_url("Qwen/Qwen3-Embedding-0.6B")
+    base_url = resolve_chutes_embedding_base_url("Qwen/Qwen3-Embedding-8B-TEE")
 
-    assert base_url == "https://chutes-qwen-qwen3-embedding-0-6b.chutes.ai"
+    assert base_url == "https://chutes-qwen-qwen3-embedding-8b-tee.chutes.ai"
 
 
 def test_resolve_chutes_embedding_base_url_fails_for_unmapped_model() -> None:
@@ -785,7 +785,7 @@ async def test_chutes_text_embedding_client_posts_openai_compatible_embeddings_r
         )
 
     client = ChutesTextEmbeddingClient(
-        model="Qwen/Qwen3-Embedding-0.6B",
+        model="Qwen/Qwen3-Embedding-8B-TEE",
         base_url="https://example.com",
         client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
         api_key="test-key",
@@ -797,8 +797,50 @@ async def test_chutes_text_embedding_client_posts_openai_compatible_embeddings_r
     assert vector == (0.25, 0.5, 0.75)
     assert captured["method"] == "POST"
     assert captured["path"] == "/v1/embeddings"
-    assert '"model":"Qwen/Qwen3-Embedding-0.6B"' in str(captured["json"])
+    assert '"model":"Qwen/Qwen3-Embedding-8B-TEE"' in str(captured["json"])
     assert '"input":"hello world"' in str(captured["json"])
+
+
+async def test_chutes_text_embedding_client_splits_multi_text_requests() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read().decode())
+        requests.append(payload)
+        index = len(requests)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "embedding": [float(index), float(index + 1)],
+                        "index": 0,
+                        "object": "embedding",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": index,
+                    "total_tokens": index + 1,
+                },
+            },
+        )
+
+    client = ChutesTextEmbeddingClient(
+        model="Qwen/Qwen3-Embedding-8B-TEE",
+        base_url="https://example.com",
+        client=httpx.AsyncClient(base_url="https://example.com", transport=httpx.MockTransport(handler)),
+        api_key="test-key",
+        dimensions=2,
+    )
+
+    response = await client.embed_many(("first", "second"))
+
+    assert [request["input"] for request in requests] == ["first", "second"]
+    assert all(isinstance(request["input"], str) for request in requests)
+    assert response.vectors == ((1.0, 2.0), (2.0, 3.0))
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 3
+    assert response.usage.total_tokens == 5
 
 
 def test_classify_http_status_includes_upstream_detail() -> None:

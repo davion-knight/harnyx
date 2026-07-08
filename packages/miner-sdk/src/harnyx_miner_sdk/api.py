@@ -8,6 +8,12 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, field_validat
 
 from harnyx_miner_sdk._internal.tool_invoker import _current_tool_invoker
 from harnyx_miner_sdk.llm import LlmResponse, LlmThinkingConfig
+from harnyx_miner_sdk.tools.embedding_models import (
+    EmbeddingInputType,
+    EmbeddingProviderName,
+    EmbedTextRequest,
+    EmbedTextResponse,
+)
 from harnyx_miner_sdk.tools.http_models import (
     ToolBudgetDTO,
     ToolExecuteResponseDTO,
@@ -284,6 +290,45 @@ async def fetch_page(
     )
 
 
+async def embed_text(
+    texts: str | Sequence[str],
+    /,
+    *,
+    input_type: EmbeddingInputType,
+    provider: EmbeddingProviderName,
+    model: str,
+    instruction: str | None = None,
+    dimensions: int | None = None,
+    timeout: float | None = None,
+) -> ToolCallResponse[EmbedTextResponse]:
+    """Embed query or document text with the validator-hosted embedding tool."""
+
+    payload = EmbedTextRequest.model_validate(
+        {
+            "provider": provider,
+            "model": model,
+            "texts": texts,
+            "input_type": input_type,
+            "instruction": instruction,
+            "dimensions": dimensions,
+            "timeout": timeout,
+        }
+    ).model_dump(exclude_none=True, mode="json")
+    raw_response = await _current_tool_invoker().invoke("embed_text", args=(), kwargs=payload)
+    dto = _parse_execute_response(raw_response)
+    response_payload = _require_response_mapping(dto.response, label="embed_text response payload must be a mapping")
+    response = EmbedTextResponse.model_validate(response_payload)
+    return ToolCallResponse(
+        receipt_id=dto.receipt_id,
+        response=response,
+        results=dto.results,
+        result_policy=dto.result_policy,
+        cost_usd=dto.cost_usd,
+        usage=dto.usage,
+        budget=dto.budget,
+    )
+
+
 @overload
 async def llm_chat(
     *,
@@ -371,6 +416,7 @@ async def llm_chat(
 
 
 __all__ = [
+    "embed_text",
     "fetch_page",
     "llm_chat",
     "search_web",
@@ -378,6 +424,7 @@ __all__ = [
     "test_tool",
     "tooling_info",
     "ToolCallResponse",
+    "EmbedTextResponse",
     "LlmChatResult",
     "TestToolResponse",
 ]

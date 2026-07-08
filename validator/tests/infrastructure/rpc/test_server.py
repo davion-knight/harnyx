@@ -30,7 +30,9 @@ from harnyx_commons.llm.schema import (
 )
 from harnyx_commons.protocol_headers import SESSION_ID_HEADER
 from harnyx_commons.tools.dto import ToolInvocationRequest
+from harnyx_commons.tools.embedding_models import EmbedTextRequest
 from harnyx_commons.tools.executor import ToolExecutor, ToolInvocationContext, ToolInvocationOutput
+from harnyx_commons.tools.ports import EmbeddingProviderResult
 from harnyx_commons.tools.runtime_invoker import RuntimeToolInvoker
 from harnyx_commons.tools.search_models import (
     FetchPageRequest,
@@ -243,8 +245,23 @@ class _ProviderTimeoutSearchProvider:
         raise TimeoutError("provider timed out")
 
 
+class _ProviderTimeoutEmbeddingProvider:
+    async def embed_text(self, request: EmbedTextRequest) -> EmbeddingProviderResult:
+        raise TimeoutError("provider timed out")
+
+    async def aclose(self) -> None:
+        return None
+
+
 class TrackingDependencyProvider:
-    def __init__(self, *, llm_provider=None, llm_provider_name: str = "openrouter", web_search_client=None) -> None:
+    def __init__(
+        self,
+        *,
+        llm_provider=None,
+        llm_provider_name: str = "openrouter",
+        web_search_client=None,
+        embedding_provider=None,
+    ) -> None:
         self.session_registry = FakeSessionRegistry()
         self.receipt_log = FakeReceiptLog()
         self.tokens = InMemoryTokenRegistry()
@@ -279,6 +296,8 @@ class TrackingDependencyProvider:
             web_search_provider_name="desearch",
             llm_provider=llm_provider or _NoopLlmProvider(),
             llm_provider_name=llm_provider_name,
+            embedding_provider=embedding_provider,
+            embedding_provider_name="chutes" if embedding_provider is not None else None,
             allowed_models=ALLOWED_TOOL_MODELS,
         )
 
@@ -799,6 +818,18 @@ def test_execute_tool_endpoint_does_not_record_provider_failure_for_tool_timeout
             "openrouter",
             ALLOWED_TOOL_MODELS[0],
         ),
+        (
+            "embed_text",
+            {
+                "provider": "chutes",
+                "model": "Qwen/Qwen3-Embedding-8B-TEE",
+                "texts": ["hello"],
+                "input_type": "document",
+                "timeout": 5,
+            },
+            "chutes",
+            "Qwen/Qwen3-Embedding-8B-TEE",
+        ),
     ],
 )
 def test_execute_tool_endpoint_records_provider_failure_for_provider_timeout(
@@ -810,6 +841,7 @@ def test_execute_tool_endpoint_records_provider_failure_for_provider_timeout(
     provider = TrackingDependencyProvider(
         web_search_client=_ProviderTimeoutSearchProvider(),
         llm_provider=_ProviderTimeoutLlmProvider(),
+        embedding_provider=_ProviderTimeoutEmbeddingProvider(),
     )
     app = create_test_app(provider)
     client = TestClient(app)
