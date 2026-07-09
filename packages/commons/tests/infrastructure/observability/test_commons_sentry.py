@@ -259,16 +259,16 @@ def test_capture_exception_applies_scoped_metadata(monkeypatch) -> None:
 
     sentry_mod.capture_exception(
         RuntimeError("boom"),
-        tags={"error_code": "provider_batch_failure", "failed_calls": 10},
+        tags={"error_code": "sandbox_invocation_failed", "failed_calls": 10},
         context_name="validator_batch",
         context={"batch_id": "batch-123", "artifact_id": "artifact-456"},
         extras={"uid": 7},
-        fingerprint=["validator-batch", "provider_batch_failure", "desearch", "search_web"],
+        fingerprint=["validator-batch", "sandbox_invocation_failed"],
     )
 
     assert [str(exc) for exc in captured] == ["boom"]
     assert scope.tags == {
-        "error_code": "provider_batch_failure",
+        "error_code": "sandbox_invocation_failed",
         "failed_calls": "10",
     }
     assert scope.context == {
@@ -280,9 +280,7 @@ def test_capture_exception_applies_scoped_metadata(monkeypatch) -> None:
     assert scope.extras == {"uid": 7}
     assert scope.fingerprint == [
         "validator-batch",
-        "provider_batch_failure",
-        "desearch",
-        "search_web",
+        "sandbox_invocation_failed",
     ]
 
 
@@ -298,14 +296,14 @@ def test_capture_exception_skips_none_scoped_metadata(monkeypatch) -> None:
         context_name="validator_batch",
         context={"artifact_id": None},
         extras={"task_id": None},
-        fingerprint=["validator-batch", "", None, "provider_batch_failure"],
+        fingerprint=["validator-batch", "", None, "sandbox_invocation_failed"],
     )
 
     assert [str(exc) for exc in captured] == ["boom"]
     assert scope.tags == {"provider": "desearch"}
     assert scope.context == {}
     assert scope.extras == {}
-    assert scope.fingerprint == ["validator-batch", "provider_batch_failure"]
+    assert scope.fingerprint == ["validator-batch", "sandbox_invocation_failed"]
 
 
 def test_capture_exception_for_status_only_sends_5xx(monkeypatch) -> None:

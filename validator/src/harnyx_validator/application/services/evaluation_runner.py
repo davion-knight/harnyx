@@ -40,12 +40,9 @@ from harnyx_commons.miner_task_failure_policy import (
     TERMINAL_TIMEOUT_ERROR_MESSAGE,
     ProviderFailureEvidence,
     is_platform_tool_proxy_timeout_receipt,
-    is_provider_caused_terminal_failure,
     is_script_validation_sandbox_invocation,
     is_timeout_sandbox_invocation,
     is_uncaught_platform_tool_proxy_timeout_sandbox_invocation,
-    provider_batch_failure_evidence,
-    provider_batch_failure_message,
 )
 from harnyx_commons.tools.types import is_search_tool
 from harnyx_validator.application.assigned_work import AssignedArtifactWork, ClaimedAssignedTask, PhaseRecorder
@@ -1604,14 +1601,13 @@ class EvaluationRunner:
             )
             if control_failure_decision is not None:
                 return control_failure_decision
-            provider_failures = self._consume_provider_failures(issued.session.session_id)
+            self._consume_provider_failures(issued.session.session_id)
             return self._non_timeout_failure_decision(
                 batch_id=batch_id,
                 artifact=artifact,
                 task=task,
                 session_id=issued.session.session_id,
                 exc=exc,
-                provider_failures=provider_failures,
                 final_attempt=final_attempt,
             )
         except httpx.TimeoutException as exc:
@@ -1640,14 +1636,13 @@ class EvaluationRunner:
             )
             if control_failure_decision is not None:
                 return control_failure_decision
-            provider_failures = self._consume_provider_failures(issued.session.session_id)
+            self._consume_provider_failures(issued.session.session_id)
             return self._non_timeout_failure_decision(
                 batch_id=batch_id,
                 artifact=artifact,
                 task=task,
                 session_id=issued.session.session_id,
                 exc=exc,
-                provider_failures=provider_failures,
                 final_attempt=final_attempt,
             )
 
@@ -1658,15 +1653,7 @@ class EvaluationRunner:
         )
         if control_failure_decision is not None:
             return control_failure_decision
-        provider_failures = self._consume_provider_failures(issued.session.session_id)
-        provider_failure_decision = self._provider_batch_failure_decision(
-            artifact=artifact,
-            task=task,
-            provider_failures=provider_failures,
-            exception_type=None,
-        )
-        if provider_failure_decision is not None:
-            return provider_failure_decision
+        self._consume_provider_failures(issued.session.session_id)
         return _submission_decision(
             self._build_success_submission(
                 batch_id=batch_id,
@@ -1749,14 +1736,13 @@ class EvaluationRunner:
             )
             if control_failure_decision is not None:
                 return control_failure_decision
-            provider_failures = self._consume_provider_failures(issued.session.session_id)
+            self._consume_provider_failures(issued.session.session_id)
             return self._non_timeout_failure_decision(
                 batch_id=batch_id,
                 artifact=artifact,
                 task=task,
                 session_id=issued.session.session_id,
                 exc=exc,
-                provider_failures=provider_failures,
                 final_attempt=final_attempt,
             )
         except httpx.TimeoutException as exc:
@@ -1785,14 +1771,13 @@ class EvaluationRunner:
             )
             if control_failure_decision is not None:
                 return control_failure_decision
-            provider_failures = self._consume_provider_failures(issued.session.session_id)
+            self._consume_provider_failures(issued.session.session_id)
             return self._non_timeout_failure_decision(
                 batch_id=batch_id,
                 artifact=artifact,
                 task=task,
                 session_id=issued.session.session_id,
                 exc=exc,
-                provider_failures=provider_failures,
                 final_attempt=final_attempt,
             )
 
@@ -1803,15 +1788,7 @@ class EvaluationRunner:
         )
         if control_failure_decision is not None:
             return control_failure_decision
-        provider_failures = self._consume_provider_failures(issued.session.session_id)
-        provider_failure_decision = self._provider_batch_failure_decision(
-            artifact=artifact,
-            task=task,
-            provider_failures=provider_failures,
-            exception_type=None,
-        )
-        if provider_failure_decision is not None:
-            return provider_failure_decision
+        self._consume_provider_failures(issued.session.session_id)
         return outcome
 
     async def record_failure_for_artifact(
@@ -2309,19 +2286,8 @@ class EvaluationRunner:
         task: MinerTask,
         session_id: UUID,
         exc: Exception,
-        provider_failures: tuple[ProviderFailureEvidence, ...],
         final_attempt: bool,
     ) -> TaskAttemptDecision:
-        if _is_provider_caused_terminal_failure(exc):
-            provider_failure_decision = self._provider_batch_failure_decision(
-                artifact=artifact,
-                task=task,
-                provider_failures=provider_failures,
-                exception_type=_exception_type_name(exc),
-            )
-            if provider_failure_decision is not None:
-                return provider_failure_decision
-
         if isinstance(exc, LlmRetryExhaustedError):
             return _submission_decision(
                 self._build_task_failure(
@@ -2408,34 +2374,6 @@ class EvaluationRunner:
                     task_id=task.task_id,
                     uid=artifact.uid,
                     exception_type=_exception_type_name(exc),
-                ),
-            )
-        )
-
-    def _provider_batch_failure_decision(
-        self,
-        *,
-        artifact: ScriptArtifactSpec,
-        task: MinerTask,
-        provider_failures: tuple[ProviderFailureEvidence, ...],
-        exception_type: str | None,
-    ) -> TaskAttemptDecision | None:
-        provider_batch_evidence = provider_batch_failure_evidence(provider_failures)
-        if provider_batch_evidence is None:
-            return None
-        message = provider_batch_failure_message(provider_batch_evidence)
-        return _validator_batch_failure_decision(
-            ValidatorBatchFailedError(
-                error_code=MinerTaskErrorCode.PROVIDER_BATCH_FAILURE,
-                message=message,
-                failure_detail=ValidatorBatchFailureDetail(
-                    error_code=MinerTaskErrorCode.PROVIDER_BATCH_FAILURE,
-                    error_message=message,
-                    occurred_at=self._clock(),
-                    artifact_id=artifact.artifact_id,
-                    task_id=task.task_id,
-                    uid=artifact.uid,
-                    exception_type=exception_type,
                 ),
             )
         )
@@ -3166,16 +3104,6 @@ def _non_negative_int(value: object) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
     return None
-
-
-def _is_provider_caused_terminal_failure(exc: Exception) -> bool:
-    if not isinstance(exc, SandboxInvocationError):
-        return False
-    return is_provider_caused_terminal_failure(
-        detail_code=exc.detail_code,
-        detail_exception=exc.detail_exception,
-        detail_error=exc.detail_error,
-    )
 
 
 def _submission_decision(

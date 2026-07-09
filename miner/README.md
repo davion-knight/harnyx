@@ -546,13 +546,11 @@ For slow tools, pass a positive finite timeout such as `await search_web(query.t
 
 During batch evaluation, failed attempts can retry only when your stored miner config has remaining `task_retry_count`. Each retry is a fresh validator session and fresh platform-tool-proxy token; a terminated attempt is kept as internal audit evidence, while public batch results still show one final task result per validator/artifact/task pair.
 
-Validator-side provider attribution is now aggregate and batch-scoped. One failed
-`search_web` / `search_ai` / `fetch_page` / `llm_chat` call does not by itself
-make the validator blame the provider. The validator only escalates to
-`provider_batch_failure` when the same provider/model crosses the batch-level
-threshold in one batch:
-- at least 10 total calls
-- more than 95% failed calls
+Validator-side provider evidence is aggregate and batch-scoped for monitoring and
+debugging. Because miners choose their providers, provider errors do not by
+themselves fail validator delivery or source batch health. Historical
+`provider_batch_failure` rows may still appear for old batches, but active
+validator runtime no longer emits that code.
 
 ```python
 try:

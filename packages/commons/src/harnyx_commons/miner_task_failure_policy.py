@@ -14,8 +14,6 @@ from harnyx_commons.domain.miner_task import (
 )
 from harnyx_commons.domain.tool_call import ToolCall, ToolCallOutcome
 
-PROVIDER_BATCH_MIN_TOTAL_CALLS = 10
-PROVIDER_BATCH_MIN_FAILURE_RATE = 0.95
 TERMINAL_TIMEOUT_ERROR_MESSAGE = "terminal timeout"
 PLATFORM_TOOL_PROXY_TIMEOUT_ERROR_CODE = "tool_timeout"
 
@@ -85,34 +83,6 @@ def delivery_exclusion_from_completed_pair_results(
     return None
 
 
-def provider_batch_failure_evidence(
-    provider_failures: tuple[ProviderFailureEvidence, ...],
-) -> ProviderFailureEvidence | None:
-    for evidence in provider_failures:
-        if evidence["total_calls"] < PROVIDER_BATCH_MIN_TOTAL_CALLS:
-            continue
-        if evidence["failed_calls"] / evidence["total_calls"] <= PROVIDER_BATCH_MIN_FAILURE_RATE:
-            continue
-        return evidence
-    return None
-
-
-def provider_batch_failure_message(evidence: ProviderFailureEvidence) -> str:
-    reason = evidence.get("failure_reason")
-    if reason:
-        return (
-            "provider failure threshold reached "
-            f"(provider={evidence['provider']} model={evidence['model']} "
-            f"failed_calls={evidence['failed_calls']} total_calls={evidence['total_calls']} "
-            f"reason={reason})"
-        )
-    return (
-        "provider failure threshold reached "
-        f"(provider={evidence['provider']} model={evidence['model']} "
-        f"failed_calls={evidence['failed_calls']} total_calls={evidence['total_calls']})"
-    )
-
-
 def is_provider_caused_terminal_failure(
     *,
     detail_code: str | None,
@@ -165,8 +135,6 @@ def is_script_validation_sandbox_invocation(*, detail_code: str | None) -> bool:
 
 
 __all__ = [
-    "PROVIDER_BATCH_MIN_FAILURE_RATE",
-    "PROVIDER_BATCH_MIN_TOTAL_CALLS",
     "SANDBOX_DETAIL_CODE_MISSING_ENTRYPOINT",
     "SANDBOX_DETAIL_CODE_PRELOAD_FAILED",
     "SANDBOX_DETAIL_CODE_UNHANDLED_EXCEPTION",
@@ -183,6 +151,4 @@ __all__ = [
     "is_script_validation_sandbox_invocation",
     "is_timeout_sandbox_invocation",
     "is_uncaught_platform_tool_proxy_timeout_sandbox_invocation",
-    "provider_batch_failure_evidence",
-    "provider_batch_failure_message",
 ]

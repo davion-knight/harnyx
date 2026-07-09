@@ -114,6 +114,7 @@ class MinerTaskErrorCode(StrEnum):
     MINER_UNHANDLED_EXCEPTION = "miner_unhandled_exception"
     NEVER_RAN = "never_ran"
     PROGRESS_SNAPSHOT_FAILED = "progress_snapshot_failed"
+    # Historical delivery failure code. Active validator runtime no longer emits it.
     PROVIDER_BATCH_FAILURE = "provider_batch_failure"
     SANDBOX_FAILED = "sandbox_failed"
     SANDBOX_INVOCATION_FAILED = "sandbox_invocation_failed"

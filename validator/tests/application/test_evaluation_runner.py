@@ -385,6 +385,34 @@ def _successful_outcome(
     )
 
 
+def _successful_execution(
+    request: MinerTaskRunRequest,
+    *,
+    completed_at: datetime | None = None,
+) -> TaskExecutionOutcome:
+    return TaskExecutionOutcome(
+        batch_id=request.batch_id,
+        artifact_id=request.artifact_id,
+        task=request.task,
+        session=Session(
+            session_id=request.session_id,
+            uid=request.uid,
+            task_id=request.task.task_id,
+            issued_at=datetime(2025, 10, 17, 12, 0, tzinfo=UTC),
+            expires_at=datetime(2025, 10, 17, 12, 5, tzinfo=UTC),
+            budget_usd=request.task.budget_usd,
+            usage=SessionUsage(),
+            status=SessionStatus.ACTIVE,
+        ),
+        uid=request.uid,
+        response=Response(text=f"execution {request.task.query.text}"),
+        execution_completed_at=completed_at or datetime(2025, 10, 17, 12, 3, tzinfo=UTC),
+        usage=TokenUsageSummary.empty(),
+        total_tool_usage=ToolUsageSummary.zero(),
+        trace=EvaluationTrace(entrypoint_invocation_ms=12.0, scoring_ms=0.0),
+    )
+
+
 def _submission_for_task(
     *,
     batch_id,
@@ -2981,6 +3009,12 @@ class _ProviderFailureThenSuccessOrchestrator:
         _record_provider_failure(self._progress, request=request)
         return _successful_outcome(request)
 
+    async def execute(self, request: MinerTaskRunRequest, *, phase_recorder=None) -> TaskExecutionOutcome:
+        _ = phase_recorder
+        self.calls += 1
+        _record_provider_failure(self._progress, request=request)
+        return _successful_execution(request)
+
 
 class _ProviderBatchFailureOrchestrator:
     def __init__(self, *, progress: FileBackedRunProgress) -> None:
@@ -5439,7 +5473,7 @@ async def test_evaluation_runner_does_not_rewrite_different_miner_exception_afte
     assert evaluation_store.records == [submission]
 
 
-async def test_evaluation_runner_fails_batch_when_successful_fallback_crosses_provider_threshold(
+async def test_evaluation_runner_records_success_when_successful_fallback_crosses_provider_threshold(
     tmp_path: Path,
 ) -> None:
     subtensor = FakeSubtensorClient()
@@ -5482,24 +5516,55 @@ async def test_evaluation_runner_fails_batch_when_successful_fallback_crosses_pr
         progress=progress,
     )
 
-    with pytest.raises(ValidatorBatchFailedError, match="provider failure threshold reached") as exc_info:
-        await runner.evaluate_artifact(
-            batch_id=batch_id,
-            artifact=artifact,
-            tasks=(task,),
-            orchestrator=cast(TaskRunOrchestrator, orchestrator),
-        )
-    assert exc_info.value.error_code == "provider_batch_failure"
-    assert exc_info.value.failure_detail.error_message == (
-        "provider failure threshold reached "
-        "(provider=desearch model=search_web failed_calls=10 total_calls=10 "
-        "reason=http_402: subscription usage cap exceeded)"
+    result = await runner.evaluate_artifact(
+        batch_id=batch_id,
+        artifact=artifact,
+        tasks=(task,),
+        orchestrator=cast(TaskRunOrchestrator, orchestrator),
     )
+    assert len(result.submissions) == 1
+    assert result.submissions[0].run.details.error is None
     assert orchestrator.calls == 1
-    assert evaluation_store.records == []
+    assert evaluation_store.records == list(result.submissions)
 
 
-async def test_evaluation_runner_escalates_provider_failure_only_after_batch_threshold(tmp_path: Path) -> None:
+async def test_evaluation_runner_assigned_task_records_task_result_when_execution_crosses_provider_threshold(
+    tmp_path: Path,
+) -> None:
+    progress = _progress(tmp_path)
+    runner, batch_id, artifact, task, _, _, _, _ = _assigned_task_test_context(
+        tmp_path,
+        progress=progress,
+    )
+    _seed_provider_evidence(
+        progress,
+        batch_id=batch_id,
+        provider="desearch",
+        model="search_web",
+        total_calls=9,
+        failed_calls=9,
+    )
+    orchestrator = _ProviderFailureThenSuccessOrchestrator(
+        progress=progress,
+    )
+
+    result = await runner.evaluate_assigned_task(
+        batch_id=batch_id,
+        artifact=artifact,
+        task=task,
+        attempt_number=1,
+        max_attempts=1,
+        assignment_token=_ASSIGNMENT_TOKEN,
+        orchestrator=cast(TaskRunOrchestrator, orchestrator),
+    )
+
+    assert result.result is not None
+    assert result.terminal_attempt.terminal_effect is MinerTaskAttemptTerminalEffect.TASK_RESULT
+    assert result.terminal_attempt.delivery_failure_detail is None
+    assert orchestrator.calls == 1
+
+
+async def test_evaluation_runner_keeps_provider_caused_terminal_failure_pair_scoped(tmp_path: Path) -> None:
     subtensor = FakeSubtensorClient()
     subtensor.validator_metadata = ValidatorNodeInfo(uid=41, version_key=None)
     session_registry = FakeSessionRegistry()
@@ -5540,21 +5605,19 @@ async def test_evaluation_runner_escalates_provider_failure_only_after_batch_thr
         progress=progress,
     )
 
-    with pytest.raises(ValidatorBatchFailedError, match="provider failure threshold reached") as exc_info:
-        await runner.evaluate_artifact(
-            batch_id=batch_id,
-            artifact=artifact,
-            tasks=(task,),
-            orchestrator=cast(TaskRunOrchestrator, orchestrator),
-        )
-    assert exc_info.value.error_code == "provider_batch_failure"
-    assert exc_info.value.failure_detail.error_code == "provider_batch_failure"
-    assert exc_info.value.failure_detail.artifact_id == artifact.artifact_id
-    assert exc_info.value.failure_detail.task_id == task.task_id
-    assert exc_info.value.failure_detail.uid == artifact.uid
-    assert "reason=http_402: subscription usage cap exceeded" in exc_info.value.failure_detail.error_message
+    result = await runner.evaluate_artifact(
+        batch_id=batch_id,
+        artifact=artifact,
+        tasks=(task,),
+        orchestrator=cast(TaskRunOrchestrator, orchestrator),
+    )
+    assert len(result.submissions) == 1
+    submission = result.submissions[0]
+    assert submission.score == 0.0
+    assert submission.run.details.error is not None
+    assert submission.run.details.error.code == "miner_unhandled_exception"
     assert orchestrator.calls == 1
-    assert evaluation_store.records == []
+    assert evaluation_store.records == list(result.submissions)
 
 
 async def test_evaluation_runner_records_zero_score_for_unhandled_miner_exception(tmp_path: Path) -> None:

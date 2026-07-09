@@ -7,15 +7,12 @@ from uuid import UUID, uuid4
 from harnyx_commons.domain.miner_task import EvaluationError, MinerTaskErrorCode
 from harnyx_commons.domain.tool_call import ToolCall, ToolCallDetails, ToolCallOutcome
 from harnyx_commons.miner_task_failure_policy import (
-    ProviderFailureEvidence,
     delivery_exclusion_from_completed_pair_results,
     is_platform_tool_proxy_timeout_receipt,
     is_provider_caused_terminal_failure,
     is_script_validation_sandbox_invocation,
     is_timeout_sandbox_invocation,
     is_uncaught_platform_tool_proxy_timeout_sandbox_invocation,
-    provider_batch_failure_evidence,
-    provider_batch_failure_message,
 )
 
 TEST_MODEL = "google/gemma-4-31B-turbo-TEE"
@@ -37,39 +34,6 @@ class _Specifics:
 class _Submission:
     run: _Run
     specifics: _Specifics
-
-
-def test_provider_batch_failure_requires_minimum_calls_and_failure_rate() -> None:
-    below_calls: ProviderFailureEvidence = {
-        "provider": "chutes",
-        "model": "model",
-        "total_calls": 9,
-        "failed_calls": 9,
-    }
-    threshold_met: ProviderFailureEvidence = {
-        "provider": "chutes",
-        "model": "model",
-        "total_calls": 20,
-        "failed_calls": 20,
-    }
-
-    assert provider_batch_failure_evidence((below_calls, threshold_met)) == threshold_met
-
-
-def test_provider_batch_failure_message_includes_reason_when_available() -> None:
-    evidence: ProviderFailureEvidence = {
-        "provider": "desearch",
-        "model": "search_web",
-        "total_calls": 10,
-        "failed_calls": 10,
-        "failure_reason": "http_402: subscription usage cap exceeded",
-    }
-
-    assert provider_batch_failure_message(evidence) == (
-        "provider failure threshold reached "
-        "(provider=desearch model=search_web failed_calls=10 total_calls=10 "
-        "reason=http_402: subscription usage cap exceeded)"
-    )
 
 
 def test_delivery_exclusion_selects_first_validator_owned_completed_pair_failure() -> None:
