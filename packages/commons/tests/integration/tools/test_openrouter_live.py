@@ -6,7 +6,6 @@ from harnyx_commons.config.llm import LlmSettings
 from harnyx_commons.llm.provider_factory import build_miner_paid_llm_provider
 from harnyx_commons.llm.providers.openrouter import (
     OPENROUTER_INTERNAL_TO_NATIVE_MODEL,
-    OPENROUTER_SUPPORTED_MODELS,
     OpenRouterEmbeddingClient,
     OpenRouterLlmProvider,
 )
@@ -15,6 +14,7 @@ from harnyx_commons.tools.embedding_models import QWEN3_OPENROUTER_EMBEDDING_MOD
 
 pytestmark = [pytest.mark.integration, pytest.mark.expensive, pytest.mark.anyio("asyncio")]
 
+OPENROUTER_LIVE_CHAT_MODEL = "openai/gpt-oss-20b"
 OPENROUTER_REASONING_PROVIDER_BY_NATIVE_MODEL = {
     "openai/gpt-oss-20b": "wandb",
     "openai/gpt-oss-120b": "wandb",
@@ -75,8 +75,8 @@ def _openrouter_reasoning_provider_extra(*, model: str) -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize("model", OPENROUTER_SUPPORTED_MODELS)
-async def test_openrouter_provider_invokes_supported_model_live(model: str) -> None:
+async def test_openrouter_provider_invokes_cheapest_chat_model_live() -> None:
+    model = OPENROUTER_LIVE_CHAT_MODEL
     settings = LlmSettings()
     assert settings.openrouter_api_key_value, "OPENROUTER_API_KEY must be configured"
 
@@ -99,7 +99,7 @@ async def test_openrouter_provider_invokes_supported_model_live(model: str) -> N
 
 
 async def test_openrouter_provider_reasoning_live() -> None:
-    model = "openai/gpt-oss-20b"
+    model = OPENROUTER_LIVE_CHAT_MODEL
     settings = LlmSettings()
     assert settings.openrouter_api_key_value, "OPENROUTER_API_KEY must be configured"
 
@@ -123,7 +123,7 @@ async def test_openrouter_provider_reasoning_live() -> None:
 
 
 async def test_miner_paid_openrouter_helper_completion_live() -> None:
-    model = "openai/gpt-oss-20b"
+    model = OPENROUTER_LIVE_CHAT_MODEL
     settings = LlmSettings()
     assert settings.openrouter_api_key_value, "OPENROUTER_API_KEY must be configured"
 
