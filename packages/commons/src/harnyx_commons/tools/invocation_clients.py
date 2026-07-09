@@ -467,7 +467,12 @@ class OpenRouterEmbeddingProvider(EmbeddingProviderPort):
         if request.provider != "openrouter":
             raise ValueError(f"embedding provider {request.provider!r} is not supported")
         client = self._client_for(model=request.model, dimensions=request.dimensions)
-        provider_response = await client.embed_many(_format_embedding_texts(request))
+        formatted_texts = _format_embedding_texts(request)
+        request_extra = request.provider_extra.to_request_extra() if request.provider_extra is not None else None
+        if request_extra is None:
+            provider_response = await client.embed_many(formatted_texts)
+        else:
+            provider_response = await client.embed_many(formatted_texts, extra=request_extra)
         if len(provider_response.vectors) != len(request.texts):
             raise RuntimeError("embedding response count does not match request text count")
 

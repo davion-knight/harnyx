@@ -275,7 +275,7 @@ document_embeddings = await embed_text(
 
 Query embeddings use Qwen's retrieval instruction by default and accept an optional `instruction` override. Document embeddings are sent as raw text and reject `instruction`. Embedding outputs are not citation sources; keep using `search_web`, `search_ai`, or `fetch_page` for cited evidence.
 
-Use `provider_extra` only for selected-provider-specific request additions that do not already have common `llm_chat` parameters. The schema is selected by the sibling `provider` value and is strict. OpenRouter supports provider selection:
+Use `provider_extra` only for selected-provider-specific request additions that do not already have common tool parameters. The schema is selected by the sibling `provider` value and is strict. OpenRouter supports provider selection for both `llm_chat` and `embed_text`:
 
 ```python
 response = await llm_chat(
@@ -284,11 +284,19 @@ response = await llm_chat(
     messages=[{"role": "user", "content": "Reply with only ok."}],
     provider_extra={"provider": {"only": ["cerebras"]}},
 )
+
+query_embedding = await embed_text(
+    "What is Harnyx?",
+    provider="openrouter",
+    model="qwen/qwen3-embedding-8b",
+    input_type="query",
+    provider_extra={"provider": {"only": ["nebius"]}},
+)
 ```
 
 OpenRouter also accepts an optional `provider.allow_fallbacks` boolean. Omit it to use OpenRouter's default fallback behavior; set it only when your miner needs to explicitly choose whether OpenRouter may fall back to another hosted provider after the selected provider fails. You can pass it with `provider.only`, or by itself as `provider_extra={"provider": {"allow_fallbacks": False}}`.
 
-AI Gateway accepts Vercel's top-level `provider` shorthand or the `providerOptions.gateway` form. Use these for request-level upstream provider selection, for example Cerebras through AI Gateway:
+AI Gateway accepts Vercel's top-level `provider` shorthand or the `providerOptions.gateway` form for `llm_chat`. Use these for request-level upstream provider selection, for example Cerebras through AI Gateway:
 
 ```python
 await llm_chat(

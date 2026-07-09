@@ -152,6 +152,46 @@ async def test_openrouter_embedding_provider_posts_native_model_and_settles_stat
     assert result.actual_cost_evidence["input_per_million"] == pytest.approx(0.01)
 
 
+async def test_openrouter_embedding_provider_forwards_provider_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        async def embed_many(
+            self,
+            texts: tuple[str, ...],
+            *,
+            extra: dict[str, object] | None = None,
+        ) -> OpenRouterEmbeddingResponse:
+            captured["texts"] = texts
+            captured["extra"] = extra
+            return OpenRouterEmbeddingResponse(
+                vectors=((0.7, 0.8, 0.9),),
+                usage=OpenRouterEmbeddingUsage(prompt_tokens=12, total_tokens=12),
+            )
+
+    provider = OpenRouterEmbeddingProvider(api_key="test-key", timeout_seconds=1.0)
+    monkeypatch.setattr(provider, "_client_for", lambda **_: _FakeClient())
+
+    result = await provider.embed_text(
+        EmbedTextRequest(
+            provider="openrouter",
+            model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            texts=("find subnet incentives",),
+            input_type="query",
+            provider_extra={"provider": {"only": ["nebius"], "allow_fallbacks": False}},
+        )
+    )
+
+    assert captured["texts"] == (
+        "Instruct: Given a web search query, retrieve relevant passages that answer the query\n"
+        "Query:find subnet incentives",
+    )
+    assert captured["extra"] == {"provider": {"only": ["nebius"], "allow_fallbacks": False}}
+    assert result.actual_cost_provider == "openrouter"
+
+
 async def test_openrouter_embedding_provider_settles_zero_token_cache_hit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -434,11 +434,19 @@ async def test_openrouter_embedding_client_posts_embeddings_request() -> None:
         dimensions=3,
     )
 
-    response = await client.embed_many(("hello",))
+    response = await client.embed_many(
+        ("hello",),
+        extra={"provider": {"only": ["nebius"], "allow_fallbacks": False}},
+    )
 
     assert captured["method"] == "POST"
     assert captured["path"] == "/api/v1/embeddings"
-    assert captured["json"] == {"model": "qwen/qwen3-embedding-8b", "input": "hello", "dimensions": 3}
+    assert captured["json"] == {
+        "model": "qwen/qwen3-embedding-8b",
+        "input": "hello",
+        "dimensions": 3,
+        "provider": {"only": ["nebius"], "allow_fallbacks": False},
+    }
     assert response.vectors == ((0.1, 0.2, 0.3),)
     assert response.usage is not None
     assert response.usage.prompt_tokens == 5

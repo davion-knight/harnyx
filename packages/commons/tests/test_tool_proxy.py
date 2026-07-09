@@ -289,6 +289,77 @@ async def test_embed_text_helper_invokes_tool_proxy() -> None:
     }
 
 
+async def test_embed_text_helper_forwards_openrouter_provider_extra() -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json=_tool_response_payload(
+                receipt_id="emb-openrouter-extra",
+                response={
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3-embedding-8b",
+                    "input_type": "query",
+                    "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                    "dimensions": 3,
+                    "usage": {"prompt_tokens": 8, "total_tokens": 8},
+                },
+            ),
+        )
+
+    proxy = ToolProxy(
+        base_url="http://validator",
+        token=TEST_TOKEN,
+        session_id=SESSION_ID,
+        client=httpx.AsyncClient(base_url="http://validator", transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with bind_tool_invoker(proxy):
+            result = await embed_text(
+                "What is Harnyx?",
+                input_type="query",
+                provider="openrouter",
+                model="qwen/qwen3-embedding-8b",
+                provider_extra={"provider": {"only": ["nebius"], "allow_fallbacks": False}},
+            )
+    finally:
+        await proxy.aclose()
+
+    assert result.receipt_id == "emb-openrouter-extra"
+    payload = captured["payload"]
+    assert payload["tool"] == "embed_text"
+    assert payload["kwargs"]["provider"] == "openrouter"
+    assert payload["kwargs"]["provider_extra"] == {
+        "provider": {"only": ["nebius"], "allow_fallbacks": False}
+    }
+
+
+async def test_embed_text_helper_rejects_chutes_provider_extra_before_proxy_call() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("embed_text should reject chutes provider_extra before invoking the tool proxy")
+
+    proxy = ToolProxy(
+        base_url="http://validator",
+        token=TEST_TOKEN,
+        session_id=SESSION_ID,
+        client=httpx.AsyncClient(base_url="http://validator", transport=httpx.MockTransport(handler)),
+    )
+    try:
+        with bind_tool_invoker(proxy):
+            with pytest.raises(ValidationError):
+                await embed_text(
+                    "What is Harnyx?",
+                    input_type="query",
+                    provider="chutes",
+                    model="Qwen/Qwen3-Embedding-8B-TEE",
+                    provider_extra={"provider": {"only": ["nebius"]}},
+                )
+    finally:
+        await proxy.aclose()
+
+
 async def test_search_web_helper_rejects_removed_start_pagination() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("search_web should reject unsupported start before invoking the tool proxy")

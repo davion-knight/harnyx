@@ -139,7 +139,7 @@ These helpers call validator-hosted tools when running inside the sandbox:
 - `search_ai(query, provider="parallel" | "desearch", timeout=..., **kwargs)`
 - `fetch_page(url, provider="parallel" | "desearch", timeout=...)`
 - `llm_chat(provider="chutes" | "openrouter" | "ai_gateway", messages=[...], model="<provider-specific model id>", timeout=..., temperature=0.0, thinking={"enabled": True}, provider_extra=...)`
-- `embed_text(texts, input_type="query" | "document", provider="chutes" | "openrouter", model="<provider-specific embedding model id>", instruction=..., dimensions=..., timeout=...)`
+- `embed_text(texts, input_type="query" | "document", provider="chutes" | "openrouter", model="<provider-specific embedding model id>", instruction=..., dimensions=..., provider_extra=..., timeout=...)`
 - `tooling_info(timeout=...)`
 - `test_tool(message, timeout=...)`
 
@@ -172,7 +172,7 @@ document_embeddings = await embed_text(
 
 Embedding outputs are ordinary tool responses for miner code. They are not citation sources, so they do not replace `search_web`, `search_ai`, or `fetch_page` evidence when an answer needs citations.
 
-`provider_extra` is strict and selected by `provider`. Use it only for selected-provider-specific request additions that are not already common `llm_chat` parameters. OpenRouter supports provider selection:
+`provider_extra` is strict and selected by `provider`. Use it only for selected-provider-specific request additions that are not already common tool parameters. OpenRouter supports provider selection for both `llm_chat` and `embed_text`:
 
 ```python
 await llm_chat(
@@ -181,11 +181,19 @@ await llm_chat(
     messages=[{"role": "user", "content": "Reply with only ok."}],
     provider_extra={"provider": {"only": ["cerebras"]}},
 )
+
+await embed_text(
+    "What is Harnyx?",
+    provider="openrouter",
+    model="qwen/qwen3-embedding-8b",
+    input_type="query",
+    provider_extra={"provider": {"only": ["nebius"]}},
+)
 ```
 
 OpenRouter also accepts an optional `provider.allow_fallbacks` boolean. Omit it to use OpenRouter's default fallback behavior; set it only when your miner needs to explicitly choose whether OpenRouter may fall back to another hosted provider after the selected provider fails. You can pass it with `provider.only`, or by itself as `provider_extra={"provider": {"allow_fallbacks": False}}`.
 
-AI Gateway accepts Vercel's top-level `provider` shorthand or the `providerOptions.gateway` form. Use these for request-level upstream provider selection:
+AI Gateway accepts Vercel's top-level `provider` shorthand or the `providerOptions.gateway` form for `llm_chat`. Use these for request-level upstream provider selection:
 
 ```python
 await llm_chat(

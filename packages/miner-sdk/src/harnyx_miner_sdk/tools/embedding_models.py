@@ -8,6 +8,7 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from harnyx_miner_sdk.tools.llm_provider_extra import OpenRouterExtra, validate_provider_extra
 from harnyx_miner_sdk.tools.types import ToolInvocationTimeout
 
 EmbeddingProviderName = Literal["chutes", "openrouter"]
@@ -43,6 +44,7 @@ class EmbedTextRequest(BaseModel):
     input_type: EmbeddingInputType
     instruction: str | None = Field(default=None, min_length=1)
     dimensions: int | None = Field(default=None, ge=32, le=4096)
+    provider_extra: OpenRouterExtra | None = None
     timeout: ToolInvocationTimeout | None = None
 
     @field_validator("texts", mode="before")
@@ -58,6 +60,23 @@ class EmbedTextRequest(BaseModel):
         normalized = tuple(item.strip() for item in value)
         if not normalized or any(not item for item in normalized):
             raise ValueError("texts must contain non-empty strings")
+        return normalized
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_provider_extra(cls, value: object) -> object:
+        if not isinstance(value, Mapping):
+            return value
+        data = cast(Mapping[str, object], value)
+        if "provider_extra" not in data:
+            return value
+        provider = data.get("provider")
+        if not isinstance(provider, str):
+            return value
+
+        parsed = validate_provider_extra(provider=provider, provider_extra=data.get("provider_extra"))
+        normalized = dict(data)
+        normalized["provider_extra"] = parsed
         return normalized
 
     @model_validator(mode="after")

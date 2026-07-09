@@ -290,6 +290,36 @@ async def fetch_page(
     )
 
 
+@overload
+async def embed_text(
+    texts: str | Sequence[str],
+    /,
+    *,
+    input_type: EmbeddingInputType,
+    provider: Literal["openrouter"],
+    model: str,
+    instruction: str | None = None,
+    dimensions: int | None = None,
+    provider_extra: Mapping[str, Any] | OpenRouterExtra | None = None,
+    timeout: float | None = None,
+) -> ToolCallResponse[EmbedTextResponse]: ...
+
+
+@overload
+async def embed_text(
+    texts: str | Sequence[str],
+    /,
+    *,
+    input_type: EmbeddingInputType,
+    provider: Literal["chutes"],
+    model: str,
+    instruction: str | None = None,
+    dimensions: int | None = None,
+    provider_extra: None = None,
+    timeout: float | None = None,
+) -> ToolCallResponse[EmbedTextResponse]: ...
+
+
 async def embed_text(
     texts: str | Sequence[str],
     /,
@@ -299,21 +329,25 @@ async def embed_text(
     model: str,
     instruction: str | None = None,
     dimensions: int | None = None,
+    provider_extra: Mapping[str, Any] | OpenRouterExtra | None = None,
     timeout: float | None = None,
 ) -> ToolCallResponse[EmbedTextResponse]:
     """Embed query or document text with the validator-hosted embedding tool."""
 
-    payload = EmbedTextRequest.model_validate(
-        {
-            "provider": provider,
-            "model": model,
-            "texts": texts,
-            "input_type": input_type,
-            "instruction": instruction,
-            "dimensions": dimensions,
-            "timeout": timeout,
-        }
-    ).model_dump(exclude_none=True, mode="json")
+    payload_raw: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "texts": texts,
+        "input_type": input_type,
+        "instruction": instruction,
+        "dimensions": dimensions,
+        "timeout": timeout,
+    }
+    if provider_extra is not None:
+        payload_raw["provider_extra"] = (
+            provider_extra.to_request_extra() if isinstance(provider_extra, OpenRouterExtra) else provider_extra
+        )
+    payload = EmbedTextRequest.model_validate(payload_raw).model_dump(exclude_none=True, mode="json")
     raw_response = await _current_tool_invoker().invoke("embed_text", args=(), kwargs=payload)
     dto = _parse_execute_response(raw_response)
     response_payload = _require_response_mapping(dto.response, label="embed_text response payload must be a mapping")

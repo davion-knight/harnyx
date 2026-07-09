@@ -104,13 +104,18 @@ class OpenRouterEmbeddingClient:
         else:
             self._owns_client = False
 
-    async def embed_many(self, texts: Sequence[str]) -> OpenRouterEmbeddingResponse:
+    async def embed_many(
+        self,
+        texts: Sequence[str],
+        *,
+        extra: Mapping[str, Any] | None = None,
+    ) -> OpenRouterEmbeddingResponse:
         normalized = tuple(text.strip() for text in texts)
         if not normalized or any(not text for text in normalized):
             raise ValueError("embedding input texts must contain non-empty strings")
         response = await self._require_client().post(
             "embeddings",
-            json=self._request_body(normalized),
+            json=self._request_body(normalized, extra=extra),
         )
         response.raise_for_status()
         payload = _OpenRouterEmbeddingResponse.model_validate(response.json())
@@ -136,7 +141,7 @@ class OpenRouterEmbeddingClient:
         if self._owns_client:
             await self._require_client().aclose()
 
-    def _request_body(self, texts: Sequence[str]) -> dict[str, Any]:
+    def _request_body(self, texts: Sequence[str], *, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         input_value: str | list[str]
         if len(texts) == 1:
             input_value = texts[0]
@@ -148,6 +153,8 @@ class OpenRouterEmbeddingClient:
         }
         if self.dimensions is not None:
             payload["dimensions"] = self.dimensions
+        if extra is not None:
+            payload.update(extra)
         return payload
 
     def _require_client(self) -> httpx.AsyncClient:
