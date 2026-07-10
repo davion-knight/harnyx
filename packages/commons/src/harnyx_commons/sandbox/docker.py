@@ -661,6 +661,7 @@ class DockerSandboxManager(SandboxManager):
                     diagnostics_dir / "docker-logs.txt",
                     [self._docker, "logs", container_id],
                     options=options,
+                    merge_stderr=True,
                 )
         except Exception as exc:  # pragma: no cover - diagnostic path must not mask failures
             logger.warning(
@@ -712,9 +713,19 @@ class DockerSandboxManager(SandboxManager):
         args: list[str],
         *,
         options: SandboxOptions,
+        merge_stderr: bool = False,
     ) -> None:
         try:
-            result = self._run_command(args, capture_output=True, text=True, check=True)
+            if merge_stderr:
+                result = self._run_command(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=True,
+                )
+            else:
+                result = self._run_command(args, capture_output=True, text=True, check=True)
         except subprocess.CalledProcessError as exc:
             write_private_text(
                 path.with_suffix(f"{path.suffix}.error.txt"),

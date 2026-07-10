@@ -8,7 +8,7 @@ import socket
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -93,7 +93,14 @@ def sandbox_launcher() -> Callable[..., SandboxDeployment]:
     deployments = []
     state_dir = _create_runner_visible_state_dir()
 
-    def _start(agent_module: str, *, host_port: int | None = None):
+    def _start(
+        agent_module: str,
+        *,
+        host_port: int | None = None,
+        command: Sequence[str] | None = None,
+        failure_diagnostics_dir: Path | None = None,
+        healthz_timeout: float = 30.0,
+    ):
         module_rel_path = Path(*agent_module.split(".")).with_suffix(".py")
         module_path = _PUBLIC_PACKAGES_ROOT / module_rel_path
         if not module_path.exists():
@@ -118,14 +125,18 @@ def sandbox_launcher() -> Callable[..., SandboxDeployment]:
                 "AGENT_PATH": artifact.container_path,
             },
             volumes=((str(state_dir), DEFAULT_STATE_DIR, "ro"),),
+            command=command,
             wait_for_healthz=True,
-            healthz_timeout=30.0,
+            healthz_timeout=healthz_timeout,
             network=sandbox_network,
             host_container_url=host_container_url,
             user=CONTAINER_SECURITY.user,
             seccomp_profile=default_profile_path(),
             ulimits=CONTAINER_SECURITY.ulimits,
             extra_args=CONTAINER_SECURITY.extra_args,
+            failure_diagnostics_dir=(
+                None if failure_diagnostics_dir is None else str(failure_diagnostics_dir)
+            ),
         )
         deployment = manager.start(options)
         deployments.append(deployment)

@@ -160,11 +160,12 @@ def test_docker_sandbox_manager_writes_inspect_and_logs_before_cleanup(tmp_path:
     container_id = "sandbox-container-1"
 
     def command_runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        del kwargs
         commands.append(args)
         if args[:2] == ["docker", "run"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"{container_id}\n", stderr="")
         if args == ["docker", "inspect", container_id]:
+            assert kwargs["capture_output"] is True
+            assert "stderr" not in kwargs
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
@@ -172,11 +173,16 @@ def test_docker_sandbox_manager_writes_inspect_and_logs_before_cleanup(tmp_path:
                 stderr="",
             )
         if args == ["docker", "logs", container_id]:
+            stdout = "container stdout sentinel\n"
+            stderr = "container stderr mentions super-secret\n"
+            if kwargs.get("stderr") is subprocess.STDOUT:
+                stdout += stderr
+                stderr = None
             return subprocess.CompletedProcess(
                 args=args,
                 returncode=0,
-                stdout="sandbox listening on 0.0.0.0:8000\nsandbox log line\n",
-                stderr="",
+                stdout=stdout,
+                stderr=stderr,
             )
         if args[:2] == ["docker", "stop"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
@@ -205,10 +211,11 @@ def test_docker_sandbox_manager_writes_inspect_and_logs_before_cleanup(tmp_path:
     assert inspect_index < remove_index
     assert logs_index < remove_index
     inspect_output = (tmp_path / "docker-inspect.json").read_text(encoding="utf-8")
+    assert json.loads(inspect_output)[0]["Id"] == container_id
     assert "SECRET_TOKEN=<redacted>" in inspect_output
     assert "super-secret" not in inspect_output
     assert (tmp_path / "docker-logs.txt").read_text(encoding="utf-8") == (
-        "sandbox listening on 0.0.0.0:8000\nsandbox log line\n"
+        "container stdout sentinel\ncontainer stderr mentions <redacted>\n"
     )
     _assert_private_mode(tmp_path / "docker-inspect.json", 0o600)
     _assert_private_mode(tmp_path / "docker-logs.txt", 0o600)
