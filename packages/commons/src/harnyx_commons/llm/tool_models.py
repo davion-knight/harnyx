@@ -70,7 +70,6 @@ MINER_SELECTED_LLM_PROVIDER_MODELS: Mapping[
         "zai/glm-4.7",
         "google/gemma-4-31b-it",
         "openai/gpt-oss-120b",
-        "alibaba/qwen3.7-plus",
         "minimax/minimax-m2.7",
         "zai/glm-4.7-flash",
     ),

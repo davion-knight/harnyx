@@ -145,8 +145,8 @@ async def test_tooling_info_sandbox_builder_returns_pricing_metadata() -> None:
     assert model_prices["ai_gateway"]["google/gemma-4-31b-it"]["output_per_million"] == pytest.approx(0.40)
     assert model_prices["ai_gateway"]["openai/gpt-oss-120b"]["input_per_million"] == pytest.approx(0.10)
     assert model_prices["ai_gateway"]["openai/gpt-oss-120b"]["output_per_million"] == pytest.approx(0.50)
-    assert model_prices["ai_gateway"]["alibaba/qwen3.7-plus"]["input_per_million"] == pytest.approx(0.32)
-    assert model_prices["ai_gateway"]["alibaba/qwen3.7-plus"]["output_per_million"] == pytest.approx(1.28)
+    assert "alibaba/qwen3.7-plus" not in provider_models["ai_gateway"]
+    assert "alibaba/qwen3.7-plus" not in model_prices["ai_gateway"]
     assert model_prices["ai_gateway"]["minimax/minimax-m2.7"]["input_per_million"] == pytest.approx(0.30)
     assert model_prices["ai_gateway"]["minimax/minimax-m2.7"]["output_per_million"] == pytest.approx(1.20)
     assert model_prices["ai_gateway"]["zai/glm-4.7-flash"]["input_per_million"] == pytest.approx(0.07)

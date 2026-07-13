@@ -102,7 +102,6 @@ def test_miner_selected_openrouter_uses_native_model_ids_without_translation(
         "zai/glm-4.7",
         "google/gemma-4-31b-it",
         "openai/gpt-oss-120b",
-        "alibaba/qwen3.7-plus",
         "minimax/minimax-m2.7",
         "zai/glm-4.7-flash",
     ),
@@ -112,6 +111,14 @@ def test_miner_selected_ai_gateway_uses_native_model_ids_without_translation(mod
 
     assert resolved.provider == "ai_gateway"
     assert resolved.model == model
+
+
+def test_miner_selected_ai_gateway_rejects_retired_qwen37_plus() -> None:
+    with pytest.raises(ValueError, match="not supported for miner-selected provider 'ai_gateway'"):
+        parse_miner_selected_llm_provider_model(
+            provider="ai_gateway",
+            model="alibaba/qwen3.7-plus",
+        )
 
 
 def test_miner_selected_provider_model_sets_are_provider_namespaces() -> None:

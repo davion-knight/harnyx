@@ -106,7 +106,6 @@ MINER_TOOL_LLM_PRICING: Mapping[MinerSelectedLlmProviderName, Mapping[str, Model
         "zai/glm-4.7": ModelPricing(0.43, 1.75, 0.0),
         "google/gemma-4-31b-it": ModelPricing(0.14, 0.40, 0.0),
         "openai/gpt-oss-120b": ModelPricing(0.10, 0.50, 0.0),
-        "alibaba/qwen3.7-plus": ModelPricing(0.32, 1.28, 0.0),
         "minimax/minimax-m2.7": ModelPricing(0.30, 1.20, 0.0),
         "zai/glm-4.7-flash": ModelPricing(0.07, 0.40, 0.0),
     },
