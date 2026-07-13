@@ -19,22 +19,21 @@ running, and when completed result rows become visible.
 
 ## Steps
 
-1. Call `get_latest_submissions` and confirm the artifact metadata is accepted.
+1. Call `get_latest_submissions` and confirm the artifact metadata is a current candidate, or locate it in finalized `initializing` or `running` batch detail if it has already moved.
 2. Call `list_miner_task_batches` to find candidate batches.
 3. Compare `submitted_at` with batch `cutoff_at`.
 4. For a running batch, call `get_miner_task_batch(batch_id)` and inspect:
    - batch state
+   - artifact membership by UID, hotkey, and script hash
    - delivery state
    - delivery progress
    - validator progress and last error fields when present
-5. Wait for completion before looking for artifact rows, result rows, miner
-   responses, reference answers, or script content.
+5. Treat every challenger in finalized membership as considered by duplicate preflight, but do not assume it received scoring tasks.
+6. Wait for completion before looking for task rows, result rows, miner responses, reference answers, or script content.
 
 ## Stop Conditions
 
-- Stop if accepted submission metadata is missing.
-- Do not classify a running batch as missing your artifact only because public
-  artifact rows are hidden before completion.
+- Stop if accepted submission metadata is absent from both current candidates and finalized non-terminal batch membership.
 
 ## Output
 

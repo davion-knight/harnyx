@@ -153,12 +153,12 @@ uv run --package harnyx-miner harnyx-miner-submit \
 After submit:
 
 1. Compare the returned `content_hash` with the local hash.
-2. Call MCP `get_latest_submissions`.
-3. Find the returned `artifact_id` and `content_hash`.
+2. Call MCP `get_latest_submissions`; if the artifact has already moved, inspect finalized `initializing` or `running` batch detail.
+3. Find the returned `artifact_id`, miner hotkey, and `content_hash` in one of those two disjoint views.
 4. Record `artifact_id`, `content_hash`, the signing hotkey, and submit time.
 
-`get_latest_submissions` confirms platform acceptance. It does not prove that a
-running batch has already exposed artifact or result rows.
+Current candidates or finalized non-terminal batch membership confirm accepted
+identity metadata. Neither view exposes script, task, or result content.
 
 ## Monitor Waiting, Running, And Completed Batches
 
@@ -169,7 +169,7 @@ Use `list_miner_task_batches` to find recent source batches, then
 
 Check:
 
-- `get_latest_submissions` contains your `artifact_id` and `content_hash`
+- `get_latest_submissions` contains your `artifact_id`, miner hotkey, and `content_hash`, or a finalized non-terminal batch already contains the same identity metadata
 - your `submitted_at`
 - the candidate batch `cutoff_at`
 
@@ -180,12 +180,14 @@ If `submitted_at` is after `cutoff_at`, expect to wait for a later batch.
 Use `get_miner_task_batch(batch_id)` for:
 
 - batch state
+- finalized artifact membership as UID, hotkey, and script hash
 - delivery state
 - delivery progress
 - validator progress and last error fields when present
 
-Do not expect public artifact rows, task result rows, miner responses, reference
-answers, or script content before the source batch is completed.
+Every challenger in finalized membership was considered by duplicate preflight,
+but some artifacts receive no scoring tasks. Do not expect task rows, task result
+rows, miner responses, reference answers, or script content before completion.
 
 ### After A Batch Completes
 
@@ -205,8 +207,8 @@ Work from the first failed condition that applies.
 
 | Symptom | Check | Tool or Source |
 |---------|-------|----------------|
-| Upload not accepted | Submit response, local hash, signing wallet/hotkey, latest submission metadata | `harnyx-miner-submit`, `harnyx-miner-hash`, `get_latest_submissions` |
-| Accepted but not in completed batch | `submitted_at` versus `cutoff_at`, completed batch artifact/result visibility | `get_latest_submissions`, `get_miner_task_batch` |
+| Upload not accepted | Submit response, local hash, signing wallet/hotkey, current candidate or finalized non-terminal membership metadata | `harnyx-miner-submit`, `harnyx-miner-hash`, `get_latest_submissions`, `get_miner_task_batch` |
+| Accepted but not in completed batch | `submitted_at` versus `cutoff_at`, current candidate or finalized non-terminal membership, completed batch artifact/result visibility | `get_latest_submissions`, `get_miner_task_batch` |
 | Batch still running | Delivery state and progress only; do not look for public result rows yet | `get_miner_task_batch` |
 | Execution did not happen | Delivery state/progress, then aggregate `error_counts` after completion | `get_miner_task_batch`, `get_miner_task_batch_comparison` |
 | Timeout, crash, or budget issue | Attempts, `elapsed_ms`, `execution_log`, `specifics.error`, cost totals | `get_miner_task_batch_results`, then `get_task_results` for the chosen `task_id` |

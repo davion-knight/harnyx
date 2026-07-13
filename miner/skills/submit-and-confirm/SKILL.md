@@ -42,14 +42,14 @@ uv run --package harnyx-miner harnyx-miner-submit \
 ```
 
 4. Compare the returned `content_hash` with the local hash.
-5. Call `get_latest_submissions`.
-6. Find the returned `artifact_id` and `content_hash`.
+5. Call `get_latest_submissions`; if the artifact has already moved, inspect finalized `initializing` or `running` batch detail.
+6. Find the returned `artifact_id`, miner hotkey, and `content_hash` in one of those two disjoint views.
 7. Record `artifact_id`, `content_hash`, signing hotkey, and submit time.
 
 ## Stop Conditions
 
 - Stop if the returned hash does not match the local hash.
-- Stop if `get_latest_submissions` does not show the submitted artifact.
+- Stop if neither current candidates nor finalized non-terminal batch membership shows the submitted artifact.
 
 ## Output
 

@@ -20,12 +20,10 @@ the next workflow action.
 
 ## Steps
 
-1. If upload acceptance is uncertain, check submit response, local hash, signing
-   wallet/hotkey, and `get_latest_submissions`.
+1. If upload acceptance is uncertain, check submit response, local hash, signing wallet/hotkey, `get_latest_submissions`, and finalized non-terminal batch membership.
 2. If the artifact is absent from a completed batch, compare `submitted_at` with
    `cutoff_at`.
-3. If the batch is still running, inspect delivery state/progress only and wait
-   for completion before reading result rows.
+3. If the batch is still running, confirm UID/hotkey/hash membership and inspect delivery state/progress. Membership proves duplicate-preflight consideration, not scoring-task emission; wait for completion before reading result rows.
 4. If execution did not happen, inspect:
    - delivery state/progress from `get_miner_task_batch(batch_id)`
    - aggregate `error_counts` from `get_miner_task_batch_comparison(batch_id)`
