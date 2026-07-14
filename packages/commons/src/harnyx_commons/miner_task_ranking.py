@@ -6,6 +6,7 @@ import math
 import statistics
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from uuid import UUID
 
 from harnyx_commons.domain.miner_task import EvaluationDetails
@@ -36,12 +37,44 @@ class ArtifactAggregateBundle:
     median_elapsed_ms: dict[UUID, float] = field(default_factory=dict)
 
 
+class RankingDecisionRule(StrEnum):
+    POSITIVE_SCORE = "positive_score"
+    SCORE_MARGIN = "score_margin"
+    COST_REDUCTION = "cost_reduction"
+    RUNTIME_REDUCTION = "runtime_reduction"
+
+
+class RankingRuleStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+    NOT_APPLICABLE = "not_applicable"
+
+
+@dataclass(frozen=True, slots=True)
+class RankingRuleEvaluation:
+    rule: RankingDecisionRule
+    status: RankingRuleStatus
+    required_relative_improvement: float | None = None
+    required_absolute_improvement: float | None = None
+    observed_relative_improvement: float | None = None
+    observed_absolute_improvement: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RankingCascadeEvaluation:
+    selected_rule: RankingDecisionRule | None
+    score_non_regressing: bool | None
+    rules: tuple[RankingRuleEvaluation, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class RankingCascadeStep:
     incumbent_artifact_id: UUID | None
     challenger_artifact_id: UUID
     selected_artifact_id: UUID | None
     dethroned: bool
+    evaluation: RankingCascadeEvaluation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +130,11 @@ class RankingCascade:
             incumbent_before = current
             dethroned = False
             if current is None:
-                if self._has_positive_total(artifact_id, aggregates):
+                evaluation = self._evaluate_positive_score(
+                    challenger_artifact_id=artifact_id,
+                    aggregates=aggregates,
+                )
+                if evaluation.selected_rule is not None:
                     current = artifact_id
                     incumbent_before = initial
                     dethroned = initial is not None and initial != artifact_id
@@ -107,14 +144,16 @@ class RankingCascade:
                         challenger_artifact_id=artifact_id,
                         selected_artifact_id=current,
                         dethroned=dethroned,
+                        evaluation=evaluation,
                     )
                 )
                 continue
-            if self._can_dethrone(
+            evaluation = self._evaluate_dethrone(
                 challenger_artifact_id=artifact_id,
                 incumbent_artifact_id=current,
                 aggregates=aggregates,
-            ):
+            )
+            if evaluation.selected_rule is not None:
                 current = artifact_id
                 dethroned = True
             steps.append(
@@ -123,6 +162,7 @@ class RankingCascade:
                     challenger_artifact_id=artifact_id,
                     selected_artifact_id=current,
                     dethroned=dethroned,
+                    evaluation=evaluation,
                 )
             )
         return RankingCascadeTrace(
@@ -131,38 +171,133 @@ class RankingCascade:
             steps=tuple(steps),
         )
 
-    def _can_dethrone(
+    def _evaluate_positive_score(
+        self,
+        *,
+        challenger_artifact_id: UUID,
+        aggregates: ArtifactAggregateBundle,
+    ) -> RankingCascadeEvaluation:
+        passed = float(aggregates.totals.get(challenger_artifact_id, 0.0)) > 0.0
+        return RankingCascadeEvaluation(
+            selected_rule=RankingDecisionRule.POSITIVE_SCORE if passed else None,
+            score_non_regressing=None,
+            rules=(
+                RankingRuleEvaluation(
+                    rule=RankingDecisionRule.POSITIVE_SCORE,
+                    status=RankingRuleStatus.PASSED if passed else RankingRuleStatus.FAILED,
+                ),
+                RankingRuleEvaluation(
+                    rule=RankingDecisionRule.SCORE_MARGIN,
+                    status=RankingRuleStatus.NOT_APPLICABLE,
+                    required_relative_improvement=self._cfg.score_margin_required,
+                ),
+                RankingRuleEvaluation(
+                    rule=RankingDecisionRule.COST_REDUCTION,
+                    status=RankingRuleStatus.NOT_APPLICABLE,
+                    required_relative_improvement=COST_REDUCTION_REQUIRED,
+                ),
+                RankingRuleEvaluation(
+                    rule=RankingDecisionRule.RUNTIME_REDUCTION,
+                    status=RankingRuleStatus.NOT_APPLICABLE,
+                    required_relative_improvement=TIME_REDUCTION_REQUIRED,
+                    required_absolute_improvement=TIME_REDUCTION_MIN_MS,
+                ),
+            ),
+        )
+
+    def _evaluate_dethrone(
         self,
         *,
         challenger_artifact_id: UUID,
         incumbent_artifact_id: UUID,
         aggregates: ArtifactAggregateBundle,
-    ) -> bool:
+    ) -> RankingCascadeEvaluation:
         challenger_total = float(aggregates.totals.get(challenger_artifact_id, 0.0))
         incumbent_total = float(aggregates.totals.get(incumbent_artifact_id, 0.0))
-        if challenger_total <= 0.0:
-            return False
-        if incumbent_total <= 0.0:
-            return True
-        margin = self._cfg.score_margin_required
-        if challenger_total >= incumbent_total * (1.0 + margin):
-            return True
-        if challenger_total < incumbent_total and not math.isclose(
-            challenger_total,
-            incumbent_total,
-            rel_tol=1e-9,
-            abs_tol=1e-9,
-        ):
-            return False
-        return _is_meaningfully_lower(
-            candidate_metric=aggregates.costs.get(challenger_artifact_id),
-            incumbent_metric=aggregates.costs.get(incumbent_artifact_id),
-            reduction_required=COST_REDUCTION_REQUIRED,
-        ) or _is_meaningfully_faster(
-            candidate_metric=aggregates.median_elapsed_ms.get(challenger_artifact_id),
-            incumbent_metric=aggregates.median_elapsed_ms.get(incumbent_artifact_id),
-            reduction_required=TIME_REDUCTION_REQUIRED,
-            min_reduction_ms=TIME_REDUCTION_MIN_MS,
+        score_non_regressing = challenger_total > 0.0 and (
+            challenger_total >= incumbent_total
+            or math.isclose(
+                challenger_total,
+                incumbent_total,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        )
+        score_margin_passed = challenger_total > 0.0 and challenger_total >= incumbent_total * (
+            1.0 + self._cfg.score_margin_required
+        )
+        score_rule = RankingRuleEvaluation(
+            rule=RankingDecisionRule.SCORE_MARGIN,
+            status=RankingRuleStatus.PASSED if score_margin_passed else RankingRuleStatus.FAILED,
+            required_relative_improvement=self._cfg.score_margin_required,
+            observed_relative_improvement=_relative_improvement(
+                challenger_metric=challenger_total,
+                incumbent_metric=incumbent_total,
+                lower_is_better=False,
+            ),
+        )
+
+        challenger_cost = aggregates.costs.get(challenger_artifact_id)
+        incumbent_cost = aggregates.costs.get(incumbent_artifact_id)
+        cost_rule = RankingRuleEvaluation(
+            rule=RankingDecisionRule.COST_REDUCTION,
+            status=_efficiency_rule_status(
+                metric_available=challenger_cost is not None and incumbent_cost is not None,
+                score_non_regressing=score_non_regressing,
+                metric_passed=_is_meaningfully_lower(
+                    candidate_metric=challenger_cost,
+                    incumbent_metric=incumbent_cost,
+                    reduction_required=COST_REDUCTION_REQUIRED,
+                ),
+            ),
+            required_relative_improvement=COST_REDUCTION_REQUIRED,
+            observed_relative_improvement=_relative_improvement(
+                challenger_metric=challenger_cost,
+                incumbent_metric=incumbent_cost,
+                lower_is_better=True,
+            ),
+            observed_absolute_improvement=_absolute_reduction(
+                challenger_metric=challenger_cost,
+                incumbent_metric=incumbent_cost,
+            ),
+        )
+
+        challenger_runtime = aggregates.median_elapsed_ms.get(challenger_artifact_id)
+        incumbent_runtime = aggregates.median_elapsed_ms.get(incumbent_artifact_id)
+        runtime_rule = RankingRuleEvaluation(
+            rule=RankingDecisionRule.RUNTIME_REDUCTION,
+            status=_efficiency_rule_status(
+                metric_available=challenger_runtime is not None and incumbent_runtime is not None,
+                score_non_regressing=score_non_regressing,
+                metric_passed=_is_meaningfully_faster(
+                    candidate_metric=challenger_runtime,
+                    incumbent_metric=incumbent_runtime,
+                    reduction_required=TIME_REDUCTION_REQUIRED,
+                    min_reduction_ms=TIME_REDUCTION_MIN_MS,
+                ),
+            ),
+            required_relative_improvement=TIME_REDUCTION_REQUIRED,
+            required_absolute_improvement=TIME_REDUCTION_MIN_MS,
+            observed_relative_improvement=_relative_improvement(
+                challenger_metric=challenger_runtime,
+                incumbent_metric=incumbent_runtime,
+                lower_is_better=True,
+            ),
+            observed_absolute_improvement=_absolute_reduction(
+                challenger_metric=challenger_runtime,
+                incumbent_metric=incumbent_runtime,
+            ),
+        )
+
+        rules = (score_rule, cost_rule, runtime_rule)
+        selected_rule = next(
+            (rule.rule for rule in rules if rule.status is RankingRuleStatus.PASSED),
+            None,
+        )
+        return RankingCascadeEvaluation(
+            selected_rule=selected_rule,
+            score_non_regressing=score_non_regressing,
+            rules=rules,
         )
 
     @staticmethod
@@ -198,8 +333,7 @@ def aggregate_ranking_rows(
         pair = (row.artifact_id, row.task_id)
         if pair in seen_pairs:
             raise ValueError(
-                "duplicate run pair for validator "
-                f"{row.validator_id}: artifact={row.artifact_id} task={row.task_id}"
+                f"duplicate run pair for validator {row.validator_id}: artifact={row.artifact_id} task={row.task_id}"
             )
         seen_pairs.add(pair)
 
@@ -217,9 +351,7 @@ def aggregate_ranking_rows(
 
     validator_ids = sorted(vectors_by_validator, key=lambda validator_id: validator_id.hex)
     expected_artifact_ids = {
-        artifact_id
-        for validator_vectors in vectors_by_validator.values()
-        for artifact_id in validator_vectors.keys()
+        artifact_id for validator_vectors in vectors_by_validator.values() for artifact_id in validator_vectors.keys()
     }
     expected_count_per_validator = len(expected_artifact_ids) * len(task_ids)
 
@@ -337,6 +469,41 @@ def _is_meaningfully_lower(
     )
 
 
+def _efficiency_rule_status(
+    *,
+    metric_available: bool,
+    score_non_regressing: bool,
+    metric_passed: bool,
+) -> RankingRuleStatus:
+    if not metric_available:
+        return RankingRuleStatus.UNAVAILABLE
+    if score_non_regressing and metric_passed:
+        return RankingRuleStatus.PASSED
+    return RankingRuleStatus.FAILED
+
+
+def _relative_improvement(
+    *,
+    challenger_metric: float | None,
+    incumbent_metric: float | None,
+    lower_is_better: bool,
+) -> float | None:
+    if challenger_metric is None or incumbent_metric is None or incumbent_metric <= 0.0:
+        return None
+    delta = incumbent_metric - challenger_metric if lower_is_better else challenger_metric - incumbent_metric
+    return delta / incumbent_metric
+
+
+def _absolute_reduction(
+    *,
+    challenger_metric: float | None,
+    incumbent_metric: float | None,
+) -> float | None:
+    if challenger_metric is None or incumbent_metric is None:
+        return None
+    return incumbent_metric - challenger_metric
+
+
 def _is_meaningfully_faster(
     *,
     candidate_metric: float | None,
@@ -366,9 +533,13 @@ __all__ = [
     "ArtifactRankingRow",
     "COST_REDUCTION_REQUIRED",
     "CascadeConfig",
+    "RankingCascadeEvaluation",
     "RankingCascade",
     "RankingCascadeStep",
     "RankingCascadeTrace",
+    "RankingDecisionRule",
+    "RankingRuleEvaluation",
+    "RankingRuleStatus",
     "TIME_REDUCTION_MIN_MS",
     "TIME_REDUCTION_REQUIRED",
     "aggregate_ranking_rows",

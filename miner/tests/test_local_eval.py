@@ -2515,6 +2515,7 @@ def test_local_eval_still_fails_before_runtime_when_latest_batch_lookup_fails(
 
 def test_platform_monitoring_client_pages_until_completed_batch() -> None:
     first_before = "2026-03-27T06:00:00Z"
+    first_before_batch_id = str(uuid4())
     completed_batch_id = uuid4()
 
     class _StubClient:
@@ -2535,6 +2536,7 @@ def test_platform_monitoring_client_pages_until_completed_batch() -> None:
                             },
                         ),
                         "next_before": first_before,
+                        "next_before_batch_id": first_before_batch_id,
                     },
                     request=request,
                 )
@@ -2547,6 +2549,55 @@ def test_platform_monitoring_client_pages_until_completed_batch() -> None:
                             "status": "completed",
                         },
                     ),
+                    "next_before": None,
+                },
+                request=request,
+            )
+
+        def close(self) -> None:
+            return None
+
+    client = PlatformMonitoringClient(base_url="https://platform.example.com")
+    client._client.close()
+    client._client = _StubClient()
+
+    batch = client.find_latest_completed_batch()
+
+    assert batch["batch_id"] == str(completed_batch_id)
+    assert client._client.calls == [
+        ("/v1/monitoring/miner-task-batches", {"limit": 100}),
+        (
+            "/v1/monitoring/miner-task-batches",
+            {
+                "limit": 100,
+                "before": first_before,
+                "before_batch_id": first_before_batch_id,
+            },
+        ),
+    ]
+
+
+def test_platform_monitoring_client_accepts_legacy_timestamp_only_cursor() -> None:
+    first_before = "2026-03-27T06:00:00Z"
+    completed_batch_id = uuid4()
+
+    class _StubClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, object]] = []
+
+        def get(self, path: str, params=None):
+            self.calls.append((path, params))
+            request = httpx.Request("GET", f"https://platform.example.com{path}")
+            if len(self.calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={"batches": [], "next_before": first_before},
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "batches": ({"batch_id": str(completed_batch_id), "status": "completed"},),
                     "next_before": None,
                 },
                 request=request,

@@ -95,10 +95,13 @@ class PlatformMonitoringClient:
 
     def find_latest_completed_batch(self) -> dict[str, object]:
         before: str | None = None
+        before_batch_id: str | None = None
         while True:
             params: dict[str, _QueryParamValue] = {"limit": 100}
             if before is not None:
                 params["before"] = before
+            if before_batch_id is not None:
+                params["before_batch_id"] = before_batch_id
             payload = self._get_json_object("/v1/monitoring/miner-task-batches", params=params)
             batches = _require_sequence(payload.get("batches"), label="monitoring batches")
             for raw_batch in batches:
@@ -109,6 +112,10 @@ class PlatformMonitoringClient:
             if next_before in (None, ""):
                 break
             before = str(next_before)
+            next_before_batch_id = payload.get("next_before_batch_id")
+            before_batch_id = (
+                None if next_before_batch_id in (None, "") else str(next_before_batch_id)
+            )
         raise RuntimeError("no completed public miner-task batch is available")
 
     def get_batch_detail(self, batch_id: UUID) -> dict[str, object]:
