@@ -108,7 +108,7 @@ async def test_runtime_invoker_sets_single_attempt_retry_policy_for_llm_chat() -
     )
 
 
-async def test_runtime_invoker_lowers_ai_gateway_provider_options_extra_to_request_extra() -> None:
+async def test_runtime_invoker_normalizes_ai_gateway_provider_extra_to_provider_options() -> None:
     llm_provider = _CapturingLlmProvider()
     invoker = RuntimeToolInvoker(
         InMemoryReceiptLog(),
@@ -123,7 +123,7 @@ async def test_runtime_invoker_lowers_ai_gateway_provider_options_extra_to_reque
             "provider": "ai_gateway",
             "model": "zai/glm-5.2-fast",
             "messages": [{"role": "user", "content": "hi"}],
-            "provider_extra": {"providerOptions": {"gateway": {"only": ["cerebras"]}}},
+            "provider_extra": {"provider": {"only": ["cerebras"]}},
         },
     )
 

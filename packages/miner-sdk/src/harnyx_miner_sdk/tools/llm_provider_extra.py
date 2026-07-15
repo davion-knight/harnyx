@@ -132,12 +132,12 @@ class AiGatewayExtra(BaseModel):
         return self
 
     def to_request_extra(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {}
-        if self.provider is not None:
-            payload["provider"] = self.provider.to_provider_payload()
         if self.provider_options is not None:
-            payload["providerOptions"] = self.provider_options.to_provider_options_payload()
-        return payload
+            provider_options = self.provider_options.to_provider_options_payload()
+        else:
+            assert self.provider is not None
+            provider_options = {"gateway": self.provider.to_provider_payload()}
+        return {"providerOptions": provider_options}
 
 
 _OPENROUTER_EXTRA_ADAPTER = TypeAdapter(OpenRouterExtra)

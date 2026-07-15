@@ -906,7 +906,7 @@ async def test_llm_chat_helper_forwards_openrouter_provider_extra() -> None:
     assert payload["kwargs"]["provider_extra"] == {"provider": {"only": ["cerebras"]}}
 
 
-async def test_llm_chat_helper_forwards_ai_gateway_provider_extra() -> None:
+async def test_llm_chat_helper_normalizes_ai_gateway_provider_extra_to_provider_options() -> None:
     captured: dict[str, dict[str, object]] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -943,7 +943,7 @@ async def test_llm_chat_helper_forwards_ai_gateway_provider_extra() -> None:
                 provider="ai_gateway",
                 messages=[{"role": "user", "content": "hi"}],
                 model="zai/glm-5.2-fast",
-                provider_extra={"providerOptions": {"gateway": {"only": ["cerebras"]}}},
+                provider_extra={"provider": {"only": ["cerebras"]}},
             )
     finally:
         await proxy.aclose()

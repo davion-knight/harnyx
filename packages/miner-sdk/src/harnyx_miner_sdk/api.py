@@ -415,11 +415,15 @@ async def llm_chat(
         payload_raw["timeout"] = timeout
     if params:
         payload_raw.update(params)
-    payload = LlmChatRequest.model_validate(payload_raw).model_dump(
+    request = LlmChatRequest.model_validate(payload_raw)
+    payload = request.model_dump(
         exclude_none=True,
         mode="json",
         by_alias=True,
     )
+    provider_extra_payload = request.provider_extra_payload()
+    if provider_extra_payload is not None:
+        payload["provider_extra"] = provider_extra_payload
     raw_response = await _current_tool_invoker().invoke(
         "llm_chat",
         args=(),

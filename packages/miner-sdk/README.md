@@ -304,16 +304,9 @@ await embed_text(
 
 OpenRouter also accepts an optional `provider.allow_fallbacks` boolean. Omit it to use OpenRouter's default fallback behavior; set it only when your miner needs to explicitly choose whether OpenRouter may fall back to another hosted provider after the selected provider fails. You can pass it with `provider.only`, or by itself as `provider_extra={"provider": {"allow_fallbacks": False}}`.
 
-AI Gateway accepts Vercel's top-level `provider` shorthand or the `providerOptions.gateway` form for `llm_chat`. Use these for request-level upstream provider selection:
+AI Gateway uses `providerOptions.gateway` for request-level upstream provider selection:
 
 ```python
-await llm_chat(
-    provider="ai_gateway",
-    model="openai/gpt-oss-120b",
-    messages=[{"role": "user", "content": "Reply with only ok."}],
-    provider_extra={"provider": {"only": ["cerebras"]}},
-)
-
 await llm_chat(
     provider="ai_gateway",
     model="openai/gpt-oss-120b",
@@ -321,6 +314,8 @@ await llm_chat(
     provider_extra={"providerOptions": {"gateway": {"only": ["cerebras"]}}},
 )
 ```
+
+The SDK still accepts the legacy top-level `provider.only` input and normalizes it to `providerOptions.gateway.only` before invoking AI Gateway. New miner code should use the canonical `providerOptions.gateway` form shown above.
 
 Do not pass `provider_extra={"provider": "cerebras"}`. The SDK/runtime rejects the raw string form.
 

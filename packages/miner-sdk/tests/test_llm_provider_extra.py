@@ -61,14 +61,14 @@ def test_chutes_rejects_provider_extra() -> None:
         )
 
 
-def test_ai_gateway_provider_extra_accepts_provider_selection() -> None:
+def test_ai_gateway_provider_extra_normalizes_provider_selection_to_provider_options() -> None:
     parsed = validate_provider_extra(
         provider="ai_gateway",
         provider_extra={"provider": {"only": ["cerebras"]}},
     )
 
     assert isinstance(parsed, AiGatewayExtra)
-    assert parsed.to_request_extra() == {"provider": {"only": ["cerebras"]}}
+    assert parsed.to_request_extra() == {"providerOptions": {"gateway": {"only": ["cerebras"]}}}
 
 
 def test_ai_gateway_provider_extra_accepts_provider_options_gateway_selection() -> None:
@@ -91,10 +91,7 @@ def test_ai_gateway_provider_extra_accepts_matching_vercel_forms() -> None:
     )
 
     assert parsed is not None
-    assert parsed.to_request_extra() == {
-        "provider": {"only": ["cerebras"]},
-        "providerOptions": {"gateway": {"only": ["cerebras"]}},
-    }
+    assert parsed.to_request_extra() == {"providerOptions": {"gateway": {"only": ["cerebras"]}}}
 
 
 def test_ai_gateway_provider_extra_rejects_conflicting_vercel_forms() -> None:

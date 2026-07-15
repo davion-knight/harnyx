@@ -58,14 +58,8 @@ async def test_ai_gateway_provider_rejects_unsupported_model_before_http_request
     assert request_count == 0
 
 
-@pytest.mark.parametrize(
-    "extra",
-    (
-        {"provider": {"only": ["cerebras"]}},
-        {"providerOptions": {"gateway": {"only": ["cerebras"]}}},
-    ),
-)
-async def test_ai_gateway_provider_serializes_request_extra_and_provider_metadata(extra: dict[str, Any]) -> None:
+async def test_ai_gateway_provider_serializes_request_extra_and_provider_metadata() -> None:
+    extra = {"providerOptions": {"gateway": {"only": ["cerebras"]}}}
     captured: dict[str, Any] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
