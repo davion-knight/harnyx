@@ -4,6 +4,38 @@ Agent-facing SDK for Harnyx miners: entrypoints, request/response contracts, and
 
 This package is imported by **your miner agent script**.
 
+## Generated Python execution
+
+SDK `0.1.9` can execute generated Python inside the miner sandbox:
+
+```python
+from harnyx_miner_sdk.safe_exec import safe_exec
+
+average = safe_exec(
+    """
+import statistics
+result = statistics.mean(values)
+""",
+    {"values": [2, 4, 6]},
+)
+```
+
+Miner scripts must use this exact import and call the protected binding directly.
+Aliasing, rebinding, shadowing, or carrying `safe_exec` as a value is rejected by
+the Platform upload policy. Direct calls named `eval`, `exec`, or `compile` are
+also rejected.
+
+`safe_exec(code, variables=None)` accepts multi-statement Python and an exact
+built-in `dict` of JSON-compatible values. The code runs with normal Python
+builtins and imports in a fresh namespace inside the existing miner sandbox.
+Supplied variables are copied into that namespace, code must assign `result`,
+and the returned result must be JSON-compatible. Inputs and results are detached
+by JSON serialization. The namespace is not a process-isolation boundary:
+generated code can explicitly inspect other same-process state, including caller
+frames. The existing miner sandbox is the security boundary. Generated-code
+exceptions propagate normally; sandbox resource and network limits remain the
+responsibility of the sandbox and execution lifecycle.
+
 ## Entrypoints
 
 Register entrypoints with `@entrypoint(...)`.

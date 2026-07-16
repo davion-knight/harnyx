@@ -25,6 +25,7 @@ from harnyx_sandbox.sandbox.harness import (
 
 from harnyx_miner_sdk.api import test_tool as invoke_test_tool
 from harnyx_miner_sdk.decorators import clear_entrypoints, entrypoint, entrypoint_exists
+from harnyx_miner_sdk.safe_exec import safe_exec
 
 
 def _detail_code(response) -> str:
@@ -292,6 +293,31 @@ def test_harness_invokes_entrypoint_and_closes_tools() -> None:
     assert factory_calls.value == 1
     assert invoke_calls.value == 1
     assert close_flag.value == 1
+
+
+def test_harness_executes_safe_exec_inside_worker() -> None:
+    @entrypoint("miner_safe_exec")
+    async def safe_exec_entrypoint(request: dict[str, object]) -> dict[str, object]:
+        values = request.get("values")
+        average = safe_exec(
+            "import statistics\nresult = statistics.mean(values)",
+            {"values": values},
+        )
+        return {"average": average}
+
+    harness = SandboxHarness()
+    app = FastAPI()
+    app.include_router(harness.create_router(), prefix="/entry")
+    client = TestClient(app)
+
+    response = client.post(
+        "/entry/miner_safe_exec",
+        json={"payload": {"values": [2, 4, 6]}, "context": {}},
+        headers={"x-platform-token": "token", "x-session-id": "session-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"] == {"average": 4}
 
 
 def test_harness_builds_tool_proxy_before_preload() -> None:

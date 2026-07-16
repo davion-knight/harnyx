@@ -566,7 +566,8 @@ The duplicate hash uses an allow-listed normalization policy:
 |-----------------|------------------------|
 | Comments, whitespace, parser-erased literal spelling, and source locations | canonicalized |
 | Common lexical renames, import alias order, inert helper padding/order, and stable local keyword names | canonicalized when the transform's mechanical assumptions are true |
-| Keyword argument order, arbitrary statement/import reordering, docstring removal, dead-code removal, constant folding, and semantic equivalence | not normalized in the duplicate-rejection hash |
+| Recursive `pass` and standalone constant-expression padding, unobservable docstrings, and unread plain-name assignments to provably non-raising static module literals | canonicalized |
+| Keyword argument order, arbitrary statement/import reordering, general dead-code removal, constant folding, and semantic equivalence | not normalized in the duplicate-rejection hash |
 
 `canonical_ast_hash_v1` is not semantic equivalence. It intentionally ignores
 some syntactic and identifier-level differences for duplicate rejection. Scripts
@@ -583,17 +584,45 @@ Use literal optional-field access:
 title = getattr(result, "title", None)
 ```
 
-Direct builtin `eval(...)` calls are allowed when they improve answer accuracy.
-The submitted `eval(...)` call is structurally hashed, but code generated at
-runtime is not inspected by duplicate detection.
+Direct calls named `eval(...)`, `exec(...)`, or `compile(...)` are rejected.
+Generated Python must use the exact protected SDK import and a direct call:
 
-Do not alias or pass around `eval`, `getattr`, or `hasattr`, and do not use other
-dynamic reflection or execution APIs such as `exec`, `compile`, `globals`,
-`locals`, `vars`, `dir`, `type`, `help`, `__import__`, `importlib`, `inspect`,
-`setattr`, `delattr`, or dunder attributes such as `__dict__`, `__code__`,
-`__globals__`, `__mro__`, and `__subclasses__`. Reflection helpers such as
-`typing.get_type_hints`, `dataclasses.fields`, and `dataclasses.asdict` are not
-part of the accepted upload subset.
+```python
+from harnyx_miner_sdk.safe_exec import safe_exec
+
+average = safe_exec(
+    """
+import statistics
+result = statistics.mean(values)
+""",
+    {"values": [2, 4, 6]},
+)
+```
+
+Do not alias, rebind, shadow, or pass `safe_exec` as a value. Its optional
+variables argument must be an exact built-in `dict` of JSON-compatible values.
+The code may contain ordinary multi-statement Python, including imports,
+functions, and control flow. It runs in a fresh namespace inside the miner
+sandbox and must assign a JSON-compatible value to `result`. Inputs and the
+returned result are detached by JSON serialization. The fresh namespace is not
+process isolation: generated code can explicitly inspect other state in the
+miner process, including caller frames. The existing miner sandbox—not the
+namespace—is the security boundary. Generated-code exceptions propagate
+normally; the sandbox and execution lifecycle own network, filesystem,
+resource, and timeout enforcement.
+
+Do not alias or pass around guarded callables such as `eval`, `getattr`, or
+`hasattr`, and do not use other dynamic reflection or execution APIs such as
+`globals`, `locals`, `vars`, `dir`, `type`, `help`, `__import__`, `importlib`,
+`inspect`, `setattr`, `delattr`, or dunder attributes such as `__dict__`,
+`__code__`, `__globals__`, `__mro__`, and `__subclasses__`. Reflection helpers
+such as `typing.get_type_hints`, `dataclasses.fields`, and `dataclasses.asdict`
+are not part of the accepted upload subset.
+
+Those reflection restrictions apply to the submitted miner script that the
+Platform fingerprints. Python source passed to `safe_exec` is opaque to AST
+normalization. Reflective reads from generated code do not make an otherwise
+unread module assignment live for duplicate hashing.
 
 Pattern matching, `del`, `global`, and `nonlocal` are not part of the upload
 subset. Keep class bodies to docstrings, pass statements, field assignments or
