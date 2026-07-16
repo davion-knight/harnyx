@@ -38,6 +38,9 @@ Workflow tools used below:
 - `get_miner_task_batch_results`
 - `get_task_results`
 
+For `get_miner_task_batch_results` and `get_task_results`, read the returned
+rows from `results[]`.
+
 Call `get_validators` and read `runtime.next_scheduled_batch_at` when you need
 the next configured batch time. The value is UTC on the wire; `null` means
 automatic miner-task batch scheduling is disabled.
@@ -201,10 +204,10 @@ Use completed-batch tools by purpose:
 - `get_miner_task_batch_comparison(batch_id)` for aggregate comparison,
   artifact totals, scores, cost totals, and `error_counts`.
 - `get_miner_task_batch_results(batch_id, artifact_id, ...)` for
-  artifact-scoped result rows. Add `task_id`, `validator_hotkey`, or
+  artifact-scoped result rows in `results[]`. Add `task_id`, `validator_hotkey`, or
   `miner_uid` only when narrowing the query.
 - `get_task_results(batch_id, artifact_id, task_id)` for full result detail,
-  attempts, and `execution_log` evidence for one task.
+  attempts, and `execution_log` evidence for one task in `results[]`.
 
 ## Diagnose Bad Or Weird Scores
 

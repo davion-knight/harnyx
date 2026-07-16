@@ -26,9 +26,10 @@ Collect completed-batch evidence for one submitted artifact.
 3. Call `get_miner_task_batch_comparison(batch_id)` for aggregate score,
    cost totals, and `error_counts`.
 4. Call `get_miner_task_batch_results(batch_id, artifact_id, ...)` for
-   artifact-scoped result rows.
+   artifact-scoped result rows, then read those rows from `results[]`.
 5. Call `get_task_results(batch_id, artifact_id, task_id)` when attempts or
-   `execution_log` detail are needed for one task.
+   `execution_log` detail are needed for one task, then read those rows from
+   `results[]`.
 6. Join task metadata and result rows by `task_id`.
 
 ## Stop Conditions
