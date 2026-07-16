@@ -166,6 +166,102 @@ async def test_ai_gateway_provider_serializes_typed_thinking_to_reasoning(
     assert captured["json"]["reasoning"] == expected_reasoning
 
 
+async def test_ai_gateway_provider_maps_gemma_thinking_to_cerebras_reasoning_effort() -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return _streaming_response(request)
+
+    client = httpx.AsyncClient(
+        base_url=AI_GATEWAY_BASE_URL,
+        headers={"Authorization": "Bearer test-ai-gateway-key"},
+        transport=httpx.MockTransport(handler),
+    )
+    provider = AiGatewayLlmProvider(ai_gateway_api_key=SecretStr("test-ai-gateway-key"), client=client)
+
+    try:
+        await provider.invoke(
+            _request(
+                model="google/gemma-4-31b-it",
+                thinking=LlmThinkingConfig(enabled=True, effort="medium"),
+                extra={"providerOptions": {"gateway": {"only": ["cerebras"]}}},
+            )
+        )
+    finally:
+        await provider.aclose()
+        await client.aclose()
+
+    assert captured["json"]["reasoning"] == {"enabled": True, "effort": "medium"}
+    assert captured["json"]["providerOptions"] == {
+        "gateway": {"only": ["cerebras"]},
+        "cerebras": {"reasoningEffort": "medium"},
+    }
+
+
+async def test_ai_gateway_provider_does_not_add_cerebras_reasoning_to_other_routes() -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return _streaming_response(request)
+
+    client = httpx.AsyncClient(
+        base_url=AI_GATEWAY_BASE_URL,
+        headers={"Authorization": "Bearer test-ai-gateway-key"},
+        transport=httpx.MockTransport(handler),
+    )
+    provider = AiGatewayLlmProvider(ai_gateway_api_key=SecretStr("test-ai-gateway-key"), client=client)
+
+    try:
+        await provider.invoke(
+            _request(
+                model="google/gemma-4-31b-it",
+                thinking=LlmThinkingConfig(enabled=True, effort="medium"),
+                extra={"providerOptions": {"gateway": {"only": ["other-provider"]}}},
+            )
+        )
+    finally:
+        await provider.aclose()
+        await client.aclose()
+
+    assert captured["json"]["providerOptions"] == {"gateway": {"only": ["other-provider"]}}
+
+
+async def test_ai_gateway_provider_preserves_gemma_extra_without_provider_selection() -> None:
+    captured: dict[str, Any] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content.decode("utf-8"))
+        return _streaming_response(request)
+
+    client = httpx.AsyncClient(
+        base_url=AI_GATEWAY_BASE_URL,
+        headers={"Authorization": "Bearer test-ai-gateway-key"},
+        transport=httpx.MockTransport(handler),
+    )
+    provider = AiGatewayLlmProvider(ai_gateway_api_key=SecretStr("test-ai-gateway-key"), client=client)
+
+    try:
+        await provider.invoke(
+            _request(
+                model="google/gemma-4-31b-it",
+                thinking=LlmThinkingConfig(enabled=True, effort="medium"),
+                extra={"reasoning": {"exclude": True}},
+            )
+        )
+    finally:
+        await provider.aclose()
+        await client.aclose()
+
+    assert "providerOptions" not in captured["json"]
+    assert captured["json"]["reasoning"] == {
+        "exclude": True,
+        "enabled": True,
+        "effort": "medium",
+    }
+
+
 async def test_ai_gateway_provider_merges_typed_thinking_into_internal_reasoning_extra() -> None:
     captured: dict[str, Any] = {}
 
