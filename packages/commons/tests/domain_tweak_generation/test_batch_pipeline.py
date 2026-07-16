@@ -127,13 +127,14 @@ async def test_batch_pipeline_reports_underfill_after_hard_attempt_cap() -> None
     assert result.tool_usage.llm.call_count == 12
 
 
-async def test_batch_pipeline_skips_reference_answer_phase_for_partial_question_underfill() -> None:
+async def test_batch_pipeline_finalizes_partial_question_supply_before_returning_underfill() -> None:
     executor = _FakeTurnExecutor(
         responses=(
             _question_payload(1),
             _no_generate_payload(),
             _no_generate_payload(),
             _review_payload(form_match=True),
+            _answer_payload(1),
         )
     )
     pipeline = DomainTweakBatchGenerationPipeline(
@@ -145,7 +146,7 @@ async def test_batch_pipeline_skips_reference_answer_phase_for_partial_question_
 
     assert result.underfilled
     assert [item.pair_input.pair_id for item in result.selected_questions] == ["pair-001"]
-    assert result.finalized_tasks == ()
+    assert [item.reviewed_question.pair_input.pair_id for item in result.finalized_tasks] == ["pair-001"]
     assert len(result.rejected_attempts) == 2
     assert result.failed_finalizations == ()
     assert executor.phases == [
@@ -153,8 +154,205 @@ async def test_batch_pipeline_skips_reference_answer_phase_for_partial_question_
         "question_generation",
         "question_generation",
         "form_review",
+        "reference_answer",
     ]
-    assert result.tool_usage.llm.call_count == 4
+    assert result.tool_usage.llm.call_count == 5
+
+
+async def test_batch_pipeline_replaces_exhausted_a2_failure_from_unused_pair_input() -> None:
+    executor = _FakeTurnExecutor(
+        responses=(
+            _question_payload(1),
+            _question_payload(2),
+            _review_payload(form_match=True),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(1),
+            _answer_payload(2),
+            _question_payload(
+                99,
+                question="  WHICH PLAYERS MEET ALL CONSTRAINTS IN DOMAIN 2?  ",
+            ),
+            _review_payload(form_match=True),
+            _question_payload(4),
+            _review_payload(form_match=True),
+            _answer_payload(4),
+        )
+    )
+    task_ids = iter(_TASK_IDS)
+    pipeline = DomainTweakBatchGenerationPipeline(
+        base_config=DomainTweakAdkRunConfig(model="gemini-3-pro-preview"),
+        runner=DomainTweakAdkRunner(turn_executor=executor),
+        task_id_factory=lambda: next(task_ids),
+    )
+    config = DomainTweakBatchGenerationConfig(
+        target_count=2,
+        reference_answer_policy=DomainTweakReferenceAnswerPhasePolicy(
+            validation_retries_per_answer=0,
+            invocation_retries_per_answer=0,
+            failed_finalization_retries_per_batch_item=0,
+            answer_attempt_multiplier=1.5,
+            hard_answer_attempt_cap_multiplier=2,
+        ),
+    )
+
+    result = await pipeline.generate_batch(_pair_inputs(4), config)
+
+    assert not result.underfilled
+    assert [item.pair_input.pair_id for item in result.selected_questions] == [
+        "pair-001",
+        "pair-002",
+        "pair-004",
+    ]
+    assert [item.reviewed_question.pair_input.pair_id for item in result.finalized_tasks] == [
+        "pair-002",
+        "pair-004",
+    ]
+    assert [item.pair_input.pair_id for item in result.rejected_attempts] == ["pair-003"]
+    assert [item.reviewed_question.pair_input.pair_id for item in result.failed_finalizations] == ["pair-001"]
+    assert result.reference_answer_finalization_attempt_count == 3
+    assert result.reference_answer_retry_attempt_count == 0
+    assert result.reference_answer_retry_round_count == 0
+    assert executor.reference_answer_indexes == [1, 2, 4]
+    assert result.tool_usage.llm.call_count == 11
+
+
+async def test_batch_pipeline_does_not_reset_answer_budget_for_replacements() -> None:
+    executor = _FakeTurnExecutor(
+        responses=(
+            _question_payload(1),
+            _question_payload(2),
+            _review_payload(form_match=True),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(1),
+            _answer_payload(2),
+            _question_payload(3),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(3),
+        )
+    )
+    pipeline = DomainTweakBatchGenerationPipeline(
+        base_config=DomainTweakAdkRunConfig(model="gemini-3-pro-preview"),
+        runner=DomainTweakAdkRunner(turn_executor=executor),
+    )
+    config = DomainTweakBatchGenerationConfig(
+        target_count=2,
+        reference_answer_policy=DomainTweakReferenceAnswerPhasePolicy(
+            validation_retries_per_answer=0,
+            invocation_retries_per_answer=0,
+            failed_finalization_retries_per_batch_item=0,
+            answer_attempt_multiplier=1.5,
+            hard_answer_attempt_cap_multiplier=2,
+        ),
+    )
+
+    result = await pipeline.generate_batch(_pair_inputs(4), config)
+
+    assert result.underfilled
+    assert [item.pair_input.pair_id for item in result.selected_questions] == [
+        "pair-001",
+        "pair-002",
+        "pair-003",
+    ]
+    assert [item.reviewed_question.pair_input.pair_id for item in result.finalized_tasks] == ["pair-002"]
+    assert [item.reviewed_question.pair_input.pair_id for item in result.failed_finalizations] == [
+        "pair-001",
+        "pair-003",
+    ]
+    assert result.reference_answer_finalization_attempt_count == 3
+    assert executor.reference_answer_indexes == [1, 2, 3]
+    assert executor.phases == [
+        "question_generation",
+        "question_generation",
+        "form_review",
+        "form_review",
+        "reference_answer",
+        "reference_answer",
+        "question_generation",
+        "form_review",
+        "reference_answer",
+    ]
+
+
+async def test_batch_pipeline_does_not_reset_question_or_answer_caps_across_replacements() -> None:
+    executor = _FakeTurnExecutor(
+        responses=(
+            _question_payload(1),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(1),
+            _question_payload(2),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(2),
+            _question_payload(3),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(3),
+            _question_payload(4),
+            _review_payload(form_match=True),
+            _invalid_answer_payload(4),
+        )
+    )
+    pipeline = DomainTweakBatchGenerationPipeline(
+        base_config=DomainTweakAdkRunConfig(model="gemini-3-pro-preview"),
+        runner=DomainTweakAdkRunner(turn_executor=executor),
+    )
+    config = DomainTweakBatchGenerationConfig(
+        target_count=1,
+        reference_answer_policy=DomainTweakReferenceAnswerPhasePolicy(
+            validation_retries_per_answer=0,
+            invocation_retries_per_answer=0,
+            failed_finalization_retries_per_batch_item=0,
+            answer_attempt_multiplier=4,
+            hard_answer_attempt_cap_multiplier=4,
+        ),
+    )
+
+    result = await pipeline.generate_batch(_pair_inputs(5), config)
+
+    assert result.underfilled
+    assert [item.pair_input.pair_id for item in result.selected_questions] == [
+        "pair-001",
+        "pair-002",
+        "pair-003",
+        "pair-004",
+    ]
+    assert result.finalized_tasks == ()
+    assert len(result.failed_finalizations) == 4
+    assert result.reference_answer_finalization_attempt_count == 4
+    assert executor.reference_answer_indexes == [1, 2, 3, 4]
+    assert result.tool_usage.llm.call_count == 12
+
+
+async def test_batch_pipeline_gives_each_selected_candidate_a_first_a2_attempt_before_fresh_retries() -> None:
+    executor = _FakeTurnExecutor(
+        responses=(
+            *(_question_payload(index) for index in range(1, 9)),
+            *(_review_payload(form_match=True) for _ in range(8)),
+            *(_question_payload(index) for index in range(9, 11)),
+            *(_review_payload(form_match=True) for _ in range(2)),
+            *(RuntimeError("transient ADK failure") for _ in range(10)),
+        )
+    )
+    pipeline = DomainTweakBatchGenerationPipeline(
+        base_config=DomainTweakAdkRunConfig(model="gemini-3-pro-preview"),
+        runner=DomainTweakAdkRunner(turn_executor=executor),
+    )
+    config = DomainTweakBatchGenerationConfig(
+        target_count=10,
+        reference_answer_policy=DomainTweakReferenceAnswerPhasePolicy(
+            validation_retries_per_answer=0,
+            invocation_retries_per_answer=1,
+            failed_finalization_retries_per_batch_item=0,
+            answer_attempt_multiplier=1,
+            hard_answer_attempt_cap_multiplier=1,
+        ),
+    )
+
+    result = await pipeline.generate_batch(_pair_inputs(10), config)
+
+    assert result.underfilled
+    assert len(result.selected_questions) == 10
+    assert len(result.failed_finalizations) == 10
+    assert set(executor.reference_answer_indexes) == set(range(1, 11))
+    assert len(executor.reference_answer_indexes) == 10
 
 
 async def test_batch_pipeline_applies_phase_specific_defaults() -> None:

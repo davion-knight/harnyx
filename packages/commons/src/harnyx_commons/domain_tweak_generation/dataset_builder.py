@@ -56,12 +56,12 @@ def finalized_tasks_from_domain_tweak_result(
     *,
     target_count: int,
 ) -> tuple[MinerTask, ...]:
-    if result.failed_finalizations:
-        raise RuntimeError(
-            "domain-tweak reference-answer finalization failed: "
-            f"{len(result.failed_finalizations)} failed finalization(s)"
-        )
     if result.underfilled or len(result.finalized_tasks) != target_count:
+        if result.failed_finalizations:
+            raise RuntimeError(
+                "domain-tweak reference-answer finalization failed: "
+                f"{len(result.failed_finalizations)} failed finalization(s)"
+            )
         raise RuntimeError(
             "domain-tweak generation produced fewer finalized tasks than requested: "
             f"requested {target_count}, finalized {len(result.finalized_tasks)}"

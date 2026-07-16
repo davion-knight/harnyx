@@ -81,7 +81,11 @@ async def test_domain_tweak_dataset_builder_fails_on_question_or_a2_underfill() 
 
 async def test_domain_tweak_dataset_builder_fails_on_failed_finalizations() -> None:
     pair_source = _RecordingPairSource(_pair_inputs(4))
-    batch_pipeline = _FakeBatchPipeline(finalized_count=1, failed_finalizations=1)
+    batch_pipeline = _FakeBatchPipeline(
+        finalized_count=0,
+        failed_finalizations=1,
+        underfilled=True,
+    )
     builder = DomainTweakMinerTaskDatasetBuilder(pair_source=pair_source, batch_pipeline=batch_pipeline)
 
     with pytest.raises(RuntimeError, match="reference-answer finalization failed"):
@@ -132,6 +136,23 @@ def test_finalized_tasks_from_domain_tweak_result_returns_tasks_for_complete_res
     assert [task.query.text for task in tasks] == ["Question 1?", "Question 2?"]
 
 
+def test_finalized_tasks_from_domain_tweak_result_returns_exact_target_after_replacement() -> None:
+    failed = _reviewed_question(1)
+    replacement = _reviewed_question(2)
+    result = DomainTweakBatchGenerationResult(
+        target_count=1,
+        selected_questions=(failed, replacement),
+        finalized_tasks=(_finalized_task(replacement, 2),),
+        rejected_attempts=(),
+        failed_finalizations=(_failed_finalization(failed),),
+        underfilled=False,
+    )
+
+    tasks = finalized_tasks_from_domain_tweak_result(result, target_count=1)
+
+    assert [task.query.text for task in tasks] == ["Question 2?"]
+
+
 def test_finalized_tasks_from_domain_tweak_result_raises_for_underfill() -> None:
     reviewed = (_reviewed_question(1),)
     result = DomainTweakBatchGenerationResult(
@@ -152,10 +173,10 @@ def test_finalized_tasks_from_domain_tweak_result_raises_for_failed_finalization
     result = DomainTweakBatchGenerationResult(
         target_count=1,
         selected_questions=reviewed,
-        finalized_tasks=(_finalized_task(reviewed[0], 1),),
+        finalized_tasks=(),
         rejected_attempts=(),
         failed_finalizations=(_failed_finalization(reviewed[0]),),
-        underfilled=False,
+        underfilled=True,
     )
 
     with pytest.raises(RuntimeError, match="reference-answer finalization failed"):
