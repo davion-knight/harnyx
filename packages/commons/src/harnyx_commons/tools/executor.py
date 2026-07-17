@@ -340,7 +340,10 @@ class ToolExecutor:
         settled_cost_usd = _settled_success_cost(
             request.tool,
             actual_cost_usd=invocation_output.actual_cost_usd,
+            actual_cost_provider=invocation_output.actual_cost_provider,
+            actual_cost_evidence=invocation_output.actual_cost_evidence,
         )
+        cost_unavailable = settled_cost_usd is None and request.tool in _PROVIDER_BACKED_TOOL_NAMES
         receipt = started_call.materialize(
             outcome=ToolCallOutcome.OK,
             response_payload=invocation_output.public_payload,
@@ -349,6 +352,11 @@ class ToolExecutor:
             cost_usd=settled_cost_usd,
             actual_cost_usd=settled_cost_usd,
             actual_cost_provider=invocation_output.actual_cost_provider,
+            extra=(
+                {"actual_cost_settlement_source": "unavailable"}
+                if cost_unavailable
+                else None
+            ),
             execution=_merge_execution_facts(
                 invocation_output.execution,
                 started_at=started_at,
@@ -389,6 +397,7 @@ class ToolExecutor:
                 response_payload=result.response_payload,
                 usage=asdict(result.usage_details) if result.usage_details else None,
                 cost_usd=result.receipt.details.cost_usd,
+                actual_cost_evidence=invocation_output.actual_cost_evidence,
                 budget=asdict(result.budget),
                 elapsed_ms=_elapsed_ms_from_receipt(result.receipt),
                 error=None,
@@ -540,10 +549,23 @@ def _normalize_invocation_output(value: object) -> ToolInvocationOutput:
     return ToolInvocationOutput(public_payload=public_payload)
 
 
-def _settled_success_cost(tool_name: ToolName, *, actual_cost_usd: float | None) -> float | None:
+def _settled_success_cost(
+    tool_name: ToolName,
+    *,
+    actual_cost_usd: float | None,
+    actual_cost_provider: str | None,
+    actual_cost_evidence: JsonObject | None,
+) -> float | None:
     if tool_name not in _PROVIDER_BACKED_TOOL_NAMES:
         return None
     if actual_cost_usd is None:
+        if (
+            tool_name == "embed_text"
+            and actual_cost_provider == "openrouter"
+            and actual_cost_evidence is not None
+            and actual_cost_evidence.get("settlement_source") == "unavailable"
+        ):
+            return None
         raise ValueError(f"{tool_name} succeeded without actual_cost_usd")
     if isinstance(actual_cost_usd, bool) or not isinstance(actual_cost_usd, int | float):
         raise ValueError("actual_cost_usd must be numeric")
@@ -888,6 +910,7 @@ def _tool_call_debug_data(
     response_payload: JsonValue | None,
     usage: JsonValue | None,
     cost_usd: float | None,
+    actual_cost_evidence: JsonValue | None = None,
     budget: JsonValue | None,
     elapsed_ms: float | None,
     error: JsonValue | None,
@@ -903,6 +926,7 @@ def _tool_call_debug_data(
         "response": _normalize_payload(response_payload),
         "usage": usage,
         "cost_usd": cost_usd,
+        "actual_cost_evidence": actual_cost_evidence,
         "budget": budget,
         "elapsed_ms": elapsed_ms,
         "error": error,

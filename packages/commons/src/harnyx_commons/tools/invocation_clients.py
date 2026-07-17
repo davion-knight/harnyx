@@ -13,6 +13,7 @@ from harnyx_commons.clients import DESEARCH, PARALLEL
 from harnyx_commons.config.bedrock import BedrockSettings
 from harnyx_commons.config.llm import LlmSettings, SearchProviderName, parse_search_provider_name
 from harnyx_commons.config.vertex import VertexSettings
+from harnyx_commons.llm.cost_settlement import normalized_provider_cost
 from harnyx_commons.llm.pricing import MINER_TOOL_EMBEDDING_PRICING, price_embedding
 from harnyx_commons.llm.provider import LlmProviderPort
 from harnyx_commons.llm.provider_factory import (
@@ -476,18 +477,26 @@ class OpenRouterEmbeddingProvider(EmbeddingProviderPort):
         if len(provider_response.vectors) != len(request.texts):
             raise RuntimeError("embedding response count does not match request text count")
 
-        if provider_response.usage is None:
-            raise RuntimeError("embedding provider response is missing usage tokens for cost settlement")
-        usage = EmbeddingUsage(
-            prompt_tokens=provider_response.usage.prompt_tokens,
-            total_tokens=provider_response.usage.total_tokens,
+        provider_usage = provider_response.usage
+        usage = (
+            None
+            if provider_usage is None
+            else EmbeddingUsage(
+                prompt_tokens=provider_usage.prompt_tokens,
+                total_tokens=provider_usage.total_tokens,
+            )
         )
-        input_tokens = usage.prompt_tokens if usage.prompt_tokens is not None else usage.total_tokens
-        if input_tokens is None:
-            raise RuntimeError("embedding provider response is missing usage tokens for cost settlement")
-
-        cost_usd = price_embedding(request.provider, request.model, input_tokens=input_tokens)
-        pricing = MINER_TOOL_EMBEDDING_PRICING[request.provider][request.model]
+        input_tokens = (
+            None
+            if usage is None
+            else usage.prompt_tokens if usage.prompt_tokens is not None else usage.total_tokens
+        )
+        provider_cost_value = None if provider_usage is None else provider_usage.cost
+        provider_cost = normalized_provider_cost(
+            provider_cost_value,
+            field_name="OpenRouter embedding usage.cost",
+            strict=False,
+        )
         response = EmbedTextResponse(
             provider=request.provider,
             model=request.model,
@@ -499,16 +508,53 @@ class OpenRouterEmbeddingProvider(EmbeddingProviderPort):
             dimensions=len(provider_response.vectors[0]),
             usage=usage,
         )
-        evidence = {
-            "settlement_source": "static_pricing",
-            "pricing_origin": "miner_tool_embedding_pricing",
+        routing_evidence = {
+            key: value
+            for key, value in {
+                "upstream_model": provider_response.model,
+                "provider_request_id": provider_response.id,
+            }.items()
+            if value is not None
+        }
+        if provider_cost is not None:
+            cost_usd = provider_cost
+            evidence = {
+                "settlement_source": "provider_returned",
+                "pricing_origin": "openrouter_embedding_usage_cost",
+                **routing_evidence,
+            }
+            if provider_usage is not None and provider_usage.cost_details is not None:
+                evidence["provider_cost_details"] = provider_usage.cost_details
+        elif input_tokens is not None:
+            cost_usd = price_embedding(request.provider, request.model, input_tokens=input_tokens)
+            pricing = MINER_TOOL_EMBEDDING_PRICING[request.provider][request.model]
+            evidence = {
+                "settlement_source": "static_pricing",
+                "pricing_origin": "miner_tool_embedding_pricing",
+                "provider_cost_status": (
+                    "missing" if provider_cost_value is None else "malformed"
+                ),
+                "input_tokens": input_tokens,
+                "input_per_million": pricing.input_per_million,
+                **routing_evidence,
+            }
+        else:
+            cost_usd = None
+            evidence = {
+                "settlement_source": "unavailable",
+                "pricing_origin": "unavailable",
+                "provider_cost_status": (
+                    "missing" if provider_cost_value is None else "malformed"
+                ),
+                "usage_status": "missing" if provider_usage is None else "tokens_missing",
+                **routing_evidence,
+            }
+        evidence.update({
             "provider": request.provider,
             "model": request.model,
             "input_type": request.input_type,
             "text_count": len(request.texts),
-            "input_tokens": input_tokens,
-            "input_per_million": pricing.input_per_million,
-        }
+        })
         return EmbeddingProviderResult(
             response=response,
             actual_cost_usd=cost_usd,

@@ -48,6 +48,7 @@ def search_output(payload: dict[str, object], *, cost_usd: float = TEST_SEARCH_C
         public_payload=payload,
         actual_cost_usd=cost_usd,
         actual_cost_provider="parallel",
+        actual_cost_evidence={"settlement_source": "provider_returned"},
     )
 
 
@@ -729,6 +730,7 @@ async def test_execute_tool_debug_log_includes_full_request_response_payload(
         "search_queries": ["harnyx", "subnet"],
     }
     assert completed.data["budget"]["session_budget_usd"] == pytest.approx(session.budget_usd)
+    assert completed.data["actual_cost_evidence"] == {"settlement_source": "provider_returned"}
     assert completed.data["error"] is None
 
 
@@ -1250,6 +1252,92 @@ async def test_execute_tool_exhausts_budget_from_provider_actual_cost() -> None:
     assert stored.usage.total_cost_usd == pytest.approx(0.005)
     assert stored.usage.reference_total_cost_usd == pytest.approx(0.005)
     assert stored.usage.actual_total_cost_usd == pytest.approx(0.005)
+
+
+async def test_execute_tool_returns_unknown_cost_embedding_and_allows_future_calls(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = make_session(budget_usd=0.1)
+    token = generate_token()
+
+    class EmbeddingInvoker(ToolInvoker):
+        async def invoke(
+            self,
+            tool_name: str,
+            *,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            context: ToolInvocationContext | None = None,
+        ) -> ToolInvocationOutput:
+            _ = args, kwargs, context
+            assert tool_name == "embed_text"
+            return ToolInvocationOutput(
+                public_payload={
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3-embedding-8b",
+                    "input_type": "query",
+                    "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                    "dimensions": 3,
+                },
+                actual_cost_usd=None,
+                actual_cost_provider="openrouter",
+                actual_cost_evidence={
+                    "settlement_source": "unavailable",
+                    "upstream_model": "Qwen/Qwen3-Embedding-8B",
+                    "provider_request_id": "gen-emb-unavailable",
+                },
+            )
+
+    executor, receipt_log, session_registry = build_executor_with_invoker(
+        session,
+        token=token,
+        invoker=EmbeddingInvoker(),
+    )
+    request = ToolInvocationRequest(
+        session_id=session.session_id,
+        token=token,
+        tool="embed_text",
+        kwargs={
+            "provider": "openrouter",
+            "model": "qwen/qwen3-embedding-8b",
+            "texts": ["What is Harnyx?"],
+            "input_type": "query",
+        },
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=tool_executor_module.tool_logger.name):
+        result = await executor.execute(request)
+
+    assert result.response_payload["data"] == [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]
+    assert result.receipt.details.cost_usd is None
+    assert result.receipt.details.actual_cost_usd is None
+    assert result.receipt.details.actual_cost_provider == "openrouter"
+    assert result.receipt.details.extra is not None
+    assert result.receipt.details.extra["actual_cost_settlement_source"] == "unavailable"
+    stored = session_registry.get(session.session_id)
+    assert stored is not None
+    assert stored.status is SessionStatus.ACTIVE
+    assert stored.usage.total_cost_usd == 0.0
+    assert stored.usage.actual_total_cost_usd is None
+    assert len(receipt_log.for_session(session.session_id)) == 1
+    completed = require_log_record(caplog, "miner_tool_call.completed")
+    assert completed.data["actual_cost_evidence"] == {
+        "settlement_source": "unavailable",
+        "upstream_model": "Qwen/Qwen3-Embedding-8B",
+        "provider_request_id": "gen-emb-unavailable",
+    }
+    assert "upstream_model" not in result.response_payload
+    assert "provider_request_id" not in result.response_payload
+
+    second_result = await executor.execute(request)
+
+    assert second_result.response_payload["data"] == [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]
+    assert second_result.receipt.details.actual_cost_usd is None
+    assert len(receipt_log.for_session(session.session_id)) == 2
+    stored = session_registry.get(session.session_id)
+    assert stored is not None
+    assert stored.status is SessionStatus.ACTIVE
+    assert stored.usage.actual_total_cost_usd is None
 
 
 async def test_execute_tool_rejects_expired_session() -> None:

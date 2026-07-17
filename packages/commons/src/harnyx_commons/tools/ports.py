@@ -45,7 +45,7 @@ class WebSearchProviderPort(Protocol):
 @dataclass(frozen=True, slots=True)
 class EmbeddingProviderResult:
     response: EmbedTextResponse
-    actual_cost_usd: float
+    actual_cost_usd: float | None
     actual_cost_provider: str
     actual_cost_evidence: JsonObject
 

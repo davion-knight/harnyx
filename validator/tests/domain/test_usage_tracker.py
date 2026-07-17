@@ -228,6 +228,22 @@ def test_usage_tracker_rejects_calls_when_session_inactive() -> None:
         tracker.record_tool_call(session, tool_name="search_web", llm_tokens=10, cost_usd=0.01)
 
 
+def test_usage_tracker_keeps_actual_total_unavailable_after_unknown_provider_cost() -> None:
+    tracker = UsageTracker()
+    session = make_session(budget_usd=0.1)
+
+    updated = tracker.record_tool_call(
+        session,
+        tool_name="embed_text",
+        llm_tokens=0,
+        actual_cost_provider="openrouter",
+    )
+
+    assert updated.usage.total_cost_usd == 0.0
+    assert updated.usage.actual_total_cost_usd is None
+    assert updated.usage.actual_cost_by_provider == {}
+
+
 def test_usage_tracker_allows_usage_past_soft_budget_when_hard_limit_is_higher() -> None:
     tracker = UsageTracker()
     session = make_session(budget_usd=0.5, hard_limit_usd=1.0)

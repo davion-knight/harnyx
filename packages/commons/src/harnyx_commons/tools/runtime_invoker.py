@@ -491,7 +491,7 @@ class RuntimeToolInvoker(ToolInvoker):
             response.actual_cost_evidence,
         )
         try:
-            _require_actual_cost(actual_cost, tool_name="embed_text")
+            _require_embedding_cost(actual_cost, request=request)
         except ValueError as exc:
             raise ToolProviderError("tool provider failed") from exc
         return ToolInvocationOutput(
@@ -844,6 +844,19 @@ def _require_actual_cost(actual_cost: _ActualCost, *, tool_name: str) -> None:
         raise ValueError(f"{tool_name} provider-backed success actual_cost_usd must be non-negative")
     if actual_cost.provider is None:
         raise ValueError(f"{tool_name} provider-backed success missing actual_cost_provider")
+
+
+def _require_embedding_cost(actual_cost: _ActualCost, *, request: EmbedTextRequest) -> None:
+    if actual_cost.cost_usd is not None:
+        _require_actual_cost(actual_cost, tool_name="embed_text")
+        return
+    if (
+        request.provider != "openrouter"
+        or actual_cost.provider != "openrouter"
+        or actual_cost.evidence is None
+        or actual_cost.evidence.get("settlement_source") != "unavailable"
+    ):
+        raise ValueError("embed_text provider-backed success missing actual_cost_usd")
 
 
 def _require_settled_llm_cost(response: LlmResponse) -> _ActualCost:

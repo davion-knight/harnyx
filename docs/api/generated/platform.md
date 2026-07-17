@@ -373,7 +373,7 @@ Body: [MinerTaskBatchModel](#model-minertaskbatchmodel)
 | `tasks` |  |  | req | array[[MinerTask](#model-minertask)] |
 |  | `budget_usd` |  | opt | `number` (default: 0.5) |
 |  | `query` |  | req | [Query](#model-query) |
-|  |  | `output_schema` | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  |  | `output_schema` | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  |  | `text` | req | `string` |
 |  | `reference_answer` |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -2779,8 +2779,8 @@ Body: [WeightsResponse](#model-weightsresponse)
 
 </details>
 
-<a id="model-jsonobject"></a>
-### Model: JsonObject
+<a id="model-jsonobject-input"></a>
+### Model: JsonObject-Input
 
 (no documented fields)
 
@@ -3381,7 +3381,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | --- | --- | --- | --- | --- |
 | `budget_usd` |  |  | opt | `number` (default: 0.5) |
 | `query` |  |  | req | [Query](#model-query) |
-|  | `output_schema` |  | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  | `output_schema` |  | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  | `text` |  | req | `string` |
 | `reference_answer` |  |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  | `citations` |  | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -3943,7 +3943,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `tasks` |  |  | req | array[[MinerTask](#model-minertask)] |
 |  | `budget_usd` |  | opt | `number` (default: 0.5) |
 |  | `query` |  | req | [Query](#model-query) |
-|  |  | `output_schema` | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  |  | `output_schema` | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  |  | `text` | req | `string` |
 |  | `reference_answer` |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -4088,7 +4088,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | --- | --- | --- | --- | --- |
 | `budget_usd` |  |  | opt | `number` (default: 0.5) |
 | `query` |  |  | req | [Query](#model-query) |
-|  | `output_schema` |  | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  | `output_schema` |  | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  | `text` |  | req | `string` |
 | `reference_answer` |  |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  | `citations` |  | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -4474,7 +4474,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `task` |  |  | req | [MinerTask](#model-minertask) |
 |  | `budget_usd` |  | opt | `number` (default: 0.5) |
 |  | `query` |  | req | [Query](#model-query) |
-|  |  | `output_schema` | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  |  | `output_schema` | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  |  | `text` | req | `string` |
 |  | `reference_answer` |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -5329,7 +5329,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `task` |  |  | req | [MinerTask](#model-minertask) |
 |  | `budget_usd` |  | opt | `number` (default: 0.5) |
 |  | `query` |  | req | [Query](#model-query) |
-|  |  | `output_schema` | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  |  | `output_schema` | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  |  | `text` | req | `string` |
 |  | `reference_answer` |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -5759,7 +5759,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 | `tasks` |  |  | req | array[[MinerTaskInputModel](#model-minertaskinputmodel)] |
 |  | `budget_usd` |  | opt | `number` (default: 0.5) |
 |  | `query` |  | req | [Query](#model-query) |
-|  |  | `output_schema` | opt | [JsonObject](#model-jsonobject) (nullable) |
+|  |  | `output_schema` | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 |  |  | `text` | req | `string` |
 |  | `reference_answer` |  | req | [ReferenceAnswer](#model-referenceanswer) |
 |  |  | `citations` | opt | array[[AnswerCitation](#model-answercitation)] (nullable) |
@@ -5898,7 +5898,7 @@ Body: [WeightsResponse](#model-weightsresponse)
 
 | 1st level | 2nd level | 3rd level | Req | Notes |
 | --- | --- | --- | --- | --- |
-| `output_schema` |  |  | opt | [JsonObject](#model-jsonobject) (nullable) |
+| `output_schema` |  |  | opt | [JsonObject-Input](#model-jsonobject-input) (nullable) |
 | `text` |  |  | req | `string` |
 
 <details>
@@ -5911,7 +5911,7 @@ Body: [WeightsResponse](#model-weightsresponse)
     "output_schema": {
       "anyOf": [
         {
-          "$ref": "#/components/schemas/JsonObject"
+          "$ref": "#/components/schemas/JsonObject-Input"
         },
         {
           "type": "null"

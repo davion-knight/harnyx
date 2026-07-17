@@ -182,6 +182,8 @@ def accumulate_actual_costs(
         usage=usage,
     )
     if resolved_cost is None:
+        if actual_cost_provider is not None:
+            return None, dict(actual_cost_by_provider)
         return actual_total_cost_usd, dict(actual_cost_by_provider)
 
     provider = resolve_provider(

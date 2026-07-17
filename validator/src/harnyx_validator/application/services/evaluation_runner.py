@@ -2928,6 +2928,7 @@ def _usage_from_receipts(receipts: tuple[ToolCall, ...]) -> SessionUsage:
             cost_by_provider[provider] = cost_by_provider.get(provider, 0.0) + session_cost
         actual_total_cost_usd = _accumulate_receipt_actual_cost(
             actual_total_cost_usd,
+            receipt=receipt,
             cost_usd=session_cost,
         )
         if session_cost is not None:
@@ -3053,9 +3054,16 @@ def _receipt_session_cost(receipt: ToolCall) -> float | None:
 def _accumulate_receipt_actual_cost(
     current: float | None,
     *,
+    receipt: ToolCall,
     cost_usd: float | None,
 ) -> float | None:
     if cost_usd is None:
+        if (
+            receipt.is_successful()
+            and receipt.details.extra is not None
+            and receipt.details.extra.get("actual_cost_settlement_source") == "unavailable"
+        ):
+            return None
         return current
     if current is None:
         return None

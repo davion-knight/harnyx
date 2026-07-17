@@ -652,6 +652,13 @@ class AsyncPlatformToolProxyPlatformClient(PlatformToolProxyPlatformPort):
                 error_code="platform_error",
                 message=str(exc),
             ) from exc
+        actual_cost_evidence = payload.get("actual_cost_evidence")
+        if actual_cost_evidence is not None and not isinstance(actual_cost_evidence, dict):
+            raise PlatformToolProxyInvocationError(
+                status_code=response.status_code,
+                error_code="platform_error",
+                message="platform tool proxy actual_cost_evidence must be an object",
+            )
         return PlatformToolProxyToolResult(
             response=cast(JsonObject, response_payload),
             execution=execution,
@@ -659,6 +666,7 @@ class AsyncPlatformToolProxyPlatformClient(PlatformToolProxyPlatformPort):
             actual_cost_provider=(
                 str(payload["actual_cost_provider"]) if payload.get("actual_cost_provider") is not None else None
             ),
+            actual_cost_evidence=cast(JsonObject, actual_cost_evidence),
         )
 
 

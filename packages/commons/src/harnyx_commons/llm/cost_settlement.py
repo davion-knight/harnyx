@@ -37,12 +37,12 @@ def with_settled_llm_cost(response: LlmResponse, cost: SettledLlmCost) -> LlmRes
 
 def settled_cost_from_metadata(metadata: Mapping[str, object]) -> SettledLlmCost | None:
     single_response_cost = (
-        _normalized_cost(metadata["actual_cost_usd"], field_name="actual_cost_usd")
+        normalized_provider_cost(metadata["actual_cost_usd"], field_name="actual_cost_usd")
         if "actual_cost_usd" in metadata
         else None
     )
     total_cost = (
-        _normalized_cost(metadata["actual_cost_usd_total"], field_name="actual_cost_usd_total")
+        normalized_provider_cost(metadata["actual_cost_usd_total"], field_name="actual_cost_usd_total")
         if "actual_cost_usd_total" in metadata
         else None
     )
@@ -158,7 +158,11 @@ def _openrouter_provider_returned_cost(
     if not isinstance(usage, Mapping):
         return None
     usage_mapping = cast(Mapping[str, object], usage)
-    cost_usd = _normalized_cost(usage_mapping.get("cost"), field_name="OpenRouter usage.cost", strict=False)
+    cost_usd = normalized_provider_cost(
+        usage_mapping.get("cost"),
+        field_name="OpenRouter usage.cost",
+        strict=False,
+    )
     if cost_usd is None:
         return None
     return SettledLlmCost(
@@ -212,7 +216,7 @@ def _has_miner_static_pricing(*, provider: str, model: str) -> bool:
     return model in pricing_by_model
 
 
-def _normalized_cost(
+def normalized_provider_cost(
     value: object,
     *,
     field_name: str,
@@ -260,6 +264,7 @@ def _normalized_ai_gateway_cost(value: object) -> float | None:
 
 __all__ = [
     "SettledLlmCost",
+    "normalized_provider_cost",
     "settled_cost_from_metadata",
     "settled_response_cost",
     "settled_static_llm_cost",

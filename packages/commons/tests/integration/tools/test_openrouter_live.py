@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from harnyx_commons.config.llm import LlmSettings
@@ -39,7 +41,11 @@ def _openrouter_request(*, model: str) -> LlmRequest:
         messages=(
             LlmMessage(
                 role="user",
-                content=(LlmMessageContentPart.input_text('Reply with only "ok".'),),
+                content=(
+                    LlmMessageContentPart.input_text(
+                        f'Reply with only "ok". Request nonce: {uuid4().hex}.'
+                    ),
+                ),
             ),
         ),
         temperature=0.0,
@@ -101,6 +107,9 @@ async def test_openrouter_provider_invokes_cheapest_chat_model_live() -> None:
     assert response.metadata is not None
     assert response.metadata["effective_provider"] == "openrouter"
     assert response.metadata["effective_model"] == model
+    assert response.metadata["actual_cost_evidence"]["upstream_provider"]
+    assert response.metadata["actual_cost_evidence"]["upstream_model"]
+    assert response.metadata["actual_cost_evidence"]["provider_request_id"] == response.id
     assert response.usage.reasoning_tokens is not None
     assert response.usage.reasoning_tokens > 0
 
@@ -170,6 +179,12 @@ async def test_openrouter_embedding_client_invokes_qwen3_8b_live() -> None:
     assert response.usage is not None
     assert response.usage.prompt_tokens is not None
     assert response.usage.prompt_tokens > 0
+    assert response.model
+    if response.usage.cost is not None:
+        assert isinstance(response.usage.cost, int | float)
+        assert response.usage.cost >= 0.0
+    if response.id is not None:
+        assert response.id
 
 
 async def test_openrouter_two_turn_function_tool_loop_with_reasoning_replay_live() -> None:

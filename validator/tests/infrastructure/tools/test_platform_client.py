@@ -1219,6 +1219,51 @@ async def test_platform_tool_proxy_grant_invalid_success_response_preserves_gran
 
 
 @pytest.mark.anyio("asyncio")
+async def test_platform_tool_proxy_execute_preserves_actual_cost_evidence() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/platform-tool-proxy/tools/execute":
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "response": {"text": "answer"},
+                    "execution": {"elapsed_ms": 12.0},
+                    "actual_cost_usd": 0.0042,
+                    "actual_cost_provider": "openrouter",
+                    "actual_cost_evidence": {
+                        "settlement_source": "provider_returned",
+                        "upstream_provider": "Nebius",
+                    },
+                },
+            )
+        return httpx.Response(status_code=404)
+
+    client = AsyncPlatformToolProxyPlatformClient(
+        base_url="https://mock.local",
+        hotkey=_keypair(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = await client.execute_platform_tool_proxy_tool(
+        token="proxy-token",  # noqa: S106 - fixed test-only proxy token
+        uid=7,
+        artifact_id=uuid4(),
+        task_id=uuid4(),
+        validator_session_id=uuid4(),
+        attempt_number=1,
+        receipt_id=str(uuid4()),
+        tool="llm_chat",
+        args=(),
+        kwargs={"provider": "openrouter", "model": "openai/gpt-oss-20b", "messages": []},
+        transport_timeout_seconds=11.0,
+    )
+
+    assert result.actual_cost_evidence == {
+        "settlement_source": "provider_returned",
+        "upstream_provider": "Nebius",
+    }
+
+
+@pytest.mark.anyio("asyncio")
 async def test_platform_tool_proxy_execute_maps_tool_timeout_error_code_to_timeout_exception() -> None:
     requests: list[httpx.Request] = []
 

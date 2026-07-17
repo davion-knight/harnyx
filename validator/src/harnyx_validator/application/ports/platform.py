@@ -131,6 +131,7 @@ class PlatformToolProxyToolResult:
     execution: ToolExecutionFacts | None = None
     actual_cost_usd: float | None = None
     actual_cost_provider: str | None = None
+    actual_cost_evidence: JsonObject | None = None
 
 
 @dataclass(frozen=True)

@@ -128,6 +128,7 @@ async def test_openrouter_embedding_provider_posts_native_model_and_settles_stat
             captured["texts"] = texts
             return OpenRouterEmbeddingResponse(
                 vectors=((0.7, 0.8, 0.9),),
+                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
                 usage=OpenRouterEmbeddingUsage(prompt_tokens=12, total_tokens=12),
             )
 
@@ -150,6 +151,81 @@ async def test_openrouter_embedding_provider_posts_native_model_and_settles_stat
     assert result.actual_cost_provider == "openrouter"
     assert result.actual_cost_evidence["input_tokens"] == 12
     assert result.actual_cost_evidence["input_per_million"] == pytest.approx(0.01)
+    assert result.actual_cost_evidence["provider_cost_status"] == "missing"
+
+
+async def test_openrouter_embedding_provider_prefers_provider_returned_cost_and_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeClient:
+        async def embed_many(self, texts: tuple[str, ...]) -> OpenRouterEmbeddingResponse:
+            _ = texts
+            return OpenRouterEmbeddingResponse(
+                vectors=((0.7, 0.8, 0.9),),
+                usage=OpenRouterEmbeddingUsage(
+                    prompt_tokens=12,
+                    total_tokens=12,
+                    cost=0.0042,
+                    cost_details={"upstream_inference_cost": 0.004},
+                ),
+                id="gen-emb-1",
+                model="Qwen/Qwen3-Embedding-8B",
+            )
+
+    provider = OpenRouterEmbeddingProvider(api_key="test-key", timeout_seconds=1.0)
+    monkeypatch.setattr(provider, "_client_for", lambda **_: _FakeClient())
+
+    result = await provider.embed_text(
+        EmbedTextRequest(
+            provider="openrouter",
+            model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            texts=("find subnet incentives",),
+            input_type="query",
+        )
+    )
+
+    assert result.actual_cost_usd == pytest.approx(0.0042)
+    assert result.actual_cost_provider == "openrouter"
+    assert result.actual_cost_evidence == {
+        "settlement_source": "provider_returned",
+        "pricing_origin": "openrouter_embedding_usage_cost",
+        "provider_cost_details": {"upstream_inference_cost": 0.004},
+        "upstream_model": "Qwen/Qwen3-Embedding-8B",
+        "provider_request_id": "gen-emb-1",
+        "provider": "openrouter",
+        "model": QWEN3_OPENROUTER_EMBEDDING_MODEL,
+        "input_type": "query",
+        "text_count": 1,
+    }
+
+
+async def test_openrouter_embedding_provider_falls_back_for_malformed_provider_cost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeClient:
+        async def embed_many(self, texts: tuple[str, ...]) -> OpenRouterEmbeddingResponse:
+            _ = texts
+            return OpenRouterEmbeddingResponse(
+                vectors=((0.7, 0.8, 0.9),),
+                model="Qwen/Qwen3-Embedding-8B",
+                usage=OpenRouterEmbeddingUsage(prompt_tokens=12, total_tokens=12, cost="invalid"),
+            )
+
+    provider = OpenRouterEmbeddingProvider(api_key="test-key", timeout_seconds=1.0)
+    monkeypatch.setattr(provider, "_client_for", lambda **_: _FakeClient())
+
+    result = await provider.embed_text(
+        EmbedTextRequest(
+            provider="openrouter",
+            model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            texts=("find subnet incentives",),
+            input_type="query",
+        )
+    )
+
+    assert result.actual_cost_evidence["settlement_source"] == "static_pricing"
+    assert result.actual_cost_evidence["provider_cost_status"] == "malformed"
+    assert result.actual_cost_evidence["upstream_model"] == "Qwen/Qwen3-Embedding-8B"
 
 
 async def test_openrouter_embedding_provider_forwards_provider_extra(
@@ -168,6 +244,7 @@ async def test_openrouter_embedding_provider_forwards_provider_extra(
             captured["extra"] = extra
             return OpenRouterEmbeddingResponse(
                 vectors=((0.7, 0.8, 0.9),),
+                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
                 usage=OpenRouterEmbeddingUsage(prompt_tokens=12, total_tokens=12),
             )
 
@@ -200,6 +277,7 @@ async def test_openrouter_embedding_provider_settles_zero_token_cache_hit(
             _ = texts
             return OpenRouterEmbeddingResponse(
                 vectors=((0.7, 0.8, 0.9),),
+                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
                 usage=OpenRouterEmbeddingUsage(prompt_tokens=0, total_tokens=0),
             )
 
@@ -223,23 +301,105 @@ async def test_openrouter_embedding_provider_settles_zero_token_cache_hit(
     assert result.response.usage.total_tokens == 0
 
 
-async def test_openrouter_embedding_provider_rejects_missing_usage_tokens(
+async def test_openrouter_embedding_provider_returns_vectors_when_usage_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeClient:
         async def embed_many(self, texts: tuple[str, ...]) -> OpenRouterEmbeddingResponse:
             _ = texts
-            return OpenRouterEmbeddingResponse(vectors=((0.7, 0.8, 0.9),))
+            return OpenRouterEmbeddingResponse(
+                vectors=((0.7, 0.8, 0.9),),
+                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+                id="gen-emb-unavailable",
+            )
 
     provider = OpenRouterEmbeddingProvider(api_key="test-key", timeout_seconds=1.0)
     monkeypatch.setattr(provider, "_client_for", lambda **_: _FakeClient())
 
-    with pytest.raises(RuntimeError, match="missing usage tokens"):
-        await provider.embed_text(
-            EmbedTextRequest(
-                provider="openrouter",
-                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
-                texts=("find subnet incentives",),
-                input_type="query",
-            )
+    result = await provider.embed_text(
+        EmbedTextRequest(
+            provider="openrouter",
+            model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            texts=("find subnet incentives",),
+            input_type="query",
         )
+    )
+
+    assert result.response.data[0].embedding == [0.7, 0.8, 0.9]
+    assert result.response.usage is None
+    assert result.actual_cost_usd is None
+    assert result.actual_cost_provider == "openrouter"
+    assert result.actual_cost_evidence == {
+        "settlement_source": "unavailable",
+        "pricing_origin": "unavailable",
+        "provider_cost_status": "missing",
+        "usage_status": "missing",
+        "upstream_model": QWEN3_OPENROUTER_EMBEDDING_MODEL,
+        "provider_request_id": "gen-emb-unavailable",
+        "provider": "openrouter",
+        "model": QWEN3_OPENROUTER_EMBEDDING_MODEL,
+        "input_type": "query",
+        "text_count": 1,
+    }
+
+
+async def test_openrouter_embedding_provider_uses_provider_cost_without_usage_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeClient:
+        async def embed_many(self, texts: tuple[str, ...]) -> OpenRouterEmbeddingResponse:
+            _ = texts
+            return OpenRouterEmbeddingResponse(
+                vectors=((0.7, 0.8, 0.9),),
+                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+                usage=OpenRouterEmbeddingUsage(cost=0.0042),
+            )
+
+    provider = OpenRouterEmbeddingProvider(api_key="test-key", timeout_seconds=1.0)
+    monkeypatch.setattr(provider, "_client_for", lambda **_: _FakeClient())
+
+    result = await provider.embed_text(
+        EmbedTextRequest(
+            provider="openrouter",
+            model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            texts=("find subnet incentives",),
+            input_type="query",
+        )
+    )
+
+    assert result.actual_cost_usd == pytest.approx(0.0042)
+    assert result.actual_cost_evidence["settlement_source"] == "provider_returned"
+
+
+@pytest.mark.parametrize("provider_cost", [None, "invalid"])
+async def test_openrouter_embedding_provider_marks_cost_unavailable_without_usable_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_cost: float | str | None,
+) -> None:
+    class _FakeClient:
+        async def embed_many(self, texts: tuple[str, ...]) -> OpenRouterEmbeddingResponse:
+            _ = texts
+            return OpenRouterEmbeddingResponse(
+                vectors=((0.7, 0.8, 0.9),),
+                model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+                usage=OpenRouterEmbeddingUsage(cost=provider_cost),
+            )
+
+    provider = OpenRouterEmbeddingProvider(api_key="test-key", timeout_seconds=1.0)
+    monkeypatch.setattr(provider, "_client_for", lambda **_: _FakeClient())
+
+    result = await provider.embed_text(
+        EmbedTextRequest(
+            provider="openrouter",
+            model=QWEN3_OPENROUTER_EMBEDDING_MODEL,
+            texts=("find subnet incentives",),
+            input_type="query",
+        )
+    )
+
+    assert result.actual_cost_usd is None
+    assert result.actual_cost_evidence["settlement_source"] == "unavailable"
+    assert result.actual_cost_evidence["usage_status"] == "tokens_missing"
+    assert result.actual_cost_evidence["provider_cost_status"] == (
+        "missing" if provider_cost is None else "malformed"
+    )

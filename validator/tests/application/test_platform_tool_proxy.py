@@ -114,6 +114,7 @@ class _RecordingPlatformToolProxyPlatform:
             execution=ToolExecutionFacts(),
             actual_cost_usd=0.25,
             actual_cost_provider="parallel",
+            actual_cost_evidence={"settlement_source": "provider_returned"},
         )
 
 
@@ -182,6 +183,7 @@ async def test_platform_tool_proxy_proxy_forwards_provider_tool_with_session_sco
     assert result.public_payload == {"data": [{"url": "https://example.com"}]}
     assert result.actual_cost_usd == 0.25
     assert result.actual_cost_provider == "parallel"
+    assert result.actual_cost_evidence == {"settlement_source": "provider_returned"}
     scope = scopes.require_session(session_id)
     assert scope.grants_by_attempt[2].token == f"{_GRANT_VALUE}-2"
 

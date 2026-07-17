@@ -212,6 +212,7 @@ class PlatformToolProxyProxyToolInvoker(ToolInvoker):
             execution=result.execution,
             actual_cost_usd=result.actual_cost_usd,
             actual_cost_provider=result.actual_cost_provider,
+            actual_cost_evidence=result.actual_cost_evidence,
         )
 
 

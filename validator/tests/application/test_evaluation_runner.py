@@ -2484,6 +2484,38 @@ def test_receipt_usage_uses_cost_usd_when_actual_cost_is_missing() -> None:
     assert usage.reference_cost_by_provider == {"chutes": pytest.approx(0.02)}
 
 
+def test_receipt_replay_keeps_explicitly_unavailable_actual_cost_unknown() -> None:
+    receipt = ToolCall(
+        receipt_id="unknown-openrouter-embedding-cost",
+        session_id=uuid4(),
+        uid=7,
+        tool="embed_text",
+        issued_at=datetime(2026, 5, 30, 12, tzinfo=UTC),
+        outcome=ToolCallOutcome.OK,
+        details=ToolCallDetails(
+            request_hash="unknown-openrouter-embedding-cost-req",
+            request_payload={
+                "kwargs": {
+                    "provider": "openrouter",
+                    "model": "qwen/qwen3-embedding-8b",
+                }
+            },
+            response_hash="unknown-openrouter-embedding-cost-res",
+            response_payload={"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]},
+            cost_usd=None,
+            actual_cost_usd=None,
+            actual_cost_provider="openrouter",
+            extra={"actual_cost_settlement_source": "unavailable"},
+        ),
+    )
+
+    usage = evaluation_runner_module._usage_from_receipts((receipt,))
+
+    assert usage.total_cost_usd == 0.0
+    assert usage.actual_total_cost_usd is None
+    assert usage.actual_cost_by_provider == {}
+
+
 def test_receipt_replay_records_zero_token_llm_usage_for_priced_receipt() -> None:
     model = "deepseek/deepseek-v3.2"
     receipt = ToolCall(

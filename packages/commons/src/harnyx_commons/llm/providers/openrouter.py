@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, cast
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from harnyx_commons.config.llm import OpenAiCompatibleEndpointConfig
+from harnyx_commons.json_types import JsonObject, JsonValue
 from harnyx_commons.llm.provider import LlmProviderConfigurationError, LlmProviderPort
 from harnyx_commons.llm.provider_types import OPENROUTER_PROVIDER
 from harnyx_commons.llm.providers.openai_compatible import OpenAiCompatibleLlmProvider
@@ -17,6 +19,7 @@ from harnyx_commons.llm.schema import AbstractLlmRequest, LlmResponse, LlmThinki
 
 OPENROUTER_ENDPOINT_ID = "openrouter"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+logger = logging.getLogger(__name__)
 OPENROUTER_NATIVE_SUPPORTED_MODELS = (
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
@@ -53,12 +56,16 @@ class _OpenRouterEmbeddingUsage(BaseModel):
 
     prompt_tokens: int | None = None
     total_tokens: int | None = None
+    cost: JsonValue | None = None
+    cost_details: JsonObject | None = None
 
 
 class _OpenRouterEmbeddingResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     data: list[_OpenRouterEmbeddingDatum] = Field(min_length=1)
+    model: str
+    id: str | None = None
     usage: _OpenRouterEmbeddingUsage | None = None
 
 
@@ -66,12 +73,16 @@ class _OpenRouterEmbeddingResponse(BaseModel):
 class OpenRouterEmbeddingUsage:
     prompt_tokens: int | None = None
     total_tokens: int | None = None
+    cost: JsonValue | None = None
+    cost_details: JsonObject | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class OpenRouterEmbeddingResponse:
     vectors: tuple[tuple[float, ...], ...]
+    model: str
     usage: OpenRouterEmbeddingUsage | None = None
+    id: str | None = None
 
 
 @dataclass(slots=True)
@@ -134,8 +145,15 @@ class OpenRouterEmbeddingClient:
             usage = OpenRouterEmbeddingUsage(
                 prompt_tokens=payload.usage.prompt_tokens,
                 total_tokens=payload.usage.total_tokens,
+                cost=payload.usage.cost,
+                cost_details=payload.usage.cost_details,
             )
-        return OpenRouterEmbeddingResponse(vectors=vectors, usage=usage)
+        return OpenRouterEmbeddingResponse(
+            vectors=vectors,
+            model=payload.model,
+            usage=usage,
+            id=payload.id,
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -184,6 +202,10 @@ class OpenRouterLlmProvider(LlmProviderPort):
         metadata = dict(response.metadata or {})
         metadata["effective_provider"] = OPENROUTER_PROVIDER
         metadata["effective_model"] = model
+        routing_evidence = _openrouter_routing_evidence(metadata.get("raw_response"))
+        cost_evidence = metadata.get("actual_cost_evidence")
+        if routing_evidence and isinstance(cost_evidence, Mapping):
+            metadata["actual_cost_evidence"] = {**cost_evidence, **routing_evidence}
         return replace(response, metadata=metadata)
 
     async def aclose(self) -> None:
@@ -233,7 +255,10 @@ def build_openrouter_chat_provider(api_key: str) -> tuple[OpenAiCompatibleLlmPro
         raise LlmProviderConfigurationError("OPENROUTER_API_KEY must be configured to build OpenRouter provider")
     client = httpx.AsyncClient(
         base_url=OPENROUTER_BASE_URL,
-        headers={"Authorization": f"Bearer {normalized_key}"},
+        headers={
+            "Authorization": f"Bearer {normalized_key}",
+            "X-OpenRouter-Metadata": "enabled",
+        },
     )
     endpoint = OpenAiCompatibleEndpointConfig.model_validate(
         {
@@ -242,7 +267,85 @@ def build_openrouter_chat_provider(api_key: str) -> tuple[OpenAiCompatibleLlmPro
             "auth": {"type": "none"},
         }
     )
-    return OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client), client
+    return OpenAiCompatibleLlmProvider(
+        endpoint=endpoint,
+        client=client,
+        response_metadata_extractor=_openrouter_response_metadata,
+    ), client
+
+
+class _OpenRouterEndpointMetadata(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    provider: str
+    model: str | None = None
+    selected: bool = False
+
+
+class _OpenRouterEndpointsMetadata(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    available: list[_OpenRouterEndpointMetadata] = Field(default_factory=list)
+
+
+class _OpenRouterRouterMetadata(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    endpoints: _OpenRouterEndpointsMetadata | None = None
+
+
+class _OpenRouterResponseIdentity(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    id: str | None = None
+
+
+def _openrouter_response_metadata(payload: Mapping[str, Any]) -> JsonObject | None:
+    metadata = payload.get("openrouter_metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    return {"openrouter_metadata": dict(metadata)}
+
+
+def _openrouter_routing_evidence(raw_response: object) -> JsonObject:
+    if not isinstance(raw_response, Mapping):
+        return {}
+    response_payload = cast(Mapping[str, object], raw_response)
+
+    try:
+        provider_request_id = _OpenRouterResponseIdentity.model_validate(response_payload).id
+    except ValidationError:
+        logger.warning("OpenRouter response identity is malformed")
+        provider_request_id = None
+
+    evidence: JsonObject = {}
+    if provider_request_id is not None:
+        evidence["provider_request_id"] = provider_request_id
+
+    raw_router_metadata = response_payload.get("openrouter_metadata")
+    if raw_router_metadata is None:
+        return evidence
+    try:
+        router_metadata = _OpenRouterRouterMetadata.model_validate(raw_router_metadata)
+    except ValidationError:
+        logger.warning(
+            "OpenRouter router metadata is malformed",
+            extra={"provider_request_id": provider_request_id},
+        )
+        return evidence
+
+    selected_endpoint = None
+    if router_metadata.endpoints is not None:
+        selected_endpoint = next(
+            (endpoint for endpoint in router_metadata.endpoints.available if endpoint.selected),
+            None,
+        )
+    if selected_endpoint is None:
+        return evidence
+    evidence["upstream_provider"] = selected_endpoint.provider
+    if selected_endpoint.model is not None:
+        evidence["upstream_model"] = selected_endpoint.model
+    return evidence
 
 
 def _merge_reasoning_extra(

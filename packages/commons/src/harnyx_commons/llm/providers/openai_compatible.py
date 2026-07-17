@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import id_token, service_account
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from harnyx_commons.config.llm import (
     OpenAiCompatibleBearerTokenEnvAuthConfig,
@@ -21,6 +21,7 @@ from harnyx_commons.config.llm import (
     OpenAiCompatibleGoogleIdTokenAuthConfig,
     OpenAiCompatibleNoAuthConfig,
 )
+from harnyx_commons.json_types import JsonObject
 from harnyx_commons.llm.adapter import canonical_model_for_provider_model
 from harnyx_commons.llm.cost_settlement import settled_response_cost, with_settled_llm_cost
 from harnyx_commons.llm.provider import BaseLlmProvider
@@ -31,7 +32,8 @@ from harnyx_commons.llm.providers.openai_stream import (
     OpenAiStreamError,
     OpenAiStreamState,
     OpenAiToolCall,
-    iter_openai_sse_events,
+    _OpenAiStreamEvent,
+    iter_openai_sse_payloads,
     normalize_openai_reasoning_fragments,
 )
 from harnyx_commons.llm.providers.thinking import resolve_template_thinking
@@ -45,6 +47,8 @@ from harnyx_commons.llm.schema import (
     LlmUsage,
 )
 
+OpenAiCompatibleResponseMetadataExtractor = Callable[[Mapping[str, Any]], JsonObject | None]
+
 
 class OpenAiCompatibleLlmProvider(BaseLlmProvider):
     def __init__(
@@ -52,6 +56,7 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
         *,
         endpoint: OpenAiCompatibleEndpointConfig,
         client: httpx.AsyncClient | None = None,
+        response_metadata_extractor: OpenAiCompatibleResponseMetadataExtractor | None = None,
     ) -> None:
         provider_label = custom_openai_compatible_target(endpoint.id)
         super().__init__(provider_label=provider_label, max_concurrent=endpoint.max_concurrent)
@@ -59,6 +64,7 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
         self._authenticator = _OpenAiCompatibleAuthenticator(endpoint.auth)
         self._chat_completions_url = f"{str(endpoint.base_url).rstrip('/')}/chat/completions"
         self._owns_client = client is None
+        self._response_metadata_extractor = response_metadata_extractor
         self._client = client or httpx.AsyncClient(
             base_url=str(endpoint.base_url).rstrip("/"),
             timeout=endpoint.timeout_seconds or 300.0,
@@ -112,7 +118,7 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
         body, ttft_ms = await self._stream_chat_completions(**request_kwargs)
         response = body.to_llm_response()
         metadata = dict(response.metadata or {})
-        metadata.setdefault("raw_response", body.model_dump(mode="python", exclude_none=True))
+        metadata.setdefault("raw_response", body.raw_payload())
         if ttft_ms is not None:
             metadata.setdefault("ttft_ms", ttft_ms)
         return LlmResponse(
@@ -129,16 +135,27 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
     ) -> tuple[_OpenAiCompatibleChatResponse, float | None]:
         started_at = time.perf_counter()
         state = OpenAiStreamState()
+        response_metadata: JsonObject | None = None
         ttft_ms: float | None = None
         async with self._client.stream("POST", self._chat_completions_url, **request_kwargs) as response:
             if response.is_error:
                 await response.aread()
             response.raise_for_status()
-            async for event in iter_openai_sse_events(
+            async for payload in iter_openai_sse_payloads(
                 response,
                 invalid_data_message="OpenAI-compatible chat completions returned non-JSON SSE data",
                 invalid_event_message="OpenAI-compatible chat completions SSE event must be a JSON object",
             ):
+                if self._response_metadata_extractor is not None:
+                    response_metadata = self._response_metadata_extractor(payload) or response_metadata
+                try:
+                    event = _OpenAiStreamEvent.model_validate(payload)
+                except ValidationError as exc:
+                    raise OpenAiStreamError(
+                        message="OpenAI-compatible chat completions SSE event must be a JSON object",
+                        error_type="server_error",
+                        code=502,
+                    ) from exc
                 if state.merge_event(
                     event,
                     reasoning_keys=("reasoning", "reasoning_content", "reasoning_details"),
@@ -146,7 +163,10 @@ class OpenAiCompatibleLlmProvider(BaseLlmProvider):
                 ):
                     if ttft_ms is None:
                         ttft_ms = round((time.perf_counter() - started_at) * 1000, 2)
-        return _OpenAiCompatibleChatResponse.from_stream_state(state), ttft_ms
+        return _OpenAiCompatibleChatResponse.from_stream_state(
+            state,
+            response_metadata=response_metadata,
+        ), ttft_ms
 
     @staticmethod
     def _verify_response(response: LlmResponse) -> tuple[bool, bool, str | None]:
@@ -321,15 +341,32 @@ class _OpenAiCompatibleChatResponse(BaseModel):
     id: str
     choices: list[_OpenAiCompatibleChoicePayload] = Field(default_factory=list)
     usage: _OpenAiCompatibleUsagePayload | None = None
+    response_metadata: JsonObject | None = None
 
     @classmethod
-    def from_stream_state(cls, state: OpenAiStreamState) -> _OpenAiCompatibleChatResponse:
+    def from_stream_state(
+        cls,
+        state: OpenAiStreamState,
+        *,
+        response_metadata: JsonObject | None,
+    ) -> _OpenAiCompatibleChatResponse:
         choices = [
             _OpenAiCompatibleChoicePayload.from_choice_state(index=index, state=choice_state)
             for index, choice_state in sorted(state.choices.items())
         ]
         usage = _OpenAiCompatibleUsagePayload.model_validate(state.usage) if state.usage is not None else None
-        return cls(id=state.response_id, choices=choices, usage=usage)
+        return cls(
+            id=state.response_id,
+            choices=choices,
+            usage=usage,
+            response_metadata=response_metadata,
+        )
+
+    def raw_payload(self) -> JsonObject:
+        payload = self.model_dump(mode="python", exclude_none=True, exclude={"response_metadata"})
+        if self.response_metadata is not None:
+            payload.update(self.response_metadata)
+        return payload
 
     def to_llm_response(self) -> LlmResponse:
         choices = tuple(choice.to_choice() for choice in self.choices)

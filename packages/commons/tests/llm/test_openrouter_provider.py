@@ -20,6 +20,8 @@ from harnyx_commons.llm.providers.openrouter import (
     OPENROUTER_SUPPORTED_MODELS,
     OpenRouterEmbeddingClient,
     OpenRouterLlmProvider,
+    _openrouter_response_metadata,
+    _openrouter_routing_evidence,
     build_openrouter_chat_provider,
 )
 from harnyx_commons.llm.retry_utils import RetryPolicy
@@ -43,12 +45,22 @@ OPENROUTER_TEST_MODELS = OPENROUTER_SUPPORTED_MODELS
 
 
 class _FakeOpenAiProvider:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        raw_response: dict[str, object] | None = None,
+        actual_cost_evidence: dict[str, object] | None = None,
+    ) -> None:
         self.requests: list[LlmRequest] = []
         self.closed = False
+        self.raw_response = raw_response if raw_response is not None else {"id": "resp-1"}
+        self.actual_cost_evidence = actual_cost_evidence
 
     async def invoke(self, request: LlmRequest) -> LlmResponse:
         self.requests.append(request)
+        metadata: dict[str, object] = {"raw_response": self.raw_response}
+        if self.actual_cost_evidence is not None:
+            metadata["actual_cost_evidence"] = self.actual_cost_evidence
         return LlmResponse(
             id="resp-1",
             choices=(
@@ -61,7 +73,7 @@ class _FakeOpenAiProvider:
                 ),
             ),
             usage=LlmUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-            metadata={"raw_response": {"id": "resp-1"}},
+            metadata=metadata,
         )
 
     async def aclose(self) -> None:
@@ -162,6 +174,71 @@ def test_build_openrouter_chat_provider_rejects_blank_key() -> None:
         build_openrouter_chat_provider(" ")
 
 
+async def test_build_openrouter_chat_provider_enables_router_metadata() -> None:
+    provider, client = build_openrouter_chat_provider("test-key")
+
+    assert client.headers["X-OpenRouter-Metadata"] == "enabled"
+
+    await provider.aclose()
+    await client.aclose()
+
+
+def test_openrouter_routing_evidence_requires_selected_endpoint_for_upstream_attribution() -> None:
+    evidence = _openrouter_routing_evidence(
+        {
+            "id": "resp-cached",
+            "provider": "OpenAI",
+            "model": "openai/gpt-oss-20b",
+        }
+    )
+
+    assert evidence == {
+        "provider_request_id": "resp-cached",
+    }
+
+
+async def test_openrouter_provider_keeps_success_when_router_metadata_is_malformed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_provider = _FakeOpenAiProvider(
+        raw_response={
+            "id": "resp-1",
+            "openrouter_metadata": {
+                "endpoints": {
+                    "available": [
+                        {
+                            "model": "openai/gpt-oss-20b",
+                            "selected": True,
+                        }
+                    ]
+                }
+            },
+        },
+        actual_cost_evidence={"settlement_source": "provider_returned"},
+    )
+    fake_client = _FakeClient()
+    provider = OpenRouterLlmProvider(
+        openrouter_api_key=SecretStr("test-openrouter-key"),
+        openrouter_chat_provider_factory=lambda api_key: _fake_provider_factory(
+            api_key,
+            [],
+            fake_provider,
+            fake_client,
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="harnyx_commons.llm.providers.openrouter"):
+        response = await provider.invoke(_request(model=OPENROUTER_NATIVE_SUPPORTED_MODELS[0]))
+
+    assert response.raw_text == "ok"
+    assert response.metadata is not None
+    assert response.metadata["actual_cost_evidence"] == {
+        "settlement_source": "provider_returned",
+        "provider_request_id": "resp-1",
+    }
+    assert "OpenRouter router metadata is malformed" in caplog.messages
+
+
 @pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
 async def test_openrouter_provider_serializes_openrouter_request_contract(model: str) -> None:
     captured: dict[str, Any] = {}
@@ -169,6 +246,7 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     async def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["authorization"] = request.headers.get("Authorization")
+        captured["router_metadata"] = request.headers.get("X-OpenRouter-Metadata")
         captured["json"] = json.loads(request.content.decode("utf-8"))
         body = "\n\n".join(
             (
@@ -176,7 +254,9 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
                 (
                     'data: {"id":"resp-1","choices":[{"index":0,"delta":{},'
                     '"finish_reason":"stop"}],'
-                    '"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.0042}}'
+                    '"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cost":0.0042},'
+                    '"openrouter_metadata":{"endpoints":{"available":['
+                    '{"provider":"Cerebras","model":"openai/gpt-oss-20b","selected":true}]}}}'
                 ),
                 "data: [DONE]",
                 "",
@@ -186,7 +266,10 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
 
     client = httpx.AsyncClient(
         base_url=OPENROUTER_BASE_URL,
-        headers={"Authorization": "Bearer test-openrouter-key"},
+        headers={
+            "Authorization": "Bearer test-openrouter-key",
+            "X-OpenRouter-Metadata": "enabled",
+        },
         transport=httpx.MockTransport(handler),
     )
     endpoint = OpenAiCompatibleEndpointConfig.model_validate(
@@ -196,7 +279,11 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
             "auth": {"type": "none"},
         }
     )
-    openai_provider = OpenAiCompatibleLlmProvider(endpoint=endpoint, client=client)
+    openai_provider = OpenAiCompatibleLlmProvider(
+        endpoint=endpoint,
+        client=client,
+        response_metadata_extractor=_openrouter_response_metadata,
+    )
     provider = OpenRouterLlmProvider(
         openrouter_api_key=SecretStr("test-openrouter-key"),
         openrouter_chat_provider_factory=lambda _: (openai_provider, client),
@@ -208,6 +295,7 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     expected_payload_model = OPENROUTER_INTERNAL_TO_NATIVE_MODEL.get(model, model)
     assert captured["url"] == f"{OPENROUTER_BASE_URL}/chat/completions"
     assert captured["authorization"] == "Bearer test-openrouter-key"
+    assert captured["router_metadata"] == "enabled"
     assert captured["json"]["model"] == expected_payload_model
     assert captured["json"]["provider"] == {"only": ["cerebras"]}
     assert response.raw_text == "ok"
@@ -219,6 +307,9 @@ async def test_openrouter_provider_serializes_openrouter_request_contract(model:
     assert response.metadata["actual_cost_provider"] == "openrouter"
     assert response.metadata["actual_cost_usd"] == pytest.approx(0.0042)
     assert response.metadata["actual_cost_evidence"]["settlement_source"] == "provider_returned"
+    assert response.metadata["actual_cost_evidence"]["upstream_provider"] == "Cerebras"
+    assert response.metadata["actual_cost_evidence"]["upstream_model"] == "openai/gpt-oss-20b"
+    assert response.metadata["actual_cost_evidence"]["provider_request_id"] == "resp-1"
 
 
 @pytest.mark.parametrize("model", OPENROUTER_TEST_MODELS)
@@ -423,7 +514,14 @@ async def test_openrouter_embedding_client_posts_embeddings_request() -> None:
             200,
             json={
                 "data": [{"embedding": [0.1, 0.2, 0.3], "index": 0}],
-                "usage": {"prompt_tokens": 5, "total_tokens": 5},
+                "id": "gen-emb-1",
+                "model": "Qwen/Qwen3-Embedding-8B",
+                "usage": {
+                    "prompt_tokens": 5,
+                    "total_tokens": 5,
+                    "cost": 0.00012,
+                    "cost_details": {"upstream_inference_cost": 0.0001},
+                },
             },
         )
 
@@ -450,6 +548,10 @@ async def test_openrouter_embedding_client_posts_embeddings_request() -> None:
     assert response.vectors == ((0.1, 0.2, 0.3),)
     assert response.usage is not None
     assert response.usage.prompt_tokens == 5
+    assert response.usage.cost == pytest.approx(0.00012)
+    assert response.usage.cost_details == {"upstream_inference_cost": 0.0001}
+    assert response.id == "gen-emb-1"
+    assert response.model == "Qwen/Qwen3-Embedding-8B"
 
 
 async def test_openrouter_embedding_client_rejects_unsupported_model() -> None:

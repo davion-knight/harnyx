@@ -38,6 +38,21 @@ class _CapturingEmbeddingProvider:
         return None
 
 
+class _UnavailableCostEmbeddingProvider(_CapturingEmbeddingProvider):
+    async def embed_text(self, request: EmbedTextRequest) -> EmbeddingProviderResult:
+        result = await super().embed_text(request)
+        return EmbeddingProviderResult(
+            response=result.response,
+            actual_cost_usd=None,
+            actual_cost_provider="openrouter",
+            actual_cost_evidence={
+                "settlement_source": "unavailable",
+                "upstream_model": "Qwen/Qwen3-Embedding-8B",
+                "provider_request_id": "gen-emb-unavailable",
+            },
+        )
+
+
 async def test_runtime_invoker_lowers_openrouter_embedding_provider_extra() -> None:
     embedding_provider = _CapturingEmbeddingProvider()
     invoker = RuntimeToolInvoker(
@@ -87,3 +102,32 @@ async def test_runtime_invoker_rejects_chutes_embedding_provider_extra() -> None
                 "provider_extra": {"provider": {"only": ["nebius"]}},
             },
         )
+
+
+async def test_runtime_invoker_preserves_openrouter_embedding_when_cost_is_unavailable() -> None:
+    invoker = RuntimeToolInvoker(
+        InMemoryReceiptLog(),
+        embedding_provider=_UnavailableCostEmbeddingProvider(),
+        embedding_provider_name="openrouter",
+    )
+
+    output = await invoker.invoke(
+        "embed_text",
+        args=(),
+        kwargs={
+            "provider": "openrouter",
+            "model": "qwen/qwen3-embedding-8b",
+            "texts": ["What is Harnyx?"],
+            "input_type": "query",
+        },
+    )
+
+    assert isinstance(output, ToolInvocationOutput)
+    assert output.public_payload["data"] == [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]
+    assert output.actual_cost_usd is None
+    assert output.actual_cost_provider == "openrouter"
+    assert output.actual_cost_evidence == {
+        "settlement_source": "unavailable",
+        "upstream_model": "Qwen/Qwen3-Embedding-8B",
+        "provider_request_id": "gen-emb-unavailable",
+    }
