@@ -172,10 +172,10 @@ def test_similarity_route_runs_validator_owned_judge() -> None:
         SimilarityJudgeRequest(
             batch_id=batch_id,
             candidate_artifact_id=candidate_artifact_id,
-            incumbent_artifact_id=incumbent_artifact_id,
+            reference_artifact_id=incumbent_artifact_id,
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def old(): pass",
+            reference_miner_uid=10,
+            reference_script="def old(): pass",
             candidate_diff="+ def new(): pass",
         )
     ]

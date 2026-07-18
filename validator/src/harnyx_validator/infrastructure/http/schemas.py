@@ -43,10 +43,10 @@ class SimilarityJudgeRequestModel(BaseModel):
         return SimilarityJudgeRequest(
             batch_id=batch_id,
             candidate_artifact_id=UUID(self.candidate_artifact_id),
-            incumbent_artifact_id=UUID(self.incumbent_artifact_id),
+            reference_artifact_id=UUID(self.incumbent_artifact_id),
             candidate_miner_uid=self.candidate_miner_uid,
-            incumbent_miner_uid=self.incumbent_miner_uid,
-            incumbent_script=self.incumbent_script,
+            reference_miner_uid=self.incumbent_miner_uid,
+            reference_script=self.incumbent_script,
             candidate_diff=self.candidate_diff,
         )
 

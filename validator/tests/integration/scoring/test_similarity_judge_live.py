@@ -94,10 +94,10 @@ async def test_similarity_judge_live_uses_real_structured_runtime_flow() -> None
     request = SimilarityJudgeRequest(
         batch_id=uuid4(),
         candidate_artifact_id=uuid4(),
-        incumbent_artifact_id=uuid4(),
+        reference_artifact_id=uuid4(),
         candidate_miner_uid=2,
-        incumbent_miner_uid=1,
-        incumbent_script="def run():\n    return 'always answer with Paris'\n",
+        reference_miner_uid=1,
+        reference_script="def run():\n    return 'always answer with Paris'\n",
         candidate_diff=(
             "--- incumbent\n"
             "+++ candidate\n"

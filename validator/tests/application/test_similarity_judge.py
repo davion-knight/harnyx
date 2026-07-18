@@ -49,6 +49,7 @@ class StubLlmProvider:
                 ),
                 "mechanism_change": "cross-source verification before synthesis",
             },
+            finish_reason="stop",
         )
 
     async def aclose(self) -> None:
@@ -90,6 +91,7 @@ def _similarity_response(
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
     metadata: dict[str, object] | None = None,
+    finish_reason: str = "stop",
 ) -> LlmResponse:
     return LlmResponse(
         id="stub-response",
@@ -115,6 +117,7 @@ def _similarity_response(
             mechanism_change=mechanism_change,
         ),
         metadata=metadata,
+        finish_reason=finish_reason,
     )
 
 
@@ -145,6 +148,7 @@ def _raw_similarity_response(text: str) -> LlmResponse:
             ),
         ),
         usage=LlmUsage(),
+        finish_reason="stop",
     )
 
 
@@ -164,10 +168,10 @@ async def test_similarity_judge_returns_verdict_and_validator_reasoning() -> Non
     request = SimilarityJudgeRequest(
         batch_id=uuid4(),
         candidate_artifact_id=uuid4(),
-        incumbent_artifact_id=uuid4(),
+        reference_artifact_id=uuid4(),
         candidate_miner_uid=20,
-        incumbent_miner_uid=10,
-        incumbent_script="def answer(): return 'old'",
+        reference_miner_uid=10,
+        reference_script="def answer(): return 'old'",
         candidate_diff="+ def answer(): return 'new'",
     )
 
@@ -193,8 +197,8 @@ async def test_similarity_judge_returns_verdict_and_validator_reasoning() -> Non
     assert llm_request.timeout_seconds == 300.0
     assert llm_request.use_case == "miner_task_similarity_judge"
     payload = _similarity_payload(llm_request)
-    assert payload["incumbent"]["script"] == "def answer(): return 'old'"
-    assert payload["candidate"]["diff_against_incumbent"] == "+ def answer(): return 'new'"
+    assert payload["reference"]["script"] == "def answer(): return 'old'"
+    assert payload["candidate"]["diff_against_reference"] == "+ def answer(): return 'new'"
     assert llm_request.output_schema.__name__ == "_SimilarityVerdictModel"
     assert llm_request.postprocessor is not None
 
@@ -210,10 +214,10 @@ async def test_similarity_judge_structured_output_contract_rejects_invalid_shape
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -253,10 +257,10 @@ async def test_similarity_judge_postprocessor_accepts_duplicate_with_reasoning()
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -283,10 +287,10 @@ async def test_similarity_judge_postprocessor_accepts_not_duplicate_with_mechani
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -323,10 +327,31 @@ async def test_similarity_judge_rejects_postprocessed_not_duplicate_without_mech
             SimilarityJudgeRequest(
                 batch_id=uuid4(),
                 candidate_artifact_id=uuid4(),
-                incumbent_artifact_id=uuid4(),
+                reference_artifact_id=uuid4(),
                 candidate_miner_uid=20,
-                incumbent_miner_uid=10,
-                incumbent_script="def answer(): return 'old'",
+                reference_miner_uid=10,
+                reference_script="def answer(): return 'old'",
+                candidate_diff="+ def answer(): return 'new'",
+            )
+        )
+
+
+async def test_similarity_judge_rejects_structured_output_truncated_by_the_provider_cap() -> None:
+    llm = SequenceLlmProvider([_similarity_response(finish_reason="length")])
+    service = SimilarityJudge(
+        llm_provider=llm,
+        config=SimilarityJudgeConfig(provider="chutes", model="google/gemma-4-31B-turbo-TEE"),
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete response.*length"):
+        await service.judge(
+            SimilarityJudgeRequest(
+                batch_id=uuid4(),
+                candidate_artifact_id=uuid4(),
+                reference_artifact_id=uuid4(),
+                candidate_miner_uid=20,
+                reference_miner_uid=10,
+                reference_script="def answer(): return 'old'",
                 candidate_diff="+ def answer(): return 'new'",
             )
         )
@@ -347,10 +372,10 @@ async def test_similarity_judge_keeps_reasoning_effort_on_request_without_typed_
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -391,10 +416,10 @@ async def test_similarity_judge_tries_next_candidate_after_true_retry_exhaustion
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -458,10 +483,10 @@ async def test_similarity_judge_counts_exhausted_primary_usage_before_fallback_s
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -525,10 +550,10 @@ async def test_similarity_judge_preserves_retry_tokens_when_actual_cost_total_un
         SimilarityJudgeRequest(
             batch_id=uuid4(),
             candidate_artifact_id=uuid4(),
-            incumbent_artifact_id=uuid4(),
+            reference_artifact_id=uuid4(),
             candidate_miner_uid=20,
-            incumbent_miner_uid=10,
-            incumbent_script="def answer(): return 'old'",
+            reference_miner_uid=10,
+            reference_script="def answer(): return 'old'",
             candidate_diff="+ def answer(): return 'new'",
         )
     )
@@ -573,10 +598,10 @@ async def test_similarity_judge_carries_failed_usage_when_final_fallback_has_no_
             SimilarityJudgeRequest(
                 batch_id=uuid4(),
                 candidate_artifact_id=uuid4(),
-                incumbent_artifact_id=uuid4(),
+                reference_artifact_id=uuid4(),
                 candidate_miner_uid=20,
-                incumbent_miner_uid=10,
-                incumbent_script="def answer(): return 'old'",
+                reference_miner_uid=10,
+                reference_script="def answer(): return 'old'",
                 candidate_diff="+ def answer(): return 'new'",
             )
         )
@@ -606,10 +631,10 @@ async def test_similarity_judge_does_not_advance_after_non_retryable_failure() -
             SimilarityJudgeRequest(
                 batch_id=uuid4(),
                 candidate_artifact_id=uuid4(),
-                incumbent_artifact_id=uuid4(),
+                reference_artifact_id=uuid4(),
                 candidate_miner_uid=20,
-                incumbent_miner_uid=10,
-                incumbent_script="def answer(): return 'old'",
+                reference_miner_uid=10,
+                reference_script="def answer(): return 'old'",
                 candidate_diff="+ def answer(): return 'new'",
             )
         )

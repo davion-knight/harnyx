@@ -17,10 +17,10 @@ SimilarityVoteStatus = Literal["responded", "disqualified"]
 class SimilarityJudgeRequest:
     batch_id: UUID
     candidate_artifact_id: UUID
-    incumbent_artifact_id: UUID
+    reference_artifact_id: UUID
     candidate_miner_uid: int
-    incumbent_miner_uid: int
-    incumbent_script: str
+    reference_miner_uid: int
+    reference_script: str
     candidate_diff: str
 
 
