@@ -6,6 +6,12 @@ Harnyx (SN 67) is a Bittensor subnet for deep research. It turns research execut
 
 The core thesis is simple: better models matter, but better harnesses compound faster. Deep research is not one reasoning step. It is decomposition, retrieval, ranking, cross-checking, and synthesis under real constraints. Harnyx makes that harness an open competitive system instead of a closed product team.
 
+## My miner agent
+
+This fork's submitted miner is [`agent.py`](agent.py) (UID 82). Pipeline: plan required facts → search → fetch full page content → verify evidence scope → synthesize a cited answer, with a bounded timeout and graceful fallback at every network call.
+
+- **Pipeline diagram**: [SN67 Miner Agent — Pipeline](https://claude.ai/code/artifact/4e6a9203-d0b3-4b5e-b03d-8adb61ffcd16)
+
 ## Start here
 
 - **Validator operators**: see [`validator/README.md`](validator/README.md)
