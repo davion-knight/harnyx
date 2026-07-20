@@ -11,11 +11,13 @@ from harnyx_miner_sdk.query import CitationRef, Query, Response
 
 CHUTES_MODEL = "deepseek-ai/DeepSeek-V3.2-TEE"
 SEARCH_PROVIDER = "desearch"
-RESULTS_PER_QUERY = 5
+RESULTS_PER_QUERY = 3
+MAX_EVIDENCE_PER_SEARCH = 15
 MAX_EVIDENCE_ITEMS = 12
 MAX_FOLLOW_UP_QUERIES = 3
 MAX_PAGE_CONTENT_CHARS = 3000
 LLM_TIMEOUT_SECONDS = 35.0
+SYNTHESIZE_TIMEOUT_SECONDS = 60.0
 SEARCH_TIMEOUT_SECONDS = 25.0
 FETCH_TIMEOUT_SECONDS = 20.0
 
@@ -28,6 +30,7 @@ class Evidence:
     url: str
     title: str | None
     snippet: str | None
+    has_source_note: bool
 
 
 @entrypoint("query")
@@ -72,7 +75,7 @@ async def query(query: Query) -> Response:
     citations = [
         CitationRef(receipt_id=item.receipt_id, result_id=item.result_id)
         for item in evidence
-        if item.index in used_indices and item.snippet
+        if item.index in used_indices and item.has_source_note
     ]
     return Response(text=answer, citations=citations or None)
 
@@ -123,26 +126,54 @@ async def _plan(query_text: str) -> dict[str, list[str]]:
 
 
 async def _search(search_queries: Sequence[str], *, start_index: int) -> list[Evidence]:
-    response = await search_web(
-        tuple(search_queries),
-        provider=SEARCH_PROVIDER,
-        num=RESULTS_PER_QUERY,
-        timeout=SEARCH_TIMEOUT_SECONDS,
-    )
-    evidence: list[Evidence] = []
-    for offset, result in enumerate(response.results):
-        if result.url is None:
-            continue
-        evidence.append(
-            Evidence(
-                index=start_index + offset,
-                receipt_id=response.receipt_id,
-                result_id=result.result_id,
-                url=result.url,
-                title=result.title,
-                snippet=result.note,
+    """Run each planned query as its own search, not OR'd into one shared call.
+
+    A single search_web call with multiple queries ORs them together and
+    splits one result budget across all of them -- diluting evidence for
+    whichever facts happen to share the call with the most queries. Querying
+    each fact separately (concurrently) gives every fact its own results.
+    """
+
+    async def _search_one(search_query: str):
+        try:
+            return await search_web(
+                (search_query,),
+                provider=SEARCH_PROVIDER,
+                num=RESULTS_PER_QUERY,
+                timeout=SEARCH_TIMEOUT_SECONDS,
             )
-        )
+        except Exception:
+            return None
+
+    responses = await asyncio.gather(*(_search_one(q) for q in search_queries))
+
+    evidence: list[Evidence] = []
+    seen_urls: set[str] = set()
+    index = start_index
+    for response in responses:
+        if response is None:
+            continue
+        for result in response.results:
+            if result.url is None or result.url in seen_urls:
+                continue
+            seen_urls.add(result.url)
+            evidence.append(
+                Evidence(
+                    index=index,
+                    receipt_id=response.receipt_id,
+                    result_id=result.result_id,
+                    url=result.url,
+                    title=result.title,
+                    snippet=result.note,
+                    has_source_note=bool(result.note),
+                )
+            )
+            index += 1
+            if len(evidence) >= MAX_EVIDENCE_PER_SEARCH:
+                break
+        if len(evidence) >= MAX_EVIDENCE_PER_SEARCH:
+            break
+
     if not evidence:
         raise RuntimeError("search_web returned no usable evidence")
     return await _fetch_pages(evidence)
@@ -253,19 +284,29 @@ async def _synthesize(
             "role": "system",
             "content": (
                 "You write the final answer using only the numbered evidence provided. "
-                "Synthesize the evidence into a direct answer -- never paste retrieved "
-                "text or navigation content verbatim. Cite evidence with bracketed "
-                "indices like [1]. Do not invent facts absent from the evidence. If the "
-                "question rests on a false premise, correct it explicitly instead of "
-                "answering the premise as asked. Answer as fully as the evidence "
-                "supports -- do not refuse the entire question over one unverified detail."
+                "Structure the answer as:\n"
+                "1. The direct answer, stated first.\n"
+                "2. Included-entity proof: for each item in your answer, cite the specific "
+                "evidence showing it satisfies every criterion the question requires "
+                "(entity, date, scope, threshold) -- not just that it's topically related.\n"
+                "3. Completeness proof: when the question implies a filtered candidate pool "
+                "(e.g. 'which X have property Y'), name the closest near-miss candidates from "
+                "the evidence and cite the specific criterion each one fails, so the answer is "
+                "demonstrably exhaustive rather than a partial guess.\n"
+                "Never paste retrieved text or navigation content verbatim -- synthesize it. "
+                "Cite evidence with bracketed indices like [1]. Do not invent facts absent "
+                "from the evidence. If the question rests on a false premise, correct it "
+                "explicitly instead of answering the premise as asked. Answer as fully as "
+                "the evidence supports -- do not refuse the entire question over one "
+                "unverified detail."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"Question: {query_text}\n\nEvidence:\n{evidence_block}{missing_note}\n\n"
-                "Write a compact, direct answer with bracketed citations."
+                "Write the answer with included-entity proof and completeness proof, "
+                "using bracketed citations."
             ),
         },
     ]
@@ -274,7 +315,7 @@ async def _synthesize(
         model=CHUTES_MODEL,
         messages=messages,
         temperature=0.2,
-        timeout=LLM_TIMEOUT_SECONDS,
+        timeout=SYNTHESIZE_TIMEOUT_SECONDS,
     )
     text = result.llm.raw_text
     if not text:
