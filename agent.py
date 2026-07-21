@@ -116,7 +116,9 @@ async def _plan(query_text: str) -> dict[str, list[str]]:
         # instead of crashing the whole task.
         data = {}
 
-    required_facts = [str(f).strip() for f in data.get("required_facts") or [] if str(f).strip()]
+    required_facts = _dedupe_case_insensitive(
+        str(f).strip() for f in data.get("required_facts") or [] if str(f).strip()
+    )
     search_queries = [str(q).strip() for q in data.get("search_queries") or [] if str(q).strip()]
     if not required_facts:
         required_facts = [query_text]
@@ -249,7 +251,14 @@ async def _admit_evidence(
         # already found rather than crashing -- synthesis still runs the
         # false-premise/no-guessing rules over it.
         return []
-    return [str(f).strip() for f in data.get("missing_facts") or [] if str(f).strip()]
+    reported = _dedupe_case_insensitive(
+        str(f).strip() for f in data.get("missing_facts") or [] if str(f).strip()
+    )
+    # Only count facts that are actually in the required list -- a duplicated
+    # or hallucinated entry here would otherwise skew the missing/required
+    # ratio that decides whether to answer fully or refuse.
+    required_lower = {fact.lower() for fact in required_facts}
+    return [fact for fact in reported if fact.lower() in required_lower]
 
 
 async def _synthesize(
@@ -332,6 +341,18 @@ def _format_evidence(evidence: Sequence[Evidence]) -> str:
         f"[{item.index}] {item.title or item.url} — {item.snippet or 'no snippet'} ({item.url})"
         for item in evidence
     )
+
+
+def _dedupe_case_insensitive(items) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _parse_json(raw: str | None) -> dict:
